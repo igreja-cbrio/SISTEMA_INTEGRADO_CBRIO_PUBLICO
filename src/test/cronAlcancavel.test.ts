@@ -35,7 +35,11 @@ const ler = (p: string) => semComentarios(readFileSync(raiz(p), 'utf-8'));
 
 type Cron = { path: string; schedule: string };
 const VERCEL = JSON.parse(readFileSync(raiz('vercel.json'), 'utf-8')) as { crons?: Cron[] };
-const CRONS: Cron[] = VERCEL.crons || [];
+const CRONS: Cron[] = JSON.parse(readFileSync(raiz('src/test/fixtures/crons-contrato.json'), 'utf-8')).crons;
+
+it('a cópia pública não agenda crons de produção', () => {
+  expect(VERCEL.crons || []).toEqual([]);
+});
 
 
 
@@ -71,7 +75,7 @@ function resolveRota(caminho: string) {
   return { arquivo: dono.arquivo, resto: semQuery.slice(dono.prefixo.length) || '/' };
 }
 
-describe('vercel.json · crons declarados', () => {
+describe('contrato das rotas de cron', () => {
   it('existe pelo menos um cron e todos têm path e schedule', () => {
     expect(CRONS.length).toBeGreaterThan(10);
     for (const c of CRONS) {
@@ -120,7 +124,7 @@ describe('cron atrás de authenticate · a liberação existe e é explícita', 
     expect(CRONS_ATRAS_DE_AUTH.length).toBeGreaterThan(0);
   });
 
-  it('todo cron do vercel.json tem um arquivo de rota que o atende', () => {
+  it('todo cron do contrato tem um arquivo de rota que o atende', () => {
 
     for (const c of CRONS) {
       if (noServerDireto(c.path)) continue;
