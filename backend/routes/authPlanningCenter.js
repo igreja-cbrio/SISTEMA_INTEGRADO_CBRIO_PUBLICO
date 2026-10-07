@@ -1,0 +1,295 @@
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+const router = require('express').Router();
+const crypto = require('crypto');
+const { supabase } = require('../utils/supabase');
+const { safeEqual } = require('../utils/cronAuth');
+
+
+
+
+
+const STATE_COOKIE = 'pc_oauth_state';
+const STATE_PATH = '/api/auth/planning-center';
+function setStateCookie(res, state) {
+  res.cookie(STATE_COOKIE, state, {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === 'production',
+    sameSite: 'lax',
+    maxAge: 10 * 60 * 1000,
+    path: STATE_PATH,
+  });
+}
+function readCookie(req, name) {
+  const raw = req.headers.cookie || '';
+  for (const part of raw.split(';')) {
+    const idx = part.indexOf('=');
+    if (idx === -1) continue;
+    if (part.slice(0, idx).trim() === name) return decodeURIComponent(part.slice(idx + 1).trim());
+  }
+  return null;
+}
+
+function getOAuthCredentials() {
+  const clientId = (process.env.PC_OAUTH_CLIENT_ID || process.env.PLANNING_CENTER_APP_ID || '').trim();
+  const clientSecret = (process.env.PC_OAUTH_CLIENT_SECRET || process.env.PLANNING_CENTER_SECRET || '').trim();
+  return { clientId, clientSecret };
+}
+
+function getFrontendUrl() {
+  if (process.env.FRONTEND_URL) return process.env.FRONTEND_URL.replace(/\/+$/, '');
+  if (process.env.VERCEL_URL) return `https://${process.env.VERCEL_URL}`;
+  return 'http://localhost:5173';
+}
+
+
+
+router.get('/login', (req, res) => {
+  const { clientId } = getOAuthCredentials();
+  if (!clientId) {
+    return res.status(500).json({ error: 'Planning Center OAuth not configured (PC_OAUTH_CLIENT_ID)' });
+  }
+
+  const frontendUrl = getFrontendUrl();
+  const callbackUrl = `${frontendUrl}/api/auth/planning-center/callback`;
+  const authorizeUrl = new URL('https://api.planningcenteronline.com/oauth/authorize');
+  authorizeUrl.searchParams.set('client_id', clientId);
+  authorizeUrl.searchParams.set('redirect_uri', callbackUrl);
+  authorizeUrl.searchParams.set('response_type', 'code');
+  authorizeUrl.searchParams.set('scope', 'people');
+
+
+  const state = crypto.randomBytes(24).toString('base64url');
+  setStateCookie(res, state);
+  authorizeUrl.searchParams.set('state', state);
+
+  res.redirect(authorizeUrl.toString());
+});
+
+
+
+
+router.get('/debug', (req, res) => {
+  const rawClientId = process.env.PC_OAUTH_CLIENT_ID || process.env.PLANNING_CENTER_APP_ID || '';
+  const rawClientSecret = process.env.PC_OAUTH_CLIENT_SECRET || process.env.PLANNING_CENTER_SECRET || '';
+  const frontendUrl = getFrontendUrl();
+
+  const mask = (v) => v ? `${v.slice(0, 6)}...${v.slice(-4)} (len=${v.length})` : '(missing)';
+  const hasWhitespace = (v) => /\s/.test(v) ? 'YES — contains whitespace/newline!' : 'no';
+
+  res.json({
+    client_id_fingerprint: mask(rawClientId),
+    client_id_has_whitespace: hasWhitespace(rawClientId),
+    client_secret_fingerprint: mask(rawClientSecret),
+    client_secret_has_whitespace: hasWhitespace(rawClientSecret),
+    frontend_url: frontendUrl,
+    callback_url: `${frontendUrl}/api/auth/planning-center/callback`,
+    source: {
+      client_id_var: process.env.PC_OAUTH_CLIENT_ID ? 'PC_OAUTH_CLIENT_ID' : (process.env.PLANNING_CENTER_APP_ID ? 'PLANNING_CENTER_APP_ID' : 'none'),
+      client_secret_var: process.env.PC_OAUTH_CLIENT_SECRET ? 'PC_OAUTH_CLIENT_SECRET' : (process.env.PLANNING_CENTER_SECRET ? 'PLANNING_CENTER_SECRET' : 'none'),
+    },
+    hint: 'Compare client_id_fingerprint com o UID exato do OAuth App em https://api.planningcenteronline.com/oauth/applications. Verifique client_id_has_whitespace=no. callback_url deve estar cadastrado nos Redirect URIs do app.',
+  });
+});
+
+
+
+router.get('/callback', async (req, res) => {
+  const frontendUrl = getFrontendUrl();
+  const { code, state, error: oauthError } = req.query;
+
+
+  const cookieState = readCookie(req, STATE_COOKIE);
+  res.clearCookie(STATE_COOKIE, { path: STATE_PATH });
+
+  if (oauthError || !code) {
+    console.error('[PC OAuth] Error or no code:', oauthError);
+    return res.redirect(`${frontendUrl}/login?error=pc_oauth_denied`);
+  }
+
+  if (!state || !cookieState || !safeEqual(String(state), cookieState)) {
+    console.warn('[PC OAuth] state invalido/ausente · possivel CSRF');
+    return res.redirect(`${frontendUrl}/login?error=pc_state_invalid`);
+  }
+
+  try {
+    const { clientId, clientSecret } = getOAuthCredentials();
+    if (!clientId || !clientSecret) throw new Error('PC OAuth credentials not configured');
+
+    const callbackUrl = `${frontendUrl}/api/auth/planning-center/callback`;
+
+
+
+
+    const basicAuth = Buffer.from(`${clientId}:${clientSecret}`).toString('base64');
+    const tokenBody = new URLSearchParams({
+      grant_type: 'authorization_code',
+      code,
+      redirect_uri: callbackUrl,
+    });
+
+    const tokenRes = await fetch('https://api.planningcenteronline.com/oauth/token', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        Authorization: `Basic ${basicAuth}`,
+        Accept: 'application/json',
+      },
+      body: tokenBody.toString(),
+    });
+
+    if (!tokenRes.ok) {
+      const body = await tokenRes.text();
+      console.error('[PC OAuth] Token exchange failed:', tokenRes.status, body);
+      throw new Error(`Failed to exchange authorization code (${tokenRes.status})`);
+    }
+
+    const tokenData = await tokenRes.json();
+    const accessToken = tokenData.access_token;
+
+
+    const meRes = await fetch('https://api.planningcenteronline.com/people/v2/me', {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+    if (!meRes.ok) throw new Error('Failed to fetch Planning Center user info');
+
+    const meData = await meRes.json();
+    const pcUser = meData.data;
+    const pcId = pcUser.id;
+    const firstName = pcUser.attributes.first_name || '';
+    const lastName = pcUser.attributes.last_name || '';
+    const fullName = `${firstName} ${lastName}`.trim() || 'Voluntario';
+    const avatar = pcUser.attributes.avatar || null;
+
+
+    const emailsRes = await fetch(
+      `https://api.planningcenteronline.com/people/v2/people/${pcId}/emails`,
+      { headers: { Authorization: `Bearer ${accessToken}` } }
+    );
+
+    let email = null;
+    if (emailsRes.ok) {
+      const emailsData = await emailsRes.json();
+      const primaryEmail = emailsData.data?.find(e => e.attributes.primary) || emailsData.data?.[0];
+      email = primaryEmail?.attributes?.address;
+    }
+
+    if (!email) {
+      console.error('[PC OAuth] No email found for PC user:', pcId);
+      return res.redirect(`${frontendUrl}/login?error=pc_no_email`);
+    }
+
+    email = email.toLowerCase().trim();
+
+
+    let supaUserId = null;
+
+
+    const { data: existingProfile } = await supabase
+      .from('profiles')
+      .select('id, role')
+      .eq('email', email)
+      .maybeSingle();
+
+    if (existingProfile) {
+      supaUserId = existingProfile.id;
+
+      await supabase.from('profiles').update({
+        avatar_url: avatar || undefined,
+        updated_at: new Date().toISOString(),
+      }).eq('id', supaUserId);
+    } else {
+
+      const { data: created, error: createErr } = await supabase.auth.admin.createUser({
+        email,
+        email_confirm: true,
+        user_metadata: {
+          name: fullName,
+          planning_center_id: pcId,
+          avatar_url: avatar,
+        },
+      });
+
+      if (createErr) {
+
+        console.error('[PC OAuth] Create user error:', createErr.message);
+
+        const { data: listData } = await supabase.auth.admin.listUsers({ page: 1, perPage: 1 });
+
+        const { data: authUser } = await supabase.auth.admin.getUserById(existingProfile?.id || '');
+        if (authUser?.user) {
+          supaUserId = authUser.user.id;
+        } else {
+          throw new Error(`Failed to create/find user: ${createErr.message}`);
+        }
+      } else {
+        supaUserId = created.user.id;
+      }
+
+
+      await supabase.from('profiles').upsert({
+        id: supaUserId,
+        email,
+        name: fullName,
+        role: 'voluntario',
+        avatar_url: avatar,
+        active: true,
+        updated_at: new Date().toISOString(),
+      });
+    }
+
+
+
+
+    await supabase.from('vol_profiles')
+      .update({ auth_user_id: supaUserId })
+      .eq('planning_center_id', pcId)
+      .is('auth_user_id', null);
+
+
+    const { data: linkData, error: linkErr } = await supabase.auth.admin.generateLink({
+      type: 'magiclink',
+      email,
+      options: {
+        redirectTo: `${frontendUrl}/voluntariado/checkin`,
+      },
+    });
+
+    if (linkErr) {
+      console.error('[PC OAuth] Generate link error:', linkErr.message);
+      throw linkErr;
+    }
+
+    const tokenHash = linkData.properties.hashed_token;
+
+
+    const redirectUrl = new URL(`${frontendUrl}/auth/pc-callback`);
+    redirectUrl.searchParams.set('token_hash', tokenHash);
+    redirectUrl.searchParams.set('type', 'magiclink');
+
+    console.log(`[PC OAuth] Login successful for ${email} (PC: ${pcId})`);
+    res.redirect(redirectUrl.toString());
+  } catch (err) {
+    console.error('[PC OAuth] Callback error:', err.message);
+    res.redirect(`${frontendUrl}/login?error=pc_oauth_failed`);
+  }
+});
+
+module.exports = router;

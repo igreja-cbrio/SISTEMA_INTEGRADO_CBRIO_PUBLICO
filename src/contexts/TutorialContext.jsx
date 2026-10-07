@@ -1,0 +1,306 @@
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
+import { useLocation } from 'react-router-dom';
+import { Joyride, STATUS } from 'react-joyride';
+import { tutorial as tutorialApi } from '../api';
+import { useAuth } from './AuthContext';
+import { findTourForRoute, getTourById, TUTORIALS } from '../data/tutorials';
+
+const TutorialContext = createContext(null);
+
+const JOYRIDE_STYLES = {
+  options: {
+    primaryColor: '#00B39D',
+    zIndex: 10000,
+    arrowColor: 'var(--cbrio-card)',
+    backgroundColor: 'var(--cbrio-card)',
+    textColor: 'var(--cbrio-text)',
+    overlayColor: 'rgba(0,0,0,0.55)',
+  },
+  tooltip: {
+    borderRadius: 12,
+    padding: 16,
+  },
+  tooltipTitle: {
+    fontSize: 16,
+    fontWeight: 600,
+    marginBottom: 6,
+  },
+  tooltipContent: {
+    fontSize: 14,
+    lineHeight: 1.5,
+    padding: '6px 0',
+  },
+  buttonNext: {
+    background: '#00B39D',
+    color: '#fff',
+    borderRadius: 8,
+    fontSize: 13,
+    padding: '8px 16px',
+    fontWeight: 600,
+  },
+  buttonBack: {
+    color: 'var(--cbrio-text2)',
+    fontSize: 13,
+    marginRight: 8,
+  },
+  buttonSkip: {
+    color: 'var(--cbrio-text3)',
+    fontSize: 12,
+  },
+  buttonClose: {
+    display: 'none',
+  },
+};
+
+const JOYRIDE_LOCALE = {
+  back: 'Voltar',
+  close: 'Fechar',
+  last: 'Concluir',
+  next: 'Próximo',
+  skip: 'Pular tutorial',
+  open: 'Abrir',
+};
+
+
+
+const lsKey = (uid) => `cbrio_tutorial_seen_${uid || 'anon'}`;
+function lsSeen(uid) {
+  try { return new Set(JSON.parse(localStorage.getItem(lsKey(uid)) || '[]')); } catch { return new Set(); }
+}
+function lsAdd(uid, id) {
+  try { const s = lsSeen(uid); s.add(id); localStorage.setItem(lsKey(uid), JSON.stringify([...s])); } catch {              }
+}
+function lsDel(uid, id) {
+  try { const s = lsSeen(uid); s.delete(id); localStorage.setItem(lsKey(uid), JSON.stringify([...s])); } catch {              }
+}
+function lsClear(uid) {
+  try { localStorage.removeItem(lsKey(uid)); } catch {              }
+}
+
+export function TutorialProvider({ children }) {
+  const auth = useAuth();
+  const location = useLocation();
+
+  const [completedTours, setCompletedTours] = useState(null);
+  const [activeTour, setActiveTour] = useState(null);
+  const [runJoyride, setRunJoyride] = useState(false);
+  const startTimeoutRef = useRef(null);
+
+
+  useEffect(() => {
+    if (!auth.user?.id) {
+      setCompletedTours(null);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const data = await tutorialApi.progress();
+        if (cancelled) return;
+
+
+        const ids = (data || []).map((r) => r.tour_id);
+        setCompletedTours(new Set([...ids, ...lsSeen(auth.user.id)]));
+      } catch (e) {
+        if (cancelled) return;
+
+
+
+        console.warn('[Tutorial] Falha ao carregar:', e?.message);
+        setCompletedTours(null);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [auth.user?.id]);
+
+
+  useEffect(() => {
+    if (!auth.user || auth.loading) return;
+    if (completedTours === null) return;
+    if (activeTour) return;
+
+
+
+
+    const prov = auth.user?.app_metadata?.provider;
+    const senhaPendente = auth.profile && !auth.profile.password_changed_at && (!prov || prov === 'email');
+    let senhaDispensada = false;
+    try { senhaDispensada = sessionStorage.getItem('cbrio_primeiro_acesso_dismissed') === '1'; } catch {              }
+    if (senhaPendente && !senhaDispensada) return;
+
+    const tour = findTourForRoute(location.pathname, auth);
+    if (!tour) return;
+    if (completedTours.has(tour.id)) return;
+
+
+
+
+
+    if (tour.id !== 'welcome' && !completedTours.has('welcome')) return;
+
+
+    const delay = tour.delay || 800;
+    startTimeoutRef.current = setTimeout(() => {
+      setActiveTour(tour);
+      setRunJoyride(true);
+    }, delay);
+
+    return () => {
+      if (startTimeoutRef.current) {
+        clearTimeout(startTimeoutRef.current);
+        startTimeoutRef.current = null;
+      }
+    };
+  }, [location.pathname, auth, completedTours, activeTour]);
+
+
+  const markTourComplete = useCallback(async (tourId, status = 'completed') => {
+    if (!auth.user?.id) return;
+
+
+    lsAdd(auth.user.id, tourId);
+    setCompletedTours((prev) => {
+      const next = new Set(prev || []);
+      next.add(tourId);
+      return next;
+    });
+    try {
+      await tutorialApi.complete(tourId, status);
+    } catch (e) {
+      console.warn('[Tutorial] Falha ao salvar:', e?.message);
+    }
+  }, [auth.user?.id]);
+
+  const handleJoyrideCallback = useCallback((data) => {
+    const { status, type } = data;
+
+
+
+
+    if (type === 'tour:start' && activeTour?.id) {
+      markTourComplete(activeTour.id, 'completed');
+    }
+
+    if (status === STATUS.FINISHED || status === STATUS.SKIPPED) {
+      const tourId = activeTour?.id;
+      const finalStatus = status === STATUS.SKIPPED ? 'skipped' : 'completed';
+      setRunJoyride(false);
+      setActiveTour(null);
+      if (tourId) markTourComplete(tourId, finalStatus);
+    }
+  }, [activeTour, markTourComplete]);
+
+
+  useEffect(() => {
+    if (!runJoyride || !activeTour) return;
+    const handler = (e) => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        const tourId = activeTour.id;
+        setRunJoyride(false);
+        setActiveTour(null);
+        markTourComplete(tourId, 'skipped');
+      }
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [runJoyride, activeTour, markTourComplete]);
+
+
+
+
+  const restartTour = useCallback(async (tourId) => {
+    if (!auth.user?.id) return;
+    const tour = getTourById(tourId);
+    if (!tour) return;
+    lsDel(auth.user.id, tourId);
+    setCompletedTours((prev) => {
+      const next = new Set(prev || []);
+      next.delete(tourId);
+      return next;
+    });
+    try {
+      await tutorialApi.reset(tourId);
+    } catch (e) {
+      console.warn('[Tutorial] Falha ao resetar:', e?.message);
+    }
+
+
+    const tourRoute = typeof tour.route === 'string' ? tour.route : null;
+    if (!tourRoute || tourRoute === location.pathname) {
+      setActiveTour(tour);
+      setRunJoyride(true);
+    }
+  }, [auth.user?.id, location.pathname]);
+
+  const resetAllTours = useCallback(async () => {
+    if (!auth.user?.id) return;
+    lsClear(auth.user.id);
+    setCompletedTours(new Set());
+    try {
+      await tutorialApi.reset();
+    } catch (e) {
+      console.warn('[Tutorial] Falha ao resetar tudo:', e?.message);
+    }
+  }, [auth.user?.id]);
+
+
+
+
+  const startTour = useCallback((tourId) => {
+    if (activeTour) return;
+    const tour = getTourById(tourId);
+    if (!tour) return;
+    if ((completedTours || new Set()).has(tourId)) return;
+    setActiveTour(tour);
+    setRunJoyride(true);
+  }, [activeTour, completedTours]);
+
+  const value = useMemo(() => ({
+    activeTour,
+    isRunning: runJoyride,
+    completedTours: completedTours || new Set(),
+    startTour,
+    restartTour,
+    resetAllTours,
+    allTours: TUTORIALS,
+  }), [activeTour, runJoyride, completedTours, startTour, restartTour, resetAllTours]);
+
+  return (
+    <TutorialContext.Provider value={value}>
+      {children}
+      {activeTour && (
+        <Joyride
+          key={activeTour.id}
+          steps={activeTour.steps}
+          run={runJoyride}
+          continuous
+          showProgress
+          showSkipButton
+          scrollToFirstStep
+          disableScrolling={false}
+          disableOverlayClose
+          locale={JOYRIDE_LOCALE}
+          styles={JOYRIDE_STYLES}
+          callback={handleJoyrideCallback}
+        />
+      )}
+    </TutorialContext.Provider>
+  );
+}
+
+export function useTutorial() {
+  const ctx = useContext(TutorialContext);
+  if (!ctx) {
+    return {
+      activeTour: null,
+      isRunning: false,
+      completedTours: new Set(),
+      startTour: () => {},
+      restartTour: async () => {},
+      resetAllTours: async () => {},
+      allTours: [],
+    };
+  }
+  return ctx;
+}

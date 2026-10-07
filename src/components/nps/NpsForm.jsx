@@ -1,0 +1,172 @@
+import { useState } from 'react';
+import { Loader2, Send } from 'lucide-react';
+
+const C = {
+  text: 'var(--cbrio-text)', t2: 'var(--cbrio-text2)', t3: 'var(--cbrio-text3)',
+  border: 'var(--cbrio-border)', inputBg: 'var(--cbrio-input-bg)',
+  cyan: '#06b6d4', red: '#ef4444', amber: '#f59e0b', green: '#10b981',
+};
+
+const inp = {
+  width: '100%', padding: '10px 12px', borderRadius: 8,
+  border: `1px solid ${C.border}`, background: C.inputBg,
+  color: C.text, fontSize: 14, boxSizing: 'border-box', fontFamily: 'inherit',
+};
+
+function corDoScore(n, max = 10) {
+  const p = max ? (n / max) * 10 : n;
+  if (p <= 6) return C.red;
+  if (p <= 8) return C.amber;
+  return C.green;
+}
+
+
+
+
+
+
+
+export default function NpsForm({ pesquisa, onSubmit, enviando, extraHeader }) {
+  const [score, setScore] = useState(null);
+  const [respostas, setRespostas] = useState({});
+
+  const perguntasExtras = pesquisa?.perguntas?.perguntas_extras || [];
+  const perguntaNps = pesquisa?.perguntas?.pergunta_nps || { texto: 'De 0 a 10, como você avalia?' };
+  const maxNota = Number(perguntaNps.max) || 10;
+
+  function setRespostaPergunta(pid, valor) {
+    setRespostas(prev => ({ ...prev, [pid]: valor }));
+  }
+
+  function handleSubmit(e) {
+    e.preventDefault();
+    if (score === null) {
+      alert(`Selecione uma nota de 0 a ${maxNota}.`);
+      return;
+    }
+
+    const perguntaMotivo = perguntasExtras.find(p => p.id?.includes('motivo')) || perguntasExtras.find(p => p.tipo === 'texto_longo');
+    const comentario = perguntaMotivo ? (respostas[perguntaMotivo.id] || null) : null;
+    onSubmit({ score, respostas, comentario });
+  }
+
+  return (
+    <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+      {extraHeader}
+
+      <div>
+        <label style={{ display: 'block', fontSize: 13, fontWeight: 600, color: C.text, marginBottom: 12 }}>
+          {perguntaNps.texto}
+        </label>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+          {Array.from({ length: maxNota + 1 }).map((_, n) => (
+            <button key={n} type="button" onClick={() => setScore(n)}
+              style={{
+                width: 44, height: 44, borderRadius: 10, fontSize: 15, fontWeight: 700, cursor: 'pointer',
+                border: `2px solid ${score === n ? corDoScore(n, maxNota) : C.border}`,
+                background: score === n ? corDoScore(n, maxNota) : 'transparent',
+                color: score === n ? '#fff' : C.t2,
+                transition: 'all .12s',
+              }}>
+              {n}
+            </button>
+          ))}
+        </div>
+        <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 6, fontSize: 10, color: C.t3 }}>
+          <span>Muito ruim</span>
+          <span>Muito bom</span>
+        </div>
+      </div>
+
+      {perguntasExtras.map(p => {
+
+        if (p.tipo === 'secao') {
+          return (
+            <div key={p.id} style={{ borderTop: `1px solid ${C.border}`, paddingTop: 16, marginTop: 2 }}>
+              <h3 style={{ margin: 0, fontSize: 15, fontWeight: 800, color: C.text }}>{p.texto}</h3>
+              {p.descricao && <p style={{ margin: '4px 0 0', fontSize: 12, color: C.t3, lineHeight: 1.45 }}>{p.descricao}</p>}
+            </div>
+          );
+        }
+        const arr = Array.isArray(respostas[p.id]) ? respostas[p.id] : [];
+        return (
+          <div key={p.id}>
+            <label style={{ display: 'block', fontSize: 13, fontWeight: 600, color: C.text, marginBottom: 8 }}>
+              {p.texto}
+            </label>
+            {p.tipo === 'texto_longo' && (
+              <textarea rows={3} value={respostas[p.id] || ''}
+                onChange={e => setRespostaPergunta(p.id, e.target.value)}
+                placeholder="Sua resposta..." style={{ ...inp, resize: 'vertical', minHeight: 70 }} />
+            )}
+            {p.tipo === 'texto_curto' && (
+              <input value={respostas[p.id] || ''}
+                onChange={e => setRespostaPergunta(p.id, e.target.value)}
+                placeholder="Sua resposta..." style={inp} />
+            )}
+            {p.tipo === 'escala_5' && (
+              <div style={{ display: 'flex', gap: 6 }}>
+                {[1, 2, 3, 4, 5].map(n => (
+                  <button key={n} type="button" onClick={() => setRespostaPergunta(p.id, n)}
+                    style={{
+                      width: 44, height: 44, borderRadius: 8, fontSize: 14, fontWeight: 700, cursor: 'pointer',
+                      border: `2px solid ${respostas[p.id] === n ? C.cyan : C.border}`,
+                      background: respostas[p.id] === n ? C.cyan : 'transparent',
+                      color: respostas[p.id] === n ? '#fff' : C.t2,
+                    }}>{n}</button>
+                ))}
+              </div>
+            )}
+            {p.tipo === 'sim_nao' && (
+              <div style={{ display: 'flex', gap: 8 }}>
+                {['Sim', 'Não'].map(op => (
+                  <button key={op} type="button" onClick={() => setRespostaPergunta(p.id, op)}
+                    style={{
+                      padding: '10px 22px', borderRadius: 8, fontSize: 14, fontWeight: 700, cursor: 'pointer',
+                      border: `2px solid ${respostas[p.id] === op ? C.cyan : C.border}`,
+                      background: respostas[p.id] === op ? C.cyan : 'transparent',
+                      color: respostas[p.id] === op ? '#fff' : C.t2,
+                    }}>{op}</button>
+                ))}
+              </div>
+            )}
+            {p.tipo === 'opcao_unica' && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>
+                {(p.opcoes || []).map(op => (
+                  <label key={op} style={{ display: 'flex', alignItems: 'center', gap: 9, cursor: 'pointer', fontSize: 14, color: C.text }}>
+                    <input type="radio" name={p.id} checked={respostas[p.id] === op} onChange={() => setRespostaPergunta(p.id, op)} style={{ accentColor: C.cyan }} />
+                    {op}
+                  </label>
+                ))}
+              </div>
+            )}
+            {p.tipo === 'multipla' && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>
+                {(p.opcoes || []).map(op => {
+                  const checked = arr.includes(op);
+                  return (
+                    <label key={op} style={{ display: 'flex', alignItems: 'center', gap: 9, cursor: 'pointer', fontSize: 14, color: C.text }}>
+                      <input type="checkbox" checked={checked} style={{ accentColor: C.cyan }}
+                        onChange={() => setRespostaPergunta(p.id, checked ? arr.filter(x => x !== op) : [...arr, op])} />
+                      {op}
+                    </label>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        );
+      })}
+
+      <button type="submit" disabled={enviando}
+        style={{
+          padding: '12px 24px', borderRadius: 10, background: C.cyan, color: '#fff',
+          border: 'none', fontSize: 14, fontWeight: 700, cursor: enviando ? 'not-allowed' : 'pointer',
+          opacity: enviando ? 0.6 : 1, display: 'inline-flex', alignItems: 'center', gap: 8, justifyContent: 'center',
+        }}>
+        {enviando ? <Loader2 size={16} className="animate-spin" /> : <Send size={16} />}
+        {enviando ? 'Enviando...' : 'Enviar resposta'}
+      </button>
+    </form>
+  );
+}

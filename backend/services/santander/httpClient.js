@@ -1,0 +1,308 @@
+
+
+
+
+
+
+const { Agent, fetch: undiciFetch } = require('undici');
+const { supabase } = require('../../utils/supabase');
+const { resilientFetch } = require('../../utils/resilientFetch');
+
+const AMBIENTE = (process.env.SANTANDER_AMBIENTE || 'homologacao').toLowerCase();
+const IS_PROD = AMBIENTE === 'producao';
+
+const BASE_URL = IS_PROD
+  ? 'https://trust-open.api.santander.com.br'
+  : 'https://trust-open-h.api.santander.com.br';
+
+const OAUTH_PATH = '/auth/oauth/v2/token';
+
+
+const BANK_ID = process.env.SANTANDER_BANK_ID || '90400888000142';
+
+
+const AGENCIA = process.env.SANTANDER_AGENCIA || '';
+const CONTA = process.env.SANTANDER_CONTA || '';
+const CNPJ_TITULAR = process.env.SANTANDER_CNPJ_TITULAR || '07023068000135';
+
+
+const CLIENT_ID = process.env.SANTANDER_CLIENT_ID || '';
+const CLIENT_SECRET = process.env.SANTANDER_CLIENT_SECRET || '';
+const APPLICATION_KEY = process.env.SANTANDER_APPLICATION_KEY || '';
+
+
+const CERT_B64 = process.env.SANTANDER_CERT_PEM_BASE64 || '';
+const KEY_B64 = process.env.SANTANDER_KEY_PEM_BASE64 || '';
+
+let httpsAgentCache = null;
+
+function buildHttpsAgent() {
+  if (httpsAgentCache) return httpsAgentCache;
+  if (!CERT_B64 || !KEY_B64) {
+    throw new Error('Santander mTLS não configurado: defina SANTANDER_CERT_PEM_BASE64 e SANTANDER_KEY_PEM_BASE64');
+  }
+
+  httpsAgentCache = new Agent({
+    connect: {
+      cert: Buffer.from(CERT_B64, 'base64'),
+      key: Buffer.from(KEY_B64, 'base64'),
+    },
+    keepAliveTimeout: 60_000,
+    keepAliveMaxTimeout: 300_000,
+  });
+  return httpsAgentCache;
+}
+
+
+let tokenMemoryCache = null;
+
+async function loadTokenFromDb() {
+  if (!supabase) return null;
+  const { data } = await supabase
+    .from('santander_oauth_tokens')
+    .select('*')
+    .eq('ambiente', AMBIENTE)
+    .single();
+  if (!data) return null;
+  return data;
+}
+
+async function saveTokenToDb(token) {
+  if (!supabase) return;
+  await supabase
+    .from('santander_oauth_tokens')
+    .upsert({
+      ambiente: AMBIENTE,
+      access_token: token.access_token,
+      token_type: token.token_type || 'Bearer',
+      expires_at: token.expires_at,
+      obtained_at: new Date().toISOString(),
+    }, { onConflict: 'ambiente' });
+}
+
+function tokenIsValid(token) {
+  if (!token || !token.access_token || !token.expires_at) return false;
+
+  return new Date(token.expires_at).getTime() > Date.now() + 60000;
+}
+
+async function fetchNewToken() {
+  if (!CLIENT_ID || !CLIENT_SECRET) {
+    throw new Error('Santander OAuth não configurado: defina SANTANDER_CLIENT_ID e SANTANDER_CLIENT_SECRET');
+  }
+
+  const agent = buildHttpsAgent();
+  const body = new URLSearchParams({
+    client_id: CLIENT_ID,
+    client_secret: CLIENT_SECRET,
+    grant_type: 'client_credentials',
+  }).toString();
+
+  const url = `${BASE_URL}${OAUTH_PATH}`;
+  const start = Date.now();
+
+  const res = await resilientFetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body,
+    dispatcher: agent,
+  }, {
+    dependency: 'Santander OAuth',
+    timeoutMs: 8_000,
+    maxRetries: 1,
+    retrySafe: true,
+    fetchImpl: undiciFetch,
+  });
+
+  const duration = Date.now() - start;
+  const text = await res.text();
+  let json = {};
+  try { json = JSON.parse(text); } catch (_) {                      }
+
+  if (!res.ok) {
+    await logCall({
+      endpoint: OAUTH_PATH,
+      method: 'POST',
+      status_code: res.status,
+      duration_ms: duration,
+      error_message: text?.slice(0, 500),
+    });
+    throw new Error(`Santander OAuth falhou (${res.status}): ${text?.slice(0, 200)}`);
+  }
+
+
+  const expiresIn = Number(json.expires_in || 900);
+  const token = {
+    access_token: json.access_token,
+    token_type: json.token_type || 'Bearer',
+    expires_at: new Date(Date.now() + expiresIn * 1000).toISOString(),
+  };
+  tokenMemoryCache = token;
+  await saveTokenToDb(token);
+  await logCall({
+    endpoint: OAUTH_PATH,
+    method: 'POST',
+    status_code: 200,
+    duration_ms: duration,
+  });
+  return token;
+}
+
+async function getAccessToken() {
+  if (tokenIsValid(tokenMemoryCache)) return tokenMemoryCache.access_token;
+  const fromDb = await loadTokenFromDb();
+  if (tokenIsValid(fromDb)) {
+    tokenMemoryCache = fromDb;
+    return fromDb.access_token;
+  }
+  const fresh = await fetchNewToken();
+  return fresh.access_token;
+}
+
+
+async function logCall({ endpoint, method, status_code, duration_ms, trace_id, error_message, request_summary, user_id }) {
+  if (!supabase) return;
+  try {
+    await supabase.from('santander_sync_log').insert({
+      endpoint, method, status_code, duration_ms, trace_id, error_message, request_summary, user_id,
+    });
+  } catch (_) {                                             }
+}
+
+async function callApi(path, { method = 'GET', query, body, retries = 1, userId = null } = {}) {
+  const agent = buildHttpsAgent();
+  const token = await getAccessToken();
+
+  const url = new URL(`${BASE_URL}${path}`);
+  if (query) {
+    Object.entries(query).forEach(([k, v]) => {
+      if (v !== undefined && v !== null && v !== '') url.searchParams.set(k, String(v));
+    });
+  }
+
+  const headers = {
+    'Accept': 'application/json',
+    'Authorization': `Bearer ${token}`,
+    'X-Application-Key': APPLICATION_KEY,
+  };
+  if (body !== undefined) headers['Content-Type'] = 'application/json';
+
+  const start = Date.now();
+  let res;
+  try {
+    res = await resilientFetch(url.toString(), {
+      method,
+      headers,
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+      dispatcher: agent,
+    }, {
+      dependency: 'Santander API',
+      timeoutMs: 10_000,
+      maxRetries: 1,
+      fetchImpl: undiciFetch,
+    });
+  } catch (err) {
+    await logCall({ endpoint: path, method, error_message: err.message, user_id: userId });
+    throw err;
+  }
+  const duration = Date.now() - start;
+  const traceId = res.headers.get('x-traceid') || res.headers.get('x-trace-id');
+
+
+  if (res.status === 401 && retries > 0) {
+    tokenMemoryCache = null;
+    return callApi(path, { method, query, body, retries: retries - 1, userId });
+  }
+
+  const text = await res.text();
+  let json = null;
+  try { json = text ? JSON.parse(text) : null; } catch (_) { json = { raw: text }; }
+
+  await logCall({
+    endpoint: path,
+    method,
+    status_code: res.status,
+    duration_ms: duration,
+    trace_id: traceId,
+    error_message: res.ok ? null : (text || '').slice(0, 500),
+    request_summary: query ? { query } : null,
+    user_id: userId,
+  });
+
+  if (!res.ok) {
+
+
+
+
+    let bodyMsg = '';
+    if (json && typeof json === 'object') {
+      const errorsArr = Array.isArray(json._errors) ? json._errors
+        : Array.isArray(json.errors) ? json.errors
+        : [];
+      const errorsDetailed = errorsArr.map(e => {
+        const code = e._code || e.code || '';
+        const field = e._field || e.field || '';
+        const msg = e._message || e.message || e._description || '';
+        return [code, field, msg].filter(Boolean).join(':');
+      }).filter(Boolean).join(' | ');
+
+      bodyMsg = errorsDetailed
+        || json._message
+        || json._details
+        || json.errorMessage
+        || json.message
+        || json.error_description
+        || JSON.stringify(json).slice(0, 400);
+    }
+    const err = new Error(
+      `Santander API ${method} ${path} -> ${res.status}${bodyMsg ? ` · ${bodyMsg}` : ''}`
+    );
+    err.status = res.status;
+    err.traceId = traceId;
+    err.body = json;
+    throw err;
+  }
+  return json;
+}
+
+
+async function downloadBinary(url) {
+  const res = await resilientFetch(url, { method: 'GET' }, {
+    dependency: 'Download Santander',
+    timeoutMs: 15_000,
+    maxRetries: 1,
+  });
+  if (!res.ok) {
+    const txt = await res.text().catch(() => '');
+    throw new Error(`Falha ao baixar arquivo: ${res.status} ${txt.slice(0, 200)}`);
+  }
+  const arrayBuffer = await res.arrayBuffer();
+  return Buffer.from(arrayBuffer);
+}
+
+module.exports = {
+  AMBIENTE,
+  BASE_URL,
+  BANK_ID,
+  AGENCIA,
+  CONTA,
+  CNPJ_TITULAR,
+  APPLICATION_KEY,
+  callApi,
+  downloadBinary,
+  getAccessToken,
+  logCall,
+
+  isConfigured: () => Boolean(CLIENT_ID && CLIENT_SECRET && APPLICATION_KEY && CERT_B64 && KEY_B64 && AGENCIA && CONTA),
+  missingEnv: () => {
+    const miss = [];
+    if (!CLIENT_ID) miss.push('SANTANDER_CLIENT_ID');
+    if (!CLIENT_SECRET) miss.push('SANTANDER_CLIENT_SECRET');
+    if (!APPLICATION_KEY) miss.push('SANTANDER_APPLICATION_KEY');
+    if (!CERT_B64) miss.push('SANTANDER_CERT_PEM_BASE64');
+    if (!KEY_B64) miss.push('SANTANDER_KEY_PEM_BASE64');
+    if (!AGENCIA) miss.push('SANTANDER_AGENCIA');
+    if (!CONTA) miss.push('SANTANDER_CONTA');
+    return miss;
+  },
+};

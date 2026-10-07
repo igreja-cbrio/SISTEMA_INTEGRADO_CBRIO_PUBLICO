@@ -1,0 +1,2418 @@
+
+
+
+
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { useNavigate, useParams } from 'react-router-dom';
+import confetti from 'canvas-confetti';
+import { inscricoesApi as api } from '../api';
+import { useAuth } from '../contexts/AuthContext';
+import { Card } from '../components/ui/card';
+import { safeHref } from '../lib/safeHref';
+import { Button } from '../components/ui/button';
+import { Input } from '../components/ui/input';
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../components/ui/dialog';
+import { toast } from 'sonner';
+import {
+  ArrowLeft, CalendarDays, Clock, MapPin, Users, Gift, Link2, MessageCircle,
+  QrCode, Pencil, Trash2, Loader2, Search, ExternalLink, Ticket, Megaphone,
+  ChevronDown, ChevronUp, ChevronsDownUp, ChevronsUpDown, Download, Repeat,
+  Printer, CreditCard, ScanLine, Paperclip, Lock, List, Table, Upload } from 'lucide-react';
+import QrLinkDialog from '../components/QrLinkDialog';
+import { EventoModal } from './Inscricoes';
+import { idadeEmAnos, faixaLabel, sexoLabel } from '../lib/faixaEtaria';
+
+import { mascaraCpf, cpfValido, soDigitos } from '../lib/inscricao';
+import { imprimirListaInscritos, type Agrupamento } from '../lib/imprimirListaInscritos';
+import { caminhoPublicoEvento } from '../lib/genesisCba';
+import { rotuloStatusEvento } from '../lib/statusEvento';
+
+
+
+import {
+  camposFiltraveis, aplicarFiltroCampos, contarFiltrosAtivos, SEM_RESPOSTA, TODOS,
+} from '../lib/filtroCampoInscricao';
+
+const METODO_LABEL: Record<string, string> = {
+  pix: 'Pix', cartao: 'Cartão', boleto: 'Boleto', apple_pay: 'Apple Pay',
+  dinheiro: 'Dinheiro', transferencia: 'Transferência',
+};
+const PAG_BADGE: Record<string, string> = {
+  pago: 'bg-emerald-500/15 text-emerald-600',
+  pago_parcial: 'bg-amber-500/15 text-amber-600',
+  aguardando: 'bg-amber-500/15 text-amber-600',
+  aguardando_pagamento: 'bg-amber-500/15 text-amber-600',
+  pendente: 'bg-foreground/10 text-muted-foreground',
+  expirado: 'bg-red-500/10 text-red-600',
+  estornado: 'bg-red-500/10 text-red-600',
+  chargeback: 'bg-red-500/10 text-red-600',
+};
+const PAG_LABEL: Record<string, string> = {
+  pago: 'pago', pago_parcial: 'parcial', aguardando: 'aguardando',
+  aguardando_pagamento: 'aguardando', pendente: 'pendente', criada: 'pendente',
+  expirado: 'expirado', expirada: 'expirado', falhou: 'falhou',
+  estornado: 'estornado', estornado_parcial: 'estornado', chargeback: 'contestado',
+};
+
+const STATUS_BADGE: Record<string, string> = {
+  rascunho: 'bg-amber-500/15 text-amber-600',
+  publicado: 'bg-emerald-500/15 text-emerald-600',
+  encerrado: 'bg-foreground/10 text-muted-foreground',
+  arquivado: 'bg-foreground/10 text-muted-foreground',
+};
+
+
+const ORIGEM_E_INSCRICAO = 'e_inscricao';
+const ehEInscricao = (i: any) => i?.origem === ORIGEM_E_INSCRICAO;
+const brl = (c: number | null | undefined) => (c == null ? '—' : (c / 100).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' }));
+
+
+function EInscricaoBadge({ inscricao, tamanho = 'xs' }: { inscricao: any; tamanho?: 'xs' | 'sm' }) {
+  const e = inscricao?.dados?.e_inscricao || {};
+  const detalhe = [e.forma_pagamento ? (METODO_LABEL[e.forma_pagamento] || e.forma_pagamento) : null, e.parcelas > 1 ? `${e.parcelas}x` : null].filter(Boolean).join(' ');
+  return (
+    <span className={`inline-flex items-center gap-1 rounded-full bg-sky-500/15 text-sky-700 dark:text-sky-300 font-medium px-2 py-0.5 shrink-0 ${tamanho === 'sm' ? 'text-xs' : 'text-[11px]'}`}
+      title={`Inscrita pelo ${e.plataforma || 'E-Inscrição'}${e.codigo ? ` · código ${e.codigo}` : ''}${detalhe ? ` · ${detalhe}` : ''}`}>
+      <ExternalLink className="h-3 w-3" /> E-Inscrição{detalhe ? ` · ${detalhe}` : ''}
+    </span>
+  );
+}
+
+
+const LOTE_FONTE_DICA: Record<string, string> = {
+  plataforma: 'Lote informado pela plataforma externa (planilha do E-Inscrição)',
+  valor: 'Lote pelo valor cobrado nesta inscrição',
+  posicao: 'Lote pela posição na ordem de chegada (isenta, bolsa ou ainda sem pagar)',
+};
+function LoteBadge({ lote, tamanho = 'xs' }: { lote: any; tamanho?: 'xs' | 'sm' }) {
+  if (!lote?.nome) return null;
+  return (
+    <span className={`inline-flex items-center rounded-full bg-violet-500/15 text-violet-700 dark:text-violet-300 font-medium px-2 py-0.5 shrink-0 ${tamanho === 'sm' ? 'text-xs' : 'text-[11px]'}`}
+      title={LOTE_FONTE_DICA[lote.fonte] || 'Lote'}>
+      {lote.nome}
+    </span>
+  );
+}
+const SEM_LOTE = '__sem_lote__';
+
+
+type OrigemFiltro = 'todos' | 'sistema' | 'e_inscricao';
+const casaOrigem = (i: any, f: OrigemFiltro) =>
+  f === 'todos' ? true : f === 'e_inscricao' ? ehEInscricao(i) : !ehEInscricao(i);
+
+
+type ModoLista = 'cards' | 'tabela';
+const MODO_LISTA_KEY = 'cbrio.inscricoes.modoLista';
+function lerModoLista(): ModoLista {
+  try { return localStorage.getItem(MODO_LISTA_KEY) === 'tabela' ? 'tabela' : 'cards'; } catch { return 'cards'; }
+}
+
+
+function PagamentoCelula({ i }: { i: any }) {
+  if (i.bolsa_tipo === 'integral') return <span className="rounded-full bg-primary/15 text-primary text-[11px] font-medium px-2 py-0.5">isenta</span>;
+  const e = i.dados?.e_inscricao;
+  if (ehEInscricao(i)) {
+    return (
+      <span className="inline-flex items-center gap-1.5 flex-wrap">
+        <span className="rounded-full bg-emerald-500/15 text-emerald-600 text-[11px] font-medium px-2 py-0.5">pago</span>
+        <span className="text-xs text-muted-foreground">
+          {e?.forma_pagamento ? (METODO_LABEL[e.forma_pagamento] || e.forma_pagamento) : 'cartão'}{e?.parcelas > 1 ? ` ${e.parcelas}x` : ''}
+        </span>
+        <span className="text-xs tabular-nums" title={e?.valor_bruto_centavos != null ? `Bruto ${brl(e.valor_bruto_centavos)} · líquido após a taxa da plataforma` : undefined}>
+          {brl(i.valor_cobrado_centavos)}
+        </span>
+      </span>
+    );
+  }
+  const pg = i.pagamento;
+  if (!pg?.status_pagamento) return <span className="text-xs text-muted-foreground">—</span>;
+  return (
+    <span className="inline-flex items-center gap-1.5 flex-wrap">
+      <span className={`rounded-full text-[11px] font-medium px-2 py-0.5 ${PAG_BADGE[pg.status_pagamento] || 'bg-foreground/10 text-muted-foreground'}`}>
+        {PAG_LABEL[pg.status_pagamento] || pg.status_pagamento}
+      </span>
+      {pg.metodo && <span className="text-xs text-muted-foreground">{METODO_LABEL[pg.metodo] || pg.metodo}{pg.parcelas_total > 1 ? ` ${pg.parcelas_total}x` : ''}</span>}
+      {i.bolsa_tipo === 'parcial' && <span className="rounded-full bg-primary/15 text-primary text-[11px] font-medium px-2 py-0.5">bolsa</span>}
+      <span className="text-xs tabular-nums">{brl(i.valor_cobrado_centavos ?? pg.valor_pago_centavos ?? pg.valor_centavos)}</span>
+    </span>
+  );
+}
+
+
+
+
+
+
+
+function TabelaInscritos({ inscritos, ev, podeEditar, selecionadas, alternarSelecao, onAbrir, onExcluir, premiosGanhos }: {
+  inscritos: any[]; ev: any; podeEditar: boolean; selecionadas: Set<string>;
+  alternarSelecao: (id: string) => void; onAbrir: (i: any) => void; onExcluir: (i: any) => void;
+  premiosGanhos: (id: string) => any[];
+}) {
+  const temExterno = inscritos.some(ehEInscricao) || !!ev?.checkout_externo_url;
+  const temLote = inscritos.some((i: any) => i.lote?.nome);
+  return (
+    <div className="overflow-x-auto rounded-lg border border-border">
+      <table className="w-full text-sm">
+        <thead>
+          <tr className="text-[11px] uppercase tracking-wide text-muted-foreground bg-foreground/[0.03]">
+            {podeEditar && <th className="w-8 px-2 py-2" />}
+            <th className="text-left px-3 py-2 font-medium">Nome</th>
+            <th className="text-left px-3 py-2 font-medium whitespace-nowrap">Idade · sexo</th>
+            <th className="text-left px-3 py-2 font-medium">Telefone</th>
+            {temExterno && <th className="text-left px-3 py-2 font-medium whitespace-nowrap">Onde se inscreveu</th>}
+            {temLote && <th className="text-left px-3 py-2 font-medium">Lote</th>}
+            {ev?.pagamento_ativo && <th className="text-left px-3 py-2 font-medium">Pagamento</th>}
+            <th className="text-left px-3 py-2 font-medium whitespace-nowrap">Inscrita em</th>
+            <th className="w-8 px-2 py-2" />
+          </tr>
+        </thead>
+        <tbody>
+          {inscritos.map((i: any) => {
+            const cancelada = i.status === 'cancelada';
+            const ganhos = premiosGanhos(i.id);
+            const idade = idadeEmAnos(i.data_nascimento);
+            return (
+              <tr key={i.id} onClick={() => onAbrir(i)}
+                className={`border-t border-border/60 cursor-pointer transition-colors ${cancelada ? 'opacity-60' : ''} ${
+                  selecionadas.has(i.id) ? 'bg-primary/10' : 'hover:bg-primary/5'}`}>
+                {podeEditar && (
+                  <td className="px-2 py-1.5">
+                    <input type="checkbox" checked={selecionadas.has(i.id)}
+                      onClick={e => e.stopPropagation()} onChange={() => alternarSelecao(i.id)}
+                      title="Selecionar para excluir" className="h-4 w-4 accent-[#00B39D] cursor-pointer" />
+                  </td>
+                )}
+                <td className="px-3 py-1.5 min-w-[12rem]">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    {i.numero_sorte != null && (
+                      <span className="rounded-full bg-primary/15 text-primary text-[11px] font-bold px-1.5 py-0.5 tabular-nums">Nº {i.numero_sorte}</span>
+                    )}
+                    <span className="font-medium">{i.nome_completo}</span>
+                    {i.codigo && <span className="text-[11px] font-mono text-muted-foreground" title="Código da inscrição">{i.codigo}</span>}
+                    {cancelada && <span className="rounded-full bg-red-500/10 text-red-600 text-[11px] font-medium px-2 py-0.5">cancelada</span>}
+                    {i.responsavel && <span className="text-[11px] text-amber-600 font-medium" title={`Responsável: ${i.responsavel.nome}`}>menor</span>}
+                    {ganhos.length > 0 && (
+                      <span className="inline-flex items-center gap-1 rounded-full bg-amber-500/15 text-amber-600 text-[11px] font-semibold px-2 py-0.5">
+                        <Gift className="h-3 w-3" /> {ganhos.length > 1 ? `${ganhos.length} prêmios` : (ganhos[0].premio || 'Prêmio')}
+                      </span>
+                    )}
+                  </div>
+                </td>
+                <td className="px-3 py-1.5 whitespace-nowrap text-xs text-muted-foreground tabular-nums">
+                  {idade != null ? `${idade} anos` : '—'}{i.sexo ? ` · ${sexoLabel(i.sexo)}` : ''}
+                </td>
+                <td className="px-3 py-1.5 whitespace-nowrap">
+                  {i.telefone ? (
+                    <a href={`https://wa.me/55${String(i.telefone).replace(/\D/g, '')}`} target="_blank" rel="noreferrer"
+                      onClick={e => e.stopPropagation()} title="Enviar WhatsApp"
+                      className="inline-flex items-center gap-1 text-xs text-emerald-600 hover:text-emerald-700">
+                      <MessageCircle className="h-3.5 w-3.5" /> {i.telefone}
+                    </a>
+                  ) : <span className="text-xs text-muted-foreground">—</span>}
+                </td>
+                {temExterno && (
+                  <td className="px-3 py-1.5 whitespace-nowrap">
+                    {ehEInscricao(i)
+                      ? <EInscricaoBadge inscricao={i} />
+                      : <span className="inline-flex items-center rounded-full bg-primary/10 text-primary text-[11px] font-medium px-2 py-0.5">Sistema{i.pagamento?.metodo ? ` · ${METODO_LABEL[i.pagamento.metodo] || i.pagamento.metodo}` : ''}</span>}
+                  </td>
+                )}
+                {temLote && <td className="px-3 py-1.5 whitespace-nowrap"><LoteBadge lote={i.lote} /></td>}
+                {ev?.pagamento_ativo && <td className="px-3 py-1.5"><PagamentoCelula i={i} /></td>}
+                <td className="px-3 py-1.5 whitespace-nowrap text-xs text-muted-foreground tabular-nums">
+                  {i.created_at ? new Date(i.created_at).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', year: '2-digit', hour: '2-digit', minute: '2-digit' }) : '—'}
+                </td>
+                <td className="px-2 py-1.5">
+                  <button onClick={e => { e.stopPropagation(); onExcluir(i); }} title="Excluir inscrição"
+                    className="p-1 rounded-md text-muted-foreground hover:text-red-600 hover:bg-red-500/10 transition-colors">
+                    <Trash2 className="h-4 w-4" />
+                  </button>
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+
+function PlacarTile({ label, valor, cor, dica }: { label: string; valor: any; cor?: string; dica?: string }) {
+  return (
+    <Card className="glass-solid p-3" title={dica}>
+      <div className="text-[11px] uppercase tracking-wide text-muted-foreground">{label}</div>
+      <div className={`text-xl font-bold mt-0.5 ${cor || ''}`}>{valor}</div>
+    </Card>
+  );
+}
+
+export default function InscricaoEventoDetalhe() {
+  const { id } = useParams();
+  const navigate = useNavigate();
+  const { modulePerms, profile, canAccessModule } = useAuth();
+  const podeExportar = ['admin', 'diretor'].includes(profile?.role)
+    || !!modulePerms?.inscricoes?.pode_exportar;
+
+  const podeCheckin = canAccessModule(['inscricoes'], 'leitura', 2);
+
+  const podeEditar = canAccessModule(['inscricoes'], 'leitura', 3);
+
+
+  const podeVerBeneficios = canAccessModule(['inscricoes'], 'leitura', 2);
+  const [ev, setEv] = useState<any>(null);
+  const [areas, setAreas] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [sorteando, setSorteando] = useState(false);
+  const [editOpen, setEditOpen] = useState(false);
+  const [qrOpen, setQrOpen] = useState(false);
+  const [busca, setBusca] = useState('');
+
+  const [filtrosCampo, setFiltrosCampo] = useState<Record<string, string>>({});
+
+
+  const [origemFiltro, setOrigemFiltro] = useState<OrigemFiltro>('todos');
+
+  const [loteFiltro, setLoteFiltro] = useState<string>('todos');
+  const [modoLista, setModoListaState] = useState<ModoLista>(lerModoLista);
+  const setModoLista = (m: ModoLista) => { setModoListaState(m); try { localStorage.setItem(MODO_LISTA_KEY, m); } catch {                          } };
+  const [inscSel, setInscSel] = useState<any>(null);
+
+
+  const [recolhidos, setRecolhidos] = useState<Set<string>>(new Set());
+
+
+  const [selecionadas, setSelecionadas] = useState<Set<string>>(new Set());
+  const [excluindoLote, setExcluindoLote] = useState(false);
+  const toggleRecolhido = (rid: string) => setRecolhidos(prev => {
+    const s = new Set(prev);
+    if (s.has(rid)) s.delete(rid); else s.add(rid);
+    return s;
+  });
+  const [anim, setAnim] = useState<{ fase: 'rolando' | 'fim'; premio: string; ganhador?: any } | null>(null);
+  const [rolNum, setRolNum] = useState(0);
+  const [imprimirOpen, setImprimirOpen] = useState(false);
+
+
+  const [importarOpen, setImportarOpen] = useState(false);
+
+
+  const [resumo, setResumo] = useState<any>(null);
+
+
+
+
+  function carregar(): Promise<any[] | null> {
+    if (!id) return Promise.resolve(null);
+    const p = Promise.all([api.evento(id), api.inscricoesDoEvento(id)])
+      .then(([evento, inscritos]: any[]) => {
+        const lista = Array.isArray(inscritos) ? inscritos : [];
+        setEv({ ...evento, inscritos: lista });
+        return lista;
+      })
+      .catch(() => { toast.error('Erro ao carregar o evento'); return null; })
+      .finally(() => setLoading(false));
+
+    api.eventoResumo(id).then((r: any) => setResumo(r?.contadores || null)).catch(() => setResumo(null));
+    return p;
+  }
+  useEffect(() => { setLoading(true); carregar(); }, [id]);
+  useEffect(() => { api.areas().then((a: any) => setAreas(Array.isArray(a) ? a : [])).catch(() => {}); }, []);
+
+  const link = ev ? `${window.location.origin}${caminhoPublicoEvento(ev)}` : '';
+  function copiar() {
+    navigator.clipboard.writeText(link);
+    if (ev?.status === 'publicado') toast.success('Link copiado — formulário no ar');
+    else toast.warning('Link copiado, mas o evento não está publicado — clique em Publicar pra ativar');
+  }
+  const waTexto = ev?.msg_whatsapp
+    ? String(ev.msg_whatsapp).replaceAll('{link}', link)
+    : `Confirme sua presença no ${ev?.nome || 'evento'}: ${link}`;
+  const wa = `https://wa.me/?text=${encodeURIComponent(waTexto)}`;
+
+  const ativos = useMemo(
+    () => (ev?.inscritos || []).filter((i: any) => i.status !== 'cancelada'),
+    [ev],
+  );
+
+
+
+  const camposFiltro = useMemo(
+    () => camposFiltraveis(ev?.campos || [], ev?.inscritos || []),
+    [ev],
+  );
+  const filtrosAtivos = contarFiltrosAtivos(filtrosCampo);
+
+  const inscritos = useMemo(() => {
+    const porCampo = aplicarFiltroCampos(ev?.inscritos || [], filtrosCampo)
+      .filter((i: any) => casaOrigem(i, origemFiltro))
+      .filter((i: any) => loteFiltro === 'todos' ? true : loteFiltro === SEM_LOTE ? !i.lote?.nome : i.lote?.nome === loteFiltro);
+    const q = busca.trim().toLowerCase();
+    if (!q) return porCampo;
+    return porCampo.filter((i: any) =>
+      String(i.nome_completo || '').toLowerCase().includes(q)
+      || String(i.telefone || '').includes(q.replace(/\D/g, '') || ' ')
+      || String(i.numero_sorte || '') === q,
+    );
+  }, [ev, busca, filtrosCampo, origemFiltro, loteFiltro]);
+
+  const lotesNaLista = useMemo(() => {
+    const cont = new Map<string, number>();
+    let semLote = 0;
+    for (const i of (ev?.inscritos || [])) {
+      if (i.lote?.nome) cont.set(i.lote.nome, (cont.get(i.lote.nome) || 0) + 1); else semLote++;
+    }
+    const ordem = (ev?.lotes || []).map((l: any) => l.nome);
+    const nomes = [...cont.keys()].sort((a, b) => {
+      const ia = ordem.indexOf(a); const ib = ordem.indexOf(b);
+      return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib) || a.localeCompare(b);
+    });
+    return { opcoes: nomes.map(n => ({ nome: n, total: cont.get(n) || 0 })), semLote };
+  }, [ev]);
+  const mostraFiltroLote = lotesNaLista.opcoes.length > 0;
+  const filtroLoteAtivo = loteFiltro !== 'todos';
+
+
+  const contagemOrigem = useMemo(() => {
+    const todos = ev?.inscritos || [];
+    const externo = todos.filter(ehEInscricao).length;
+    return { todos: todos.length, externo, sistema: todos.length - externo };
+  }, [ev]);
+  const mostraFiltroOrigem = contagemOrigem.externo > 0 || !!ev?.checkout_externo_url;
+  const filtroOrigemAtivo = origemFiltro !== 'todos';
+
+  const premiosGanhos = (inscricaoId: string) =>
+    (ev?.sorteios || []).filter((s: any) => s.inscricao_id === inscricaoId);
+
+  function confeteBig() {
+    const cores = ['#00B39D', '#00d9bd', '#ffd166', '#ef476f', '#118ab2', '#ffffff'];
+    const raja = (x: number) => confetti({ particleCount: 80, spread: 80, startVelocity: 55, origin: { x, y: 0.55 }, colors: cores });
+    raja(0.5); setTimeout(() => raja(0.2), 200); setTimeout(() => raja(0.8), 400);
+    setTimeout(() => confetti({ particleCount: 140, spread: 120, startVelocity: 45, origin: { y: 0.5 }, colors: cores }), 250);
+  }
+
+  const sorteioDoPremio = (nome: string) => (ev?.sorteios || []).find((s: any) => (s.premio || '') === nome);
+
+  async function sortearPremio(nome: string, substituir = false) {
+    if (anim || !id) return;
+
+    if (substituir) {
+      const atual = sorteioDoPremio(nome);
+      const quem = atual ? `${atual.ganhador_nome} (nº ${atual.numero_sorteado})` : 'o ganhador atual';
+      if (!window.confirm(`Sortear de novo "${nome}"?\n\n${quem} deixa de ter este prêmio e volta a concorrer nos próximos.`)) return;
+    }
+    setSorteando(true);
+    setAnim({ fase: 'rolando', premio: nome });
+    const iv = setInterval(() => setRolNum(1000 + Math.floor(Math.random() * 9000)), 65);
+    try {
+      const s: any = await api.sortear(id, nome, { substituir });
+      await new Promise(r => setTimeout(r, 2400));
+      clearInterval(iv);
+      setRolNum(s.numero_sorteado);
+      setAnim({ fase: 'fim', premio: nome, ganhador: { numero: s.numero_sorteado, nome: s.ganhador_nome } });
+      confeteBig();
+      carregar();
+    } catch (e: any) {
+      clearInterval(iv); setAnim(null);
+      toast.error(e?.message || 'Erro ao sortear');
+    } finally { setSorteando(false); }
+  }
+  async function sortearTodos() {
+    if (!id) return;
+    setSorteando(true);
+    const pendentes = (ev?.premios || []).filter((p: string) => !sorteioDoPremio(p));
+    let feitos = 0;
+    try {
+
+
+
+      for (const p of pendentes) { await api.sortear(id, p); feitos++; }
+      toast.success(`${feitos} prêmio(s) sorteado(s)`);
+    } catch (e: any) {
+      toast.error(feitos
+        ? `${feitos} de ${pendentes.length} sorteados. Parou em: ${e?.message || 'erro ao sortear'}`
+        : (e?.message || 'Erro ao sortear'));
+    } finally { carregar(); setSorteando(false); }
+  }
+  async function publicar() {
+    if (!id) return;
+    try {
+      await api.atualizarEvento(id, { status: 'publicado' });
+      toast.success('Evento publicado — o link já está no ar');
+      carregar();
+    } catch (e: any) { toast.error(e?.message || 'Erro ao publicar'); }
+  }
+
+
+
+
+  const prazoVencido = !!ev?.inscricoes_encerram_em
+    && Date.now() > new Date(ev.inscricoes_encerram_em).getTime();
+  const inscricoesFechadas = ev?.status === 'encerrado' || (ev?.status === 'publicado' && prazoVencido);
+
+  async function reabrirInscricoes() {
+    if (!id) return;
+    if (!window.confirm(
+      'Reabrir as inscrições deste evento?\n\n'
+      + 'O formulário público volta ao ar para QUALQUER pessoa, não só para quem está na porta.'
+      + (prazoVencido ? '\n\nO prazo já venceu, então ele será REMOVIDO — feche pelo botão quando terminar.' : '')
+    )) return;
+    try {
+      await api.atualizarEvento(id, {
+        status: 'publicado',
+
+
+        ...(prazoVencido ? { inscricoes_encerram_em: null } : {}),
+      });
+      toast.success('Inscrições reabertas — o formulário está no ar');
+      carregar();
+    } catch (e: any) { toast.error(e?.message || 'Erro ao reabrir'); }
+  }
+
+  async function encerrarInscricoes() {
+    if (!id) return;
+    if (!window.confirm('Encerrar as inscrições? O formulário público para de aceitar novas inscrições.')) return;
+    try {
+      await api.atualizarEvento(id, { status: 'encerrado' });
+      toast.success('Inscrições encerradas');
+      carregar();
+    } catch (e: any) { toast.error(e?.message || 'Erro ao encerrar'); }
+  }
+
+  async function excluir() {
+    if (!id || !window.confirm('Excluir este evento? (some da lista · reversível por super-admin)')) return;
+    try { await api.excluirEvento(id); toast.success('Evento excluído'); navigate('/inscricoes'); }
+    catch (e: any) { toast.error(e?.message || 'Sem permissão pra excluir'); }
+  }
+  async function excluirInscrito(i: any) {
+    if (!id || !window.confirm(`Excluir a inscrição de ${i.nome_completo}? Ela não entra mais nos sorteios.`)) return;
+    try {
+      await api.excluirInscricao(id, i.id);
+      toast.success('Inscrição excluída');
+      setEv((prev: any) => (prev ? { ...prev, inscritos: (prev.inscritos || []).filter((x: any) => x.id !== i.id) } : prev));
+      setSelecionadas(prev => { const s = new Set(prev); s.delete(i.id); return s; });
+
+
+
+    } catch (e: any) { toast.error([e?.message, e?.detalhe].filter(Boolean).join(' · ') || 'Erro ao excluir a inscrição'); }
+  }
+
+  function alternarSelecao(inscricaoId: string) {
+    setSelecionadas(prev => {
+      const s = new Set(prev);
+      if (s.has(inscricaoId)) s.delete(inscricaoId); else s.add(inscricaoId);
+      return s;
+    });
+  }
+
+
+
+
+  function selecionarVisiveis() {
+    setSelecionadas(prev => {
+      const s = new Set(prev);
+      inscritos.forEach((i: any) => s.add(i.id));
+      return s;
+    });
+  }
+
+  async function excluirSelecionadas() {
+    if (!id || !selecionadas.size || excluindoLote) return;
+    const ids = [...selecionadas];
+    const nomes = (ev?.inscritos || [])
+      .filter((i: any) => selecionadas.has(i.id))
+      .map((i: any) => i.nome_completo)
+      .slice(0, 8);
+
+
+
+    const lista = nomes.join('\n· ');
+    const resto = ids.length > nomes.length ? `\n… e mais ${ids.length - nomes.length}` : '';
+    const ok = window.confirm(
+      `Excluir ${ids.length === 1 ? 'esta inscrição' : `estas ${ids.length} inscrições`}?\n\n· ${lista}${resto}\n\n`
+      + 'Elas somem da lista, do placar e dos sorteios (reversível por super-admin).',
+    );
+    if (!ok) return;
+    setExcluindoLote(true);
+    try {
+      const r: any = await api.excluirInscricoesLote(id, ids);
+      const excluidas = new Set<string>(r?.excluidas || []);
+
+
+      setEv((prev: any) => (prev
+        ? { ...prev, inscritos: (prev.inscritos || []).filter((x: any) => !excluidas.has(x.id)) }
+        : prev));
+      setSelecionadas(new Set());
+      if (r?.com_pagamento?.length || r?.falhas?.length) {
+
+
+        const motivo = (r?.falhas_motivo || []).join(' · ');
+        toast.warning([r?.resumo || 'Exclusão parcial', motivo].filter(Boolean).join(' — '));
+      }
+      else toast.success(r?.resumo || 'Inscrições excluídas');
+      if (r?.contadores) setEv((prev: any) => (prev ? { ...prev, contadores: r.contadores } : prev));
+    } catch (e: any) {
+      toast.error([e?.message, e?.detalhe].filter(Boolean).join(' · ') || 'Erro ao excluir as inscrições');
+    } finally {
+      setExcluindoLote(false);
+    }
+  }
+
+
+  function exportarCsv() {
+    if (!ev) return;
+    const campos = (ev.campos || []) as any[];
+    const esc = (v: any) => `"${String(v ?? '').replaceAll('"', '""')}"`;
+    const header = [
+
+      'Código', 'Nome completo', 'WhatsApp', 'E-mail', 'Nascimento', 'Idade', 'Faixa', 'Sexo',
+      'Pagamento', 'Forma', 'Lote', 'Nº da sorte', 'Status', 'Inscrição em',
+      ...campos.map((c: any) => c.label),
+    ];
+
+
+
+
+    const linhas = inscritos.map((i: any) => [
+      i.codigo || '', i.nome_completo, i.telefone || '', i.email || '',
+      i.data_nascimento ? new Date(`${i.data_nascimento}T00:00:00`).toLocaleDateString('pt-BR') : '',
+      idadeEmAnos(i.data_nascimento) ?? '',
+      i.data_nascimento ? faixaLabel(i.data_nascimento, true) : '',
+      i.sexo ? sexoLabel(i.sexo) : '',
+      i.pagamento?.status_pagamento ? (PAG_LABEL[i.pagamento.status_pagamento] || i.pagamento.status_pagamento) : '',
+      i.pagamento?.metodo ? (METODO_LABEL[i.pagamento.metodo] || i.pagamento.metodo) : '',
+      i.lote?.nome || '',
+      i.numero_sorte ?? '', i.status,
+      i.created_at ? new Date(i.created_at).toLocaleString('pt-BR') : '',
+      ...campos.map((c: any) => {
+        const v = i.dados?.[c.key];
+        return Array.isArray(v) ? v.join(', ') : (v ?? '');
+      }),
+    ]);
+    const csv = '﻿' + [header, ...linhas].map(l => l.map(esc).join(';')).join('\r\n');
+    const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));
+    const a = document.createElement('a');
+    const recorte = (filtrosAtivos > 0 || filtroOrigemAtivo || filtroLoteAtivo || busca.trim()) ? '-recorte' : '';
+    a.href = url; a.download = `inscritos-${ev.slug}${recorte}.csv`; a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  if (loading) return <div className="flex justify-center py-24"><Loader2 className="h-6 w-6 animate-spin text-primary" /></div>;
+  if (!ev) return (
+    <div className="max-w-3xl mx-auto px-4 py-16 text-center space-y-3">
+      <p className="text-muted-foreground">Evento não encontrado.</p>
+      <Button variant="outline" onClick={() => navigate('/inscricoes')}><ArrowLeft className="h-4 w-4 mr-1" /> Voltar pras inscrições</Button>
+    </div>
+  );
+
+  return (
+    <>
+    {anim && (
+      <div className="fixed inset-0 z-[200] flex items-center justify-center overflow-hidden"
+        style={{ background: 'radial-gradient(circle at 50% 40%, rgba(0,60,55,0.92), rgba(4,10,12,0.97))', backdropFilter: 'blur(6px)' }}>
+        <div className="absolute inset-0 opacity-30" style={{ background: 'conic-gradient(from 0deg at 50% 45%, transparent, rgba(0,179,157,0.25), transparent 60%)', animation: anim.fase === 'rolando' ? 'spin 8s linear infinite' : undefined }} />
+        <div className="relative text-center px-6">
+          <div className="uppercase tracking-[0.35em] text-white/60 text-sm mb-4">{anim.premio || 'Sorteio'}</div>
+          <div className="font-black tabular-nums leading-none"
+            style={{
+              fontSize: 'clamp(72px, 18vw, 180px)',
+              background: 'linear-gradient(90deg,#00d9bd,#00B39D,#7CF5E4)', WebkitBackgroundClip: 'text', backgroundClip: 'text', color: 'transparent',
+              filter: anim.fase === 'fim' ? 'drop-shadow(0 0 30px rgba(0,217,189,0.6))' : 'none',
+              transform: anim.fase === 'fim' ? 'scale(1)' : 'scale(0.96)', transition: 'transform .3s ease',
+            }}>
+            {String(rolNum).padStart(4, '0')}
+          </div>
+          {anim.fase === 'rolando' ? (
+            <div className="mt-6 text-white/80 text-lg tracking-wide animate-pulse">Sorteando…</div>
+          ) : (
+            <div className="mt-4">
+              <div className="text-white text-3xl sm:text-4xl font-bold">{anim.ganhador?.nome}</div>
+              <div className="text-teal-300 mt-1">🎉 Ganhador(a) do sorteio</div>
+              <button onClick={() => setAnim(null)}
+                className="mt-8 rounded-full bg-white/10 hover:bg-white/20 text-white px-8 py-2.5 text-sm font-semibold border border-white/20">
+                Fechar
+              </button>
+            </div>
+          )}
+        </div>
+      </div>
+    )}
+
+    {editOpen && <EventoModal evento={ev} areas={areas} onClose={() => setEditOpen(false)} onSaved={() => { setEditOpen(false); carregar(); }} />}
+    {qrOpen && (
+      <QrLinkDialog
+        link={link}
+        titulo={ev.nome}
+        nomeArquivo={`qr-${ev.slug}`}
+        descricao="Imprima ou projete no telão — quem escanear cai direto no formulário de inscrição."
+        onClose={() => setQrOpen(false)}
+      />
+    )}
+    {importarOpen && (
+      <ImportarEInscricaoDialog
+        eventoId={ev.id}
+        evento={ev}
+
+        onImportado={() => carregar()}
+        onClose={() => setImportarOpen(false)}
+      />
+    )}
+    {imprimirOpen && (
+      <ImprimirListaDialog
+        evento={ev}
+
+
+        inscritos={inscritos}
+        recorte={filtrosAtivos > 0 || !!busca.trim()}
+        totalEvento={(ev.inscritos || []).length}
+        onClose={() => setImprimirOpen(false)}
+      />
+    )}
+    {inscSel && (
+      <InscricaoDetalheDialog
+        inscricao={inscSel}
+        campos={ev.campos || []}
+        premios={premiosGanhos(inscSel.id)}
+        eventoId={ev.id}
+        evento={ev}
+        podeEditar={podeEditar}
+        onSaved={(atualizada: any) => { setInscSel(atualizada); carregar(); }}
+
+
+        onPago={async () => {
+          const lista = await carregar();
+          const fresca = lista?.find((i: any) => i.id === inscSel.id);
+          if (fresca) setInscSel(fresca);
+        }}
+        onClose={() => setInscSel(null)}
+      />
+    )}
+
+    <div className="max-w-6xl mx-auto px-4 py-6 space-y-5">
+      <button onClick={() => navigate('/inscricoes')} className="inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground">
+        <ArrowLeft className="h-4 w-4" /> Inscrições
+      </button>
+
+      {                         }
+      <Card className="glass-solid overflow-hidden">
+        {ev.capa_url && <img src={ev.capa_url} alt="capa do evento" className="w-full h-36 sm:h-48 object-cover" />}
+        <div className="p-4 sm:p-5 space-y-3">
+          <div className="flex items-start justify-between gap-3 flex-wrap">
+            <div className="min-w-0">
+              <h1 className="text-2xl font-extrabold break-words">{ev.nome}</h1>
+              <div className="flex flex-wrap gap-x-4 gap-y-1 text-sm text-muted-foreground mt-1.5">
+                <span className={`rounded px-1.5 py-0.5 text-xs font-medium ${STATUS_BADGE[ev.status] || ''}`}>{rotuloStatusEvento(ev.status)}</span>
+                <span className="rounded bg-foreground/8 px-1.5 py-0.5 text-xs">{ev.area}</span>
+                {ev.serie && (
+                  <span className="inline-flex items-center gap-1 text-xs"><Repeat className="h-3 w-3 text-primary" /> {ev.serie.nome}{ev.edicao_rotulo ? ` · ${ev.edicao_rotulo}` : ''}</span>
+                )}
+                {ev.data && <span className="inline-flex items-center gap-1"><CalendarDays className="h-4 w-4" />{new Date(ev.data + 'T00:00:00').toLocaleDateString('pt-BR')}</span>}
+                {ev.hora && <span className="inline-flex items-center gap-1"><Clock className="h-4 w-4" />{ev.hora}</span>}
+                {ev.local && <span className="inline-flex items-center gap-1"><MapPin className="h-4 w-4" />{ev.local}</span>}
+                <span className="inline-flex items-center gap-1"><Users className="h-4 w-4" />{ativos.length} confirmados{ev.vagas ? ` · ${ev.vagas} vagas` : ''}</span>
+                {ev.inscricoes_encerram_em && Date.now() > new Date(ev.inscricoes_encerram_em).getTime() && (
+                  <span className="text-amber-600 font-medium">inscrições encerradas</span>
+                )}
+              </div>
+            </div>
+            <div className="flex gap-2 flex-wrap">
+              {ev.status === 'rascunho' && (
+                <Button size="sm" onClick={publicar} title="Coloca o formulário no ar agora">
+                  <Megaphone className="h-3.5 w-3.5 mr-1" /> Publicar
+                </Button>
+              )}
+              {
+
+
+                                                            }
+              {inscricoesFechadas && (
+                <Button size="sm" onClick={reabrirInscricoes} title="Coloca o formulário público de volta no ar">
+                  <Megaphone className="h-3.5 w-3.5 mr-1" /> Reativar evento
+                </Button>
+              )}
+              {ev.status === 'publicado' && !prazoVencido && (
+                <Button size="sm" variant="outline" onClick={encerrarInscricoes} title="O formulário público para de aceitar novas inscrições">
+                  <Lock className="h-3.5 w-3.5 mr-1" /> Inativar evento
+                </Button>
+              )}
+              <Button size="sm" variant="outline" onClick={() => setEditOpen(true)}><Pencil className="h-3.5 w-3.5 mr-1" /> Editar</Button>
+              <Button size="sm" variant="ghost" onClick={excluir} className="text-red-600 hover:text-red-700"><Trash2 className="h-3.5 w-3.5 mr-1" /> Excluir</Button>
+            </div>
+          </div>
+          {ev.descricao && <p className="text-sm text-muted-foreground whitespace-pre-wrap">{ev.descricao}</p>}
+          <div className="flex flex-wrap gap-2 pt-1">
+            <Button size="sm" variant="outline" onClick={copiar}><Link2 className="h-3.5 w-3.5 mr-1" /> Copiar link</Button>
+            <a href={wa} target="_blank" rel="noreferrer"><Button size="sm" variant="outline"><MessageCircle className="h-3.5 w-3.5 mr-1 text-emerald-500" /> WhatsApp</Button></a>
+            <Button size="sm" variant="outline" onClick={() => setQrOpen(true)}><QrCode className="h-3.5 w-3.5 mr-1" /> QR Code</Button>
+            {podeCheckin && (
+              <Button size="sm" variant="outline" onClick={() => navigate(`/inscricoes/evento/${id}/checkin`)}
+                title="Tela de check-in do dia: leitura do QR do comprovante + busca por nome/CPF">
+                <ScanLine className="h-3.5 w-3.5 mr-1" /> Check-in
+              </Button>
+            )}
+            {
+
+                                                                            }
+            {podeEditar && !!ev.checkout_externo_url && (
+              <Button size="sm" variant="outline" onClick={() => setImportarOpen(true)}
+                title={`Sobe a exportação de inscrições do ${ev.checkout_externo_nome || 'E-Inscrição'} e traz quem pagou no cartão pra cá`}>
+                <Upload className="h-3.5 w-3.5 mr-1" /> Importar inscrições
+              </Button>
+            )}
+            <a href={link} target="_blank" rel="noreferrer"><Button size="sm" variant="ghost"><ExternalLink className="h-3.5 w-3.5 mr-1" /> Abrir formulário</Button></a>
+          </div>
+        </div>
+      </Card>
+
+      {                                                }
+      {resumo && (
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
+          <PlacarTile label="Inscritos" valor={resumo.ativos} dica="Sem contar as canceladas" />
+          <PlacarTile label="Confirmadas" valor={resumo.confirmadas} cor="text-emerald-600"
+            dica="Pagamento confirmado ou evento gratuito" />
+          {ev.pagamento_ativo && (
+            <PlacarTile label="Aguardando pagamento" valor={resumo.aguardando_pagamento} cor="text-amber-600"
+              dica="Vaga reservada até o prazo — depois volta pra fila" />
+          )}
+          {ev.pagamento_ativo && (
+            <PlacarTile
+              label="Arrecadado"
+
+
+              valor={(() => {
+                const pp = resumo.por_plataforma;
+                const total = pp && pp.externo?.inscritos > 0 ? pp.total_centavos : resumo.arrecadado_centavos;
+                return total == null ? '—' : (total / 100).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
+              })()}
+              cor="text-primary"
+              dica={resumo.por_plataforma?.externo?.inscritos > 0
+                ? 'Total: Pix pago aqui + valor LÍQUIDO do E-Inscrição (taxa da plataforma já descontada). O detalhe por plataforma está logo abaixo.'
+                : 'Soma das inscrições PAGAS. É acompanhamento do evento — o caixa recebe o repasse do provedor, lançado no Financeiro.'}
+            />
+          )}
+          {ev.checkin_ativo && (
+            <PlacarTile label="Presentes" valor={resumo.presentes} dica="Check-in feito na entrada" />
+          )}
+          {
+                                                                                 }
+          {ev.pagamento_ativo && resumo.comprovantes_em_analise > 0 && (
+            <PlacarTile label="Comprovantes pra conferir" valor={resumo.comprovantes_em_analise} cor="text-amber-600"
+              dica="Pix/transferência anexado pela pessoa · confira e confirme na ficha dela" />
+          )}
+        </div>
+      )}
+
+      {
+                                                                                }
+      {resumo && ev.pagamento_ativo && (Object.keys(resumo.por_metodo || {}).length > 0 || resumo.isentas > 0) && (
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground px-1">
+          <span className="font-medium text-foreground">Como pagaram:</span>
+          {Object.entries(resumo.por_metodo || {})
+            .sort((a: any, b: any) => b[1] - a[1])
+            .map(([m, n]: any) => (
+              <span key={m}>
+                {m === 'nao_informado' ? 'Forma não informada' : (METODO_LABEL[m] || m)} <b className="text-foreground">{n}</b>
+              </span>
+            ))}
+          {resumo.isentas > 0 && <span>Isentas <b className="text-primary">{resumo.isentas}</b></span>}
+        </div>
+      )}
+
+      {
+
+                                                                                   }
+      {resumo?.por_plataforma && resumo.por_plataforma.externo?.inscritos > 0 && (
+        <Card className="glass-solid p-3">
+          <div className="text-[11px] uppercase tracking-wide text-muted-foreground mb-2">Por plataforma</div>
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-sm">
+            <div className="rounded-lg border border-border p-2.5">
+              <div className="text-[11px] text-muted-foreground">Sistema (Pix)</div>
+              <div className="font-semibold tabular-nums">{resumo.por_plataforma.sistema.inscritos} inscritos</div>
+              <div className="text-xs text-muted-foreground tabular-nums">{brl(resumo.por_plataforma.sistema.arrecadado_centavos)} pagos</div>
+            </div>
+            <div className="rounded-lg border border-sky-500/40 bg-sky-500/5 p-2.5">
+              <div className="text-[11px] text-sky-700 dark:text-sky-300 inline-flex items-center gap-1"><ExternalLink className="h-3 w-3" /> {resumo.por_plataforma.externo.plataforma || 'E-Inscrição'} (cartão)</div>
+              <div className="font-semibold tabular-nums">{resumo.por_plataforma.externo.inscritos} inscritos</div>
+              <div className="text-xs text-muted-foreground tabular-nums" title="Valor que chega na conta: bruto menos a taxa retida pela plataforma">
+                {brl(resumo.por_plataforma.externo.valor_liquido_centavos)} líquidos
+              </div>
+            </div>
+            <div className="rounded-lg border border-primary/40 bg-primary/5 p-2.5">
+              <div className="text-[11px] text-primary">Total</div>
+              <div className="font-semibold tabular-nums">
+                {resumo.por_plataforma.total_inscritos} inscritos{ev.vagas ? <span className="text-muted-foreground font-normal"> de {ev.vagas} vagas</span> : null}
+              </div>
+              <div className="text-xs text-muted-foreground tabular-nums">{brl(resumo.por_plataforma.total_centavos)}</div>
+            </div>
+          </div>
+        </Card>
+      )}
+
+      {             }
+      {(ev.tem_sorteio !== false) && (
+        <Card className="glass-solid p-4">
+          <div className="text-sm font-semibold mb-2 flex items-center justify-between">
+            <span className="flex items-center gap-1.5"><Gift className="h-4 w-4 text-primary" /> Sorteio
+              <span className="text-[11px] font-normal text-muted-foreground">· só quem fez check-in concorre</span>
+            </span>
+            {(ev.premios || []).length > 0 && (ev.premios || []).some((p: string) => !sorteioDoPremio(p)) && (
+              <Button size="sm" variant="outline" onClick={sortearTodos} disabled={sorteando || !ativos.length}>
+                {sorteando ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : 'Sortear todos'}
+              </Button>
+            )}
+          </div>
+          {(ev.premios || []).length > 0 ? (
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-1.5">
+              {(ev.premios || []).map((p: string, i: number) => {
+                const s = sorteioDoPremio(p);
+                return (
+                  <div key={i} className="flex items-center justify-between gap-2 rounded-md border border-border/60 px-2.5 py-1.5">
+                    <div className="min-w-0">
+                      <div className="text-sm font-medium truncate">{p || `${i + 1}º prêmio`}</div>
+                      {s && <div className="text-xs text-primary">🎉 Nº {s.numero_sorteado} · {s.ganhador_nome}</div>}
+                    </div>
+                    {s ? (
+                      <Button size="sm" variant="ghost" onClick={() => sortearPremio(p, true)} disabled={sorteando} className="text-xs shrink-0">Re-sortear</Button>
+                    ) : (
+                      <Button size="sm" onClick={() => sortearPremio(p)} disabled={sorteando || !ativos.length} className="shrink-0">
+                        {sorteando ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Sortear'}
+                      </Button>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          ) : (
+            <p className="text-xs text-muted-foreground py-1">
+              Nenhum prêmio definido. Clique em <b>"Editar"</b> e adicione os prêmios do sorteio pra sortear um ganhador por prêmio.
+            </p>
+          )}
+        </Card>
+      )}
+
+      {
+
+                                                                           }
+      {ev.pagamento_ativo && podeVerBeneficios && (
+        <BeneficiosCard eventoId={ev.id} evento={ev} podeEditar={podeEditar} />
+      )}
+
+      {               }
+      <Card className="glass-solid p-4">
+        <div className="flex items-center justify-between gap-3 flex-wrap mb-3">
+          <div className="text-sm font-semibold flex items-center gap-1.5"><Users className="h-4 w-4 text-primary" /> Inscritos ({ativos.length})</div>
+          {(ev.inscritos?.length || 0) > 0 && (
+            <div className="flex items-center gap-2 flex-wrap">
+              <Button size="sm" variant="outline" className="h-8" onClick={() => setImprimirOpen(true)}
+                title="Imprimir a lista de participantes (por faixa de idade, sexo…)">
+                <Printer className="h-3.5 w-3.5 mr-1" /> Imprimir lista
+              </Button>
+              {podeExportar && (
+                <Button size="sm" variant="outline" className="h-8" onClick={exportarCsv} title="Baixar a lista em CSV (Excel)">
+                  <Download className="h-3.5 w-3.5 mr-1" /> Exportar CSV
+                </Button>
+              )}
+              {
+                                                              }
+              <div className="inline-flex rounded-md border border-border overflow-hidden h-8" role="group" aria-label="Modo de visualização">
+                <button type="button" onClick={() => setModoLista('cards')} title="Detalhado: um card por pessoa, com as respostas"
+                  className={`px-2.5 inline-flex items-center gap-1 text-xs ${modoLista === 'cards' ? 'bg-primary text-primary-foreground' : 'bg-transparent text-muted-foreground hover:bg-foreground/5'}`}>
+                  <List className="h-3.5 w-3.5" /> Detalhado
+                </button>
+                <button type="button" onClick={() => setModoLista('tabela')} title="Tabela: uma linha por pessoa, só o essencial"
+                  className={`px-2.5 inline-flex items-center gap-1 text-xs border-l border-border ${modoLista === 'tabela' ? 'bg-primary text-primary-foreground' : 'bg-transparent text-muted-foreground hover:bg-foreground/5'}`}>
+                  <Table className="h-3.5 w-3.5" /> Tabela
+                </button>
+              </div>
+              {modoLista === 'cards' && (() => {
+                const todosRecolhidos = (ev.inscritos || []).length > 0 && (ev.inscritos || []).every((i: any) => recolhidos.has(i.id));
+                return (
+                  <Button size="sm" variant="outline" className="h-8"
+                    onClick={() => setRecolhidos(todosRecolhidos ? new Set() : new Set((ev.inscritos || []).map((i: any) => i.id)))}>
+                    {todosRecolhidos
+                      ? <><ChevronsUpDown className="h-3.5 w-3.5 mr-1" /> Expandir todos</>
+                      : <><ChevronsDownUp className="h-3.5 w-3.5 mr-1" /> Recolher todos</>}
+                  </Button>
+                );
+              })()}
+              {
+                                                                }
+              {mostraFiltroOrigem && (
+                <select
+                  value={origemFiltro}
+                  onChange={e => setOrigemFiltro(e.target.value as OrigemFiltro)}
+                  title="Onde se inscreveu"
+                  aria-label="Onde se inscreveu"
+                  className={`h-8 rounded-md border bg-[var(--cbrio-input-bg)] text-sm px-2 max-w-[15rem] ${filtroOrigemAtivo ? 'border-primary text-primary' : 'border-border'}`}
+                >
+                  <option value="todos">Onde se inscreveu · todos ({contagemOrigem.todos})</option>
+                  <option value="sistema">Sistema · Pix ({contagemOrigem.sistema})</option>
+                  <option value="e_inscricao">E-Inscrição · cartão ({contagemOrigem.externo})</option>
+                </select>
+              )}
+              {                                                                       }
+              {mostraFiltroLote && (
+                <select
+                  value={loteFiltro}
+                  onChange={e => setLoteFiltro(e.target.value)}
+                  title="Lote comprado"
+                  aria-label="Lote comprado"
+                  className={`h-8 rounded-md border bg-[var(--cbrio-input-bg)] text-sm px-2 max-w-[15rem] ${filtroLoteAtivo ? 'border-primary text-primary' : 'border-border'}`}
+                >
+                  <option value="todos">Lote · todos</option>
+                  {lotesNaLista.opcoes.map(o => <option key={o.nome} value={o.nome}>{o.nome} ({o.total})</option>)}
+                  {lotesNaLista.semLote > 0 && <option value={SEM_LOTE}>Sem lote ({lotesNaLista.semLote})</option>}
+                </select>
+              )}
+              {                                                                }
+              {camposFiltro.map(c => (
+                <select
+                  key={c.key}
+                  value={filtrosCampo[c.key] ?? TODOS}
+                  onChange={e => setFiltrosCampo(prev => ({ ...prev, [c.key]: e.target.value }))}
+                  title={c.label}
+                  aria-label={c.label}
+                  className={`h-8 rounded-md border bg-[var(--cbrio-input-bg)] text-sm px-2 max-w-[15rem] ${
+                    (filtrosCampo[c.key] ?? TODOS) !== TODOS ? 'border-primary text-primary' : 'border-border'
+                  }`}
+                >
+                  <option value={TODOS}>{c.label} · todos</option>
+                  {c.opcoes.map(o => (
+                    <option key={o.valor} value={o.valor}>
+                      {o.rotulo} ({o.total}){o.foraDoCatalogo ? ' · fora da lista' : ''}
+                    </option>
+                  ))}
+                  {c.semResposta > 0 && (
+                    <option value={SEM_RESPOSTA}>Sem resposta ({c.semResposta})</option>
+                  )}
+                </select>
+              ))}
+              {filtrosAtivos > 0 && (
+                <Button size="sm" variant="ghost" className="h-8 text-xs" onClick={() => setFiltrosCampo({})}>
+                  Limpar {filtrosAtivos === 1 ? 'filtro' : 'filtros'}
+                </Button>
+              )}
+              <div className="relative">
+                <Search className="h-3.5 w-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground" />
+                <Input placeholder="Buscar por nome, telefone ou nº" value={busca} onChange={e => setBusca(e.target.value)} className="h-8 pl-8 text-sm w-64 max-w-full" />
+              </div>
+            </div>
+          )}
+          {
+                                                                                  }
+          {(filtrosAtivos > 0 || filtroOrigemAtivo || filtroLoteAtivo || busca.trim()) && (ev.inscritos || []).length > 0 && (
+            <p className="text-xs text-muted-foreground">
+              Mostrando <strong className="text-foreground">{inscritos.length}</strong> de {(ev.inscritos || []).length} inscritos.
+            </p>
+          )}
+        </div>
+        {
+
+
+                                             }
+        {podeEditar && inscritos.length > 0 && (
+          <div className="flex items-center gap-2 flex-wrap text-xs mb-2">
+            <Button size="sm" variant="ghost" className="h-7 px-2 text-xs"
+              onClick={selecionadas.size ? () => setSelecionadas(new Set()) : selecionarVisiveis}>
+              {selecionadas.size ? 'Limpar seleção' : `Selecionar ${inscritos.length === (ev.inscritos || []).length ? 'todos' : `os ${inscritos.length} do filtro`}`}
+            </Button>
+            {selecionadas.size > 0 && (
+              <>
+                <span className="text-muted-foreground">
+                  {selecionadas.size} selecionada{selecionadas.size > 1 ? 's' : ''}
+                </span>
+                <Button size="sm" variant="ghost" disabled={excluindoLote} onClick={excluirSelecionadas}
+                  className="h-7 px-2 text-xs text-red-600 hover:text-red-700 hover:bg-red-500/10">
+                  {excluindoLote
+                    ? <><Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" /> Excluindo…</>
+                    : <><Trash2 className="h-3.5 w-3.5 mr-1" /> Excluir selecionadas</>}
+                </Button>
+              </>
+            )}
+          </div>
+        )}
+        {(ev.inscritos || []).length === 0 ? (
+          <p className="text-sm text-muted-foreground py-4 text-center">Ninguém se inscreveu ainda.</p>
+        ) : inscritos.length === 0 ? (
+          <p className="text-sm text-muted-foreground py-4 text-center">
+            {(filtrosAtivos > 0 || filtroOrigemAtivo || filtroLoteAtivo) && busca.trim()
+              ? 'Nenhum inscrito bate com o filtro e a busca.'
+              : (filtrosAtivos > 0 || filtroOrigemAtivo || filtroLoteAtivo)
+                ? 'Nenhum inscrito neste filtro.'
+                : 'Nenhum inscrito bate com a busca.'}
+          </p>
+        ) : modoLista === 'tabela' ? (
+          <TabelaInscritos inscritos={inscritos} ev={ev} podeEditar={podeEditar}
+            selecionadas={selecionadas} alternarSelecao={alternarSelecao}
+            onAbrir={setInscSel} onExcluir={excluirInscrito} premiosGanhos={premiosGanhos} />
+        ) : (
+          <div className="space-y-2">
+            {inscritos.map((i: any) => {
+              const ganhos = premiosGanhos(i.id);
+              const tel = String(i.telefone || '').replace(/\D/g, '');
+              const respostas = (ev.campos || []).filter((c: any) => {
+                const v = i.dados?.[c.key];
+                return Array.isArray(v) ? v.length > 0 : !!v;
+              });
+              const recolhido = recolhidos.has(i.id);
+              const cancelada = i.status === 'cancelada';
+              return (
+                <div key={i.id} onClick={() => setInscSel(i)}
+                  className={`rounded-lg border p-3 cursor-pointer transition-colors ${cancelada ? 'opacity-60' : ''} ${
+                    selecionadas.has(i.id)
+                      ? 'border-primary/60 bg-primary/10'
+                      : 'border-border hover:border-primary/40 hover:bg-primary/5'}`}>
+                  {                                                              }
+                  <div className="flex items-center justify-between gap-2 flex-wrap">
+                    <div className="flex items-center gap-2 min-w-0">
+                      {
+
+                                                     }
+                      {podeEditar && (
+                        <input type="checkbox" checked={selecionadas.has(i.id)}
+                          onClick={e => e.stopPropagation()}
+                          onChange={() => alternarSelecao(i.id)}
+                          title="Selecionar para excluir"
+                          className="h-4 w-4 shrink-0 accent-[#00B39D] cursor-pointer" />
+                      )}
+                      {i.numero_sorte != null && (
+                        <span className="inline-flex items-center rounded-full bg-primary/15 text-primary text-xs font-bold px-2 py-0.5 tabular-nums shrink-0">
+                          Nº {i.numero_sorte}
+                        </span>
+                      )}
+                      <span className="font-semibold text-sm truncate">{i.nome_completo}</span>
+                      {
+                                                                                 }
+                      {i.codigo && (
+                        <span className="text-[11px] font-mono text-muted-foreground shrink-0" title="Código da inscrição">
+                          {i.codigo}
+                        </span>
+                      )}
+                      {cancelada && <span className="rounded-full bg-red-500/10 text-red-600 text-[11px] font-medium px-2 py-0.5 shrink-0">cancelada</span>}
+                      {ehEInscricao(i) && <EInscricaoBadge inscricao={i} />}
+                      <LoteBadge lote={i.lote} />
+                      {i.telefone && (
+                        <a href={`https://wa.me/55${tel}`} target="_blank" rel="noreferrer"
+                          title="Enviar WhatsApp" onClick={e => e.stopPropagation()}
+                          className="inline-flex items-center gap-1 text-xs text-emerald-600 hover:text-emerald-700 shrink-0">
+                          <MessageCircle className="h-3.5 w-3.5" /> {i.telefone}
+                        </a>
+                      )}
+                      {ganhos.length > 0 && (
+                        <span className="inline-flex items-center gap-1 rounded-full bg-amber-500/15 text-amber-600 text-[11px] font-semibold px-2 py-0.5 shrink-0">
+                          <Gift className="h-3 w-3" /> {ganhos.length > 1 ? `${ganhos.length} prêmios` : (ganhos[0].premio || 'Prêmio')}
+                        </span>
+                      )}
+                      {
+
+                                     }
+                      {idadeEmAnos(i.data_nascimento) != null && (
+                        <span className="text-[11px] text-muted-foreground shrink-0 tabular-nums"
+                          title={faixaLabel(i.data_nascimento)}>
+                          {idadeEmAnos(i.data_nascimento)} anos
+                        </span>
+                      )}
+                      {i.sexo && (
+                        <span className="text-[11px] text-muted-foreground shrink-0">{sexoLabel(i.sexo)}</span>
+                      )}
+                      {
+                                                                         }
+                      {i.bolsa_tipo === 'integral' && (
+                        <span className="inline-flex items-center gap-1 rounded-full text-[11px] font-medium px-2 py-0.5 shrink-0 bg-primary/15 text-primary"
+                          title={i.bolsa_motivo || 'Bolsa integral'}>
+                          isenta
+                        </span>
+                      )}
+                      {i.bolsa_tipo === 'parcial' && (
+                        <span className="inline-flex items-center gap-1 rounded-full text-[11px] font-medium px-2 py-0.5 shrink-0 bg-primary/15 text-primary"
+                          title={i.bolsa_motivo || 'Bolsa parcial'}>
+                          bolsa
+                        </span>
+                      )}
+                      {i.bolsa_tipo !== 'integral' && i.pagamento?.status_pagamento && (
+                        <span className={`inline-flex items-center gap-1 rounded-full text-[11px] font-medium px-2 py-0.5 shrink-0 ${PAG_BADGE[i.pagamento.status_pagamento] || 'bg-foreground/10 text-muted-foreground'}`}
+                          title={i.pagamento.metodo ? `Forma: ${METODO_LABEL[i.pagamento.metodo] || i.pagamento.metodo}` : undefined}>
+                          <CreditCard className="h-3 w-3" />
+                          {PAG_LABEL[i.pagamento.status_pagamento] || i.pagamento.status_pagamento}
+                          {i.pagamento.metodo ? ` · ${METODO_LABEL[i.pagamento.metodo] || i.pagamento.metodo}` : ''}
+                        </span>
+                      )}
+                      {
+                                                                     }
+                      {i.comprovantes?.em_analise > 0 && (
+                        <span className="inline-flex items-center gap-1 rounded-full text-[11px] font-medium px-2 py-0.5 shrink-0 bg-amber-500/15 text-amber-600"
+                          title="Comprovante de Pix/transferência aguardando conferência">
+                          <Paperclip className="h-3 w-3" /> comprovante
+                        </span>
+                      )}
+                      {recolhido && respostas.length > 0 && (
+                        <span className="text-[11px] text-muted-foreground shrink-0">{respostas.length} resposta{respostas.length > 1 ? 's' : ''}</span>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      <span className="text-[11px] text-muted-foreground">
+                        {i.created_at ? new Date(i.created_at).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : ''}
+                      </span>
+                      {respostas.length > 0 && (
+                        <button
+                          onClick={e => { e.stopPropagation(); toggleRecolhido(i.id); }}
+                          title={recolhido ? 'Expandir respostas' : 'Recolher respostas'}
+                          className="p-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-foreground/5 transition-colors">
+                          {recolhido ? <ChevronDown className="h-4 w-4" /> : <ChevronUp className="h-4 w-4" />}
+                        </button>
+                      )}
+                      <button
+                        onClick={e => { e.stopPropagation(); excluirInscrito(i); }}
+                        title="Excluir inscrição"
+                        className="p-1 rounded-md text-muted-foreground hover:text-red-600 hover:bg-red-500/10 transition-colors">
+                        <Trash2 className="h-4 w-4" />
+                      </button>
+                    </div>
+                  </div>
+                  {                                                                 }
+                  {!recolhido && respostas.length > 0 && (
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-x-4 gap-y-2 mt-2.5 pt-2.5 border-t border-border/50">
+                      {respostas.map((c: any) => {
+                        const v = i.dados?.[c.key];
+                        return (
+                          <div key={c.key} className="min-w-0">
+                            <div className="text-[11px] text-muted-foreground truncate" title={c.label}>{c.label}</div>
+                            {c.tipo === 'imagem' && ehImagemUrl(v) ? (
+                              <a href={v} target="_blank" rel="noreferrer" title="Abrir imagem" onClick={e => e.stopPropagation()}>
+                                <img src={v} alt={c.label} className="mt-0.5 h-10 w-auto max-w-[120px] object-contain rounded border border-border" />
+                              </a>
+                            ) : c.tipo === 'imagem' && /^https?:\/\//i.test(String(v)) ? (
+                              <a href={v} target="_blank" rel="noreferrer" onClick={e => e.stopPropagation()}
+                                className="text-sm text-primary hover:underline break-all line-clamp-2">{v}</a>
+                            ) : (
+                              <div className="text-sm break-words line-clamp-2" title={Array.isArray(v) ? v.join(', ') : String(v)}>
+                                {Array.isArray(v) ? v.join(', ') : v}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                  {
+
+
+
+
+
+                                                                        }
+                  {i.responsavel && (
+                    <div className="mt-2.5 pt-2.5 border-t border-amber-500/40 rounded-md">
+                      <div className="text-[11px] font-semibold text-amber-600 uppercase tracking-wide">
+                        Menor de idade · responsável
+                      </div>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-x-4 gap-y-1 mt-1">
+                        <div className="min-w-0">
+                          <div className="text-[11px] text-muted-foreground">Nome</div>
+                          <div className="text-sm break-words">{i.responsavel.nome}</div>
+                        </div>
+                        <div className="min-w-0">
+                          <div className="text-[11px] text-muted-foreground">Parentesco</div>
+                          <div className="text-sm">{i.responsavel.parentesco || '—'}</div>
+                        </div>
+                        <div className="min-w-0">
+                          <div className="text-[11px] text-muted-foreground">Celular</div>
+                          {i.responsavel.telefone ? (
+                            <a href={`tel:+55${i.responsavel.telefone}`} onClick={e => e.stopPropagation()}
+                              className="text-sm text-primary hover:underline">{i.responsavel.telefone}</a>
+                          ) : <div className="text-sm">—</div>}
+                        </div>
+                        <div className="min-w-0">
+                          <div className="text-[11px] text-muted-foreground">E-mail</div>
+                          <div className="text-sm break-all line-clamp-1" title={i.responsavel.email || ''}>
+                            {i.responsavel.email || '—'}
+                          </div>
+                        </div>
+                      </div>
+                      {
+                                                                                 }
+                      <div className="text-[11px] mt-1">
+                        <span className="text-muted-foreground">Batismo no evento: </span>
+                        {i.responsavel.autoriza_batismo === true ? (
+                          <span className="text-primary font-semibold">autorizado pelo responsável</span>
+                        ) : i.responsavel.autoriza_batismo === false ? (
+                          <span className="text-red-600 font-semibold">NÃO autorizado</span>
+                        ) : (
+                          <span className="text-muted-foreground">não respondido — perguntar antes de incluir</span>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
+        {(ev.inscritos?.length || 0) > 0 && (
+          <p className="text-[11px] text-muted-foreground mt-2">Clique na pessoa pra ver o detalhamento completo da inscrição.</p>
+        )}
+      </Card>
+    </div>
+    </>
+  );
+}
+
+
+
+
+
+
+
+
+const AGRUPAMENTOS: { key: Agrupamento; label: string; dica: string }[] = [
+  { key: 'nenhum', label: 'Ordem alfabética (A–Z)', dica: 'Uma lista só, do A ao Z — todo mundo na mesma tabela' },
+  { key: 'faixa', label: 'Faixa de idade', dica: 'Criança · Adolescente · Jovem · Adulto (folha dividida em blocos)' },
+  { key: 'sexo', label: 'Sexo', dica: 'Feminino · Masculino (folha dividida em blocos)' },
+  { key: 'status', label: 'Status', dica: 'Confirmadas · Aguardando pagamento' },
+  { key: 'pagamento', label: 'Pagamento', dica: 'Pago · Aguardando · Sem cobrança' },
+];
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+function ImportarEInscricaoDialog({ eventoId, evento, onClose, onImportado }: {
+  eventoId: string; evento: any; onClose: () => void; onImportado: () => void;
+}) {
+  const [arquivo, setArquivo] = useState<File | null>(null);
+  const [previa, setPrevia] = useState<any>(null);
+  const [ocupado, setOcupado] = useState<'previa' | 'gravando' | null>(null);
+  const [resultado, setResultado] = useState<any>(null);
+  const [erro, setErro] = useState<string | null>(null);
+  const inputRef = useRef<HTMLInputElement | null>(null);
+
+  async function analisar(f: File) {
+    setArquivo(f); setPrevia(null); setResultado(null); setErro(null);
+    setOcupado('previa');
+    try {
+      const r: any = await api.importarEInscricao(eventoId, f, false);
+      setPrevia(r?.previa || null);
+    } catch (e: any) {
+      setErro(e?.message || 'Não consegui ler a planilha');
+    } finally { setOcupado(null); }
+  }
+
+  async function gravar() {
+    if (!arquivo) return;
+    setOcupado('gravando'); setErro(null);
+    try {
+      const r: any = await api.importarEInscricao(eventoId, arquivo, true);
+      setResultado(r?.resultado || null);
+      setPrevia(r?.previa || previa);
+      const n = r?.resultado?.inseridas?.length || 0;
+      const c = r?.resultado?.canceladas?.length || 0;
+      if (r?.resultado?.erros?.length) toast.warning(`${n} importada(s), mas ${r.resultado.erros.length} linha(s) falharam`);
+      else if (n || c) toast.success(`${n} inscrição(ões) importada(s)${c ? ` · ${c} cancelada(s)` : ''}`);
+      else toast.info('Nada novo na planilha — o sistema já estava em dia');
+      onImportado();
+    } catch (e: any) {
+      setErro(e?.message || 'Erro ao importar');
+    } finally { setOcupado(null); }
+  }
+
+  const nInserir = previa?.inserir?.length || 0;
+  const nCancelar = previa?.cancelar?.length || 0;
+  const nPular = previa?.pular?.length || 0;
+  const nInvalidas = previa?.invalidas?.length || 0;
+  const plataforma = evento?.checkout_externo_nome || 'E-Inscrição';
+
+  return (
+    <Dialog open onOpenChange={(o) => { if (!o && !ocupado) onClose(); }}>
+      <DialogContent className="max-w-2xl flex flex-col max-h-[88vh]">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <Upload className="h-4 w-4 text-primary" /> Importar inscrições do {plataforma}
+          </DialogTitle>
+        </DialogHeader>
+
+        <div className="flex-1 overflow-y-auto min-h-0 space-y-3 text-sm">
+          {                                                                        }
+          <div className="rounded-lg border border-border bg-foreground/[0.03] p-3 space-y-1.5">
+            <div className="font-medium">Como pegar o arquivo</div>
+            <ol className="list-decimal ml-4 space-y-0.5 text-muted-foreground text-[13px]">
+              <li>No painel do {plataforma}, abra as inscrições deste evento.</li>
+              <li>Clique em <strong>Exportar</strong> e escolha <strong>CSV</strong>.</li>
+              <li>Suba o arquivo aqui <strong>como veio</strong> — sem abrir, sem apagar coluna, sem renomear.</li>
+            </ol>
+            <div className="text-[12px] text-muted-foreground pt-0.5">
+              Pode subir a planilha inteira toda semana: quem já está no sistema é
+              <strong> reconhecido e pulado</strong>, e nada do que já existe aqui é sobrescrito.
+              O valor gravado é o <strong>líquido</strong> (o bruto menos a taxa da plataforma).
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2 flex-wrap">
+            <input
+              ref={inputRef} type="file" accept=".csv,text/csv" className="hidden"
+              onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ''; if (f) analisar(f); }}
+            />
+            <Button size="sm" variant="outline" type="button"
+              onClick={() => inputRef.current?.click()} disabled={!!ocupado}>
+              {ocupado === 'previa' ? <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" /> : <Paperclip className="h-3.5 w-3.5 mr-1" />}
+              {arquivo ? 'Trocar arquivo' : 'Escolher a planilha (.csv)'}
+            </Button>
+            {arquivo && <span className="text-xs text-muted-foreground break-all">{arquivo.name}</span>}
+          </div>
+
+          {erro && (
+            <div className="rounded-lg border border-red-500/40 bg-red-500/5 p-3 text-red-700 dark:text-red-300 text-[13px]">{erro}</div>
+          )}
+
+          {previa && (
+            <>
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                <PlacarTile label={resultado ? 'Importadas' : 'Vão entrar'} valor={resultado ? (resultado.inseridas?.length || 0) : nInserir} cor="text-emerald-600" dica="Inscrições novas, com o valor líquido da plataforma" />
+                <PlacarTile label="Já no sistema" valor={nPular} dica="Reconhecidas pelo código da plataforma ou pelo CPF — ficam como estão" />
+                <PlacarTile label="Canceladas lá" valor={resultado ? (resultado.canceladas?.length || 0) : nCancelar} cor={nCancelar ? 'text-amber-600' : undefined} dica="Cancelamento feito na plataforma, refletido aqui" />
+                <PlacarTile label="Fora do contrato" valor={nInvalidas} cor={nInvalidas ? 'text-red-600' : undefined} dica="Faltam dados obrigatórios — não entram; precisa corrigir na plataforma" />
+              </div>
+
+              {nInserir > 0 && !resultado && (
+                <div className="text-[13px] text-muted-foreground">
+                  Entram <strong className="text-foreground">{brl(previa.dinheiro?.liquido_centavos)}</strong> líquidos
+                  <span className="tabular-nums"> ({brl(previa.dinheiro?.bruto_centavos)} bruto − {previa.dinheiro?.taxa_pct}% de taxa)</span>.
+                </div>
+              )}
+
+              {                                                          }
+              {nInserir > 0 && (
+                <div className="rounded-lg border border-border overflow-hidden">
+                  <div className="px-3 py-1.5 text-[11px] uppercase tracking-wide text-muted-foreground bg-foreground/[0.03]">
+                    {resultado ? 'Importadas' : 'Vão entrar'}
+                  </div>
+                  <ul className="divide-y divide-border max-h-56 overflow-y-auto">
+                    {previa.inserir.map((p: any, i: number) => {
+                      const gravada = resultado?.inseridas?.find((x: any) => x.codigo_plataforma === p.codigo_plataforma);
+                      return (
+                        <li key={p.codigo_plataforma || i} className="px-3 py-1.5 text-[13px]">
+                          <div className="flex items-baseline justify-between gap-2 flex-wrap">
+                            <span className="font-medium break-words">{p.nome}</span>
+                            <span className="text-xs text-muted-foreground tabular-nums">
+                              {p.idade != null ? `${p.idade} anos · ` : ''}{brl(p.valor_centavos)}
+                              {gravada ? <span className="text-emerald-600"> · {gravada.codigo} · {gravada.vinculo}</span> : null}
+                            </span>
+                          </div>
+                          {p.responsavel_nome && <div className="text-[11px] text-muted-foreground">responsável: {p.responsavel_nome}</div>}
+                          {p.alertas?.length > 0 && (
+                            <div className="text-[11px] text-amber-600 dark:text-amber-400">⚠️ {p.alertas.join(' · ')}</div>
+                          )}
+                        </li>
+                      );
+                    })}
+                  </ul>
+                </div>
+              )}
+
+              {nCancelar > 0 && (
+                <div className="rounded-lg border border-amber-500/40 bg-amber-500/5 p-2.5 text-[13px]">
+                  <div className="font-medium text-amber-700 dark:text-amber-300">Canceladas na plataforma — vão ser canceladas aqui</div>
+                  <ul className="ml-4 list-disc text-muted-foreground">
+                    {previa.cancelar.map((p: any, i: number) => <li key={i}>{p.nome} ({p.codigo})</li>)}
+                  </ul>
+                </div>
+              )}
+
+              {nInvalidas > 0 && (
+                <div className="rounded-lg border border-red-500/40 bg-red-500/5 p-2.5 text-[13px]">
+                  <div className="font-medium text-red-700 dark:text-red-300">Não entram — falta dado obrigatório na planilha</div>
+                  <ul className="ml-4 list-disc text-muted-foreground">
+                    {previa.invalidas.map((p: any, i: number) => <li key={i}>{p.nome} — sem {p.faltam.join(', ')}</li>)}
+                  </ul>
+                  <div className="text-[11px] text-muted-foreground pt-1">
+                    Corrija na plataforma e exporte de novo, ou cadastre essas pessoas à mão aqui.
+                  </div>
+                </div>
+              )}
+
+              {previa.keys_desconhecidas?.length > 0 && (
+                <div className="text-[11px] text-muted-foreground">
+                  ⚠️ Respostas que este evento não pergunta ({previa.keys_desconhecidas.join(', ')}) ficam gravadas na
+                  inscrição, mas não aparecem na ficha.
+                </div>
+              )}
+
+              {resultado?.erros?.length > 0 && (
+                <div className="rounded-lg border border-red-500/40 bg-red-500/5 p-2.5 text-[13px]">
+                  <div className="font-medium text-red-700 dark:text-red-300">Linhas que falharam ao gravar</div>
+                  <ul className="ml-4 list-disc text-muted-foreground">
+                    {resultado.erros.map((e: any, i: number) => <li key={i}>{e.nome}: {e.erro}</li>)}
+                  </ul>
+                </div>
+              )}
+
+              {resultado && (resultado.sem_vinculo > 0) && (
+                <div className="text-[11px] text-muted-foreground">
+                  {resultado.sem_vinculo} inscrição(ões) entraram sem vínculo com a membresia — aparecem na lista, mas
+                  não estão ligadas a um cadastro de pessoa.
+                </div>
+              )}
+            </>
+          )}
+        </div>
+
+        <div className="flex justify-end gap-2 pt-3 border-t border-border">
+          <Button size="sm" variant="ghost" onClick={onClose} disabled={ocupado === 'gravando'}>
+            {resultado ? 'Fechar' : 'Cancelar'}
+          </Button>
+          {previa && !resultado && (
+            <Button size="sm" onClick={gravar} disabled={!!ocupado || (nInserir === 0 && nCancelar === 0)}>
+              {ocupado === 'gravando' ? <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" /> : <Upload className="h-3.5 w-3.5 mr-1" />}
+              {nInserir === 0 && nCancelar === 0
+                ? 'Nada novo pra importar'
+                : `Importar ${nInserir ? `${nInserir} inscrição(ões)` : ''}${nInserir && nCancelar ? ' e ' : ''}${nCancelar ? `cancelar ${nCancelar}` : ''}`}
+            </Button>
+          )}
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function ImprimirListaDialog({ evento, inscritos, recorte, totalEvento, onClose }: {
+  evento: any; inscritos: any[]; recorte?: boolean; totalEvento?: number; onClose: () => void;
+}) {
+  const [ag, setAg] = useState<Agrupamento>('nenhum');
+  const [contato, setContato] = useState(false);
+  const [pagamento, setPagamento] = useState<boolean>(!!evento?.pagamento_ativo);
+  const [presenca, setPresenca] = useState(true);
+  const [incluirCanceladas, setIncluirCanceladas] = useState(false);
+
+  const naFolha = inscritos.filter((i: any) => incluirCanceladas || i.status !== 'cancelada');
+  const total = naFolha.length;
+  const semNascimento = naFolha.filter((i: any) => !i.data_nascimento).length;
+
+
+
+  const blocos = useMemo(() => {
+    if (ag === 'nenhum') return [];
+    const contagem = new Map<string, number>();
+    for (const i of naFolha) {
+      const k = ag === 'faixa'
+        ? (i.data_nascimento ? faixaLabel(i.data_nascimento, true) : 'Sem data de nascimento')
+        : ag === 'sexo'
+          ? (i.sexo ? sexoLabel(i.sexo) : 'Sexo não informado')
+          : ag === 'status'
+            ? (i.status || 'sem status')
+            : (i.pagamento?.status_pagamento
+              ? (PAG_LABEL[i.pagamento.status_pagamento] || i.pagamento.status_pagamento)
+              : 'Sem cobrança');
+      contagem.set(k, (contagem.get(k) || 0) + 1);
+    }
+    return [...contagem.entries()].sort((a, b) => b[1] - a[1]);
+  }, [ag, naFolha]);
+
+  function imprimir() {
+    imprimirListaInscritos(
+      { nome: evento.nome, data: evento.data, hora: evento.hora, local: evento.local },
+      inscritos,
+      { agrupamento: ag, colunas: { contato, pagamento, presenca }, incluirCanceladas },
+    );
+    onClose();
+  }
+
+  return (
+    <Dialog open onOpenChange={(o) => { if (!o) onClose(); }}>
+      <DialogContent className="max-w-md flex flex-col max-h-[88vh]">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2"><Printer className="h-4 w-4 text-primary" /> Imprimir lista de participantes</DialogTitle>
+        </DialogHeader>
+        <div className="flex-1 overflow-y-auto min-h-0 space-y-3 text-sm">
+          <div>
+            <div className="text-[11px] text-muted-foreground uppercase tracking-wide mb-1.5">Agrupar por</div>
+            <div className="space-y-1.5">
+              {AGRUPAMENTOS.map(a => (
+                <button key={a.key} onClick={() => setAg(a.key)}
+                  className={`w-full text-left rounded-lg border px-3 py-2 transition-colors ${ag === a.key ? 'border-primary bg-primary/5' : 'border-border hover:border-primary/40'}`}>
+                  <div className="font-medium">{a.label}</div>
+                  <div className="text-[11px] text-muted-foreground">{a.dica}</div>
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div>
+            <div className="text-[11px] text-muted-foreground uppercase tracking-wide mb-1.5">Colunas</div>
+            <label className="flex items-start gap-2 py-1 cursor-pointer">
+              <input type="checkbox" checked={presenca} onChange={e => setPresenca(e.target.checked)} className="mt-0.5" />
+              <span>Quadradinho de presença <span className="text-muted-foreground">(pra marcar no dia)</span></span>
+            </label>
+            <label className="flex items-start gap-2 py-1 cursor-pointer">
+              <input type="checkbox" checked={pagamento} onChange={e => setPagamento(e.target.checked)} className="mt-0.5" />
+              <span>Pagamento <span className="text-muted-foreground">(situação e forma)</span></span>
+            </label>
+            <label className="flex items-start gap-2 py-1 cursor-pointer">
+              <input type="checkbox" checked={contato} onChange={e => setContato(e.target.checked)} className="mt-0.5" />
+              <span>
+                Telefone / e-mail
+                {                                                                     }
+                <span className="block text-[11px] text-amber-600">Sai da tela e vira papel — marque só se for necessário.</span>
+              </span>
+            </label>
+            <label className="flex items-start gap-2 py-1 cursor-pointer">
+              <input type="checkbox" checked={incluirCanceladas} onChange={e => setIncluirCanceladas(e.target.checked)} className="mt-0.5" />
+              <span>Incluir inscrições canceladas <span className="text-muted-foreground">(riscadas)</span></span>
+            </label>
+          </div>
+
+          <div className="rounded-lg border border-border bg-foreground/[0.03] p-2.5 text-[12px] space-y-1">
+            <div><strong>{total}</strong> participante{total === 1 ? '' : 's'} na lista.</div>
+            {recorte && (
+              <div className="rounded-md border border-[var(--warning,#E0A24E)]/40 bg-[var(--warning,#E0A24E)]/10 px-2 py-1.5 text-[11px]">
+                Esta folha é o <strong>recorte que está na tela</strong> (filtro/busca ativos)
+                {typeof totalEvento === 'number' ? ` — o evento tem ${totalEvento} inscritos no total` : ''}.
+                Limpe o filtro antes de imprimir se quiser a lista completa.
+              </div>
+            )}
+            {semNascimento > 0 && ag === 'faixa' && (
+
+
+              <div className="text-amber-600">
+                {semNascimento} sem data de nascimento — {semNascimento === 1 ? 'vai' : 'vão'} para um grupo "Sem data de nascimento" no fim.
+              </div>
+            )}
+            {
+
+                                                                                     }
+            {blocos.length > 1 && (
+              <div className="pt-1 border-t border-border/60">
+                <div className="text-muted-foreground">
+                  A folha sai dividida em <strong className="text-foreground">{blocos.length} blocos</strong>, somando {total}:
+                </div>
+                <div className="mt-1 flex flex-wrap gap-1">
+                  {blocos.map(([nome, n]) => (
+                    <span key={nome} className="rounded-full border border-border px-2 py-0.5 text-[11px]">
+                      {nome}: <strong>{n}</strong>
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+        <div className="flex justify-end gap-2 pt-2">
+          <Button variant="outline" size="sm" onClick={onClose}>Cancelar</Button>
+          <Button size="sm" onClick={imprimir} disabled={!total}>
+            <Printer className="h-3.5 w-3.5 mr-1" /> Imprimir
+          </Button>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+
+
+const REDES_SOCIAIS_ADM = ['Instagram', 'Facebook', 'X (Twitter)', 'TikTok', 'YouTube', 'LinkedIn', 'Kwai', 'Outra'];
+
+
+
+const ehImagemUrl = (v: any) =>
+  typeof v === 'string' && /^https?:\/\//i.test(v) && /\.(png|jpe?g|webp|gif|svg)(\?|$)/i.test(v);
+function RedeSocialEdit({ value, onChange }: { value: string; onChange: (v: string) => void }) {
+  const i = String(value || '').indexOf(' · ');
+  const rede = i >= 0 ? String(value).slice(0, i) : '';
+  const handle = i >= 0 ? String(value).slice(i + 3) : String(value || '');
+  const emit = (r: string, h: string) => onChange(r && h ? `${r} · ${h}` : (h || r || ''));
+  return (
+    <div className="flex gap-2">
+      <select value={rede} onChange={e => emit(e.target.value, handle)}
+        className="h-9 rounded-md border border-border bg-[var(--cbrio-input-bg)] text-sm px-2 w-36 shrink-0">
+        <option value="">Rede…</option>
+        {REDES_SOCIAIS_ADM.map(o => <option key={o} value={o}>{o}</option>)}
+      </select>
+      <Input value={handle} placeholder="@usuário ou link" onChange={e => emit(rede, e.target.value)} className="h-9" />
+    </div>
+  );
+}
+
+
+
+
+
+
+
+
+
+
+function BolsaDialog({ inscricao, evento, eventoId, onClose, onSaved }: {
+  inscricao: any; evento?: any; eventoId: string;
+  onClose: () => void; onSaved: (i: any) => void;
+}) {
+  const [tipo, setTipo] = useState<'integral' | 'parcial'>(inscricao.bolsa_tipo || 'integral');
+  const [valor, setValor] = useState(
+    inscricao.bolsa_tipo === 'parcial' && inscricao.valor_cobrado_centavos
+      ? String(inscricao.valor_cobrado_centavos / 100) : '');
+  const [motivo, setMotivo] = useState(inscricao.bolsa_motivo || '');
+  const [salvando, setSalvando] = useState(false);
+  const tabela = evento?.valor_centavos != null ? evento.valor_centavos / 100 : null;
+  const jaPagou = inscricao.pagamento?.status_pagamento === 'pago';
+
+  async function salvar() {
+    if (motivo.trim().length < 3) { toast.error('Diga o motivo da bolsa'); return; }
+    setSalvando(true);
+    try {
+      const r: any = await api.darBolsa(eventoId, inscricao.id, { tipo, valor, motivo: motivo.trim() });
+      (r.avisos || []).forEach((a: string) => toast.warning(a, { duration: 8000 }));
+      if (r.cobranca?.link) {
+        await navigator.clipboard.writeText(r.cobranca.link).catch(() => {});
+        toast.success('Bolsa registrada · link de pagamento copiado pra você enviar');
+      } else {
+        toast.success(tipo === 'integral' ? 'Inscrição isenta e confirmada' : 'Bolsa registrada');
+      }
+      onSaved({ ...inscricao, ...(r.inscricao || {}) });
+    } catch (e: any) { toast.error(e?.message || 'Erro ao registrar a bolsa'); } finally { setSalvando(false); }
+  }
+
+  async function remover() {
+    setSalvando(true);
+    try {
+      const r: any = await api.tirarBolsa(eventoId, inscricao.id);
+      toast.success('Bolsa removida — volta ao valor de tabela');
+      onSaved({ ...inscricao, ...(r.inscricao || {}) });
+    } catch (e: any) { toast.error(e?.message || 'Erro ao remover'); } finally { setSalvando(false); }
+  }
+
+  return (
+    <Dialog open onOpenChange={(v) => { if (!v) onClose(); }}>
+      <DialogContent className="sm:max-w-md z-[1100] flex flex-col max-h-[90vh]">
+        <DialogHeader><DialogTitle>Bolsa / isenção</DialogTitle></DialogHeader>
+        <div className="flex-1 overflow-y-auto min-h-0 space-y-3 text-sm">
+          <p className="text-muted-foreground">
+            {inscricao.nome_completo}
+            {tabela != null && <> · valor de tabela <b>R$ {tabela.toFixed(2).replace('.', ',')}</b></>}
+          </p>
+          {jaPagou && (
+            <p className="rounded-md border border-amber-500/40 bg-amber-500/10 p-2 text-amber-700 text-xs">
+              Esta pessoa já pagou. A bolsa fica registrada, mas a devolução não é automática —
+              decidam e façam o estorno.
+            </p>
+          )}
+          <div className="flex gap-2">
+            {(['integral', 'parcial'] as const).map(t => (
+              <button key={t} onClick={() => setTipo(t)}
+                className={`flex-1 rounded-md border px-3 py-2 text-sm ${tipo === t ? 'border-primary text-primary bg-primary/10 font-semibold' : 'border-border text-muted-foreground'}`}>
+                {t === 'integral' ? 'Vai de graça' : 'Paga menos'}
+              </button>
+            ))}
+          </div>
+          {tipo === 'parcial' && (
+            <div>
+              <label className="text-xs text-muted-foreground">Quanto esta pessoa vai pagar (R$)</label>
+              <Input value={valor} onChange={e => setValor(e.target.value)} placeholder="100,00" inputMode="decimal" />
+              <p className="text-[11px] text-muted-foreground mt-1">
+                Emite uma cobrança nova com este valor. A anterior é cancelada — a vaga continua dela.
+              </p>
+            </div>
+          )}
+          <div>
+            <label className="text-xs text-muted-foreground">Motivo (fica registrado com seu nome)</label>
+            <textarea value={motivo} onChange={e => setMotivo(e.target.value)} rows={2}
+              placeholder="Ex.: situação financeira conversada com a liderança"
+              className="w-full rounded-md border border-border bg-[var(--cbrio-input-bg)] px-2 py-1.5 text-sm" />
+          </div>
+        </div>
+        <div className="flex justify-between gap-2 pt-2">
+          {inscricao.bolsa_tipo ? (
+            <Button variant="ghost" size="sm" onClick={remover} disabled={salvando} className="text-red-600 hover:text-red-700">
+              Remover bolsa
+            </Button>
+          ) : <span />}
+          <div className="flex gap-2">
+            <Button variant="outline" size="sm" onClick={onClose} disabled={salvando}>Cancelar</Button>
+            <Button size="sm" onClick={salvar} disabled={salvando} className="bg-primary text-primary-foreground">
+              {salvando ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : null} Salvar
+            </Button>
+          </div>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+
+
+
+
+
+
+
+
+
+
+
+function BeneficiosCard({ eventoId, evento, podeEditar }: {
+  eventoId: string; evento: any; podeEditar?: boolean;
+}) {
+  const [itens, setItens] = useState<any[] | null>(null);
+  const [aviso, setAviso] = useState<string | null>(null);
+  const [abrindo, setAbrindo] = useState(false);
+  const [salvando, setSalvando] = useState(false);
+  const [form, setForm] = useState({ cpf: '', nome_referencia: '', tipo: 'integral', valor: '', motivo: '' });
+
+  async function carregar() {
+    try {
+      const r = await api.beneficios(eventoId);
+      setItens(r?.itens || []);
+      setAviso(r?.aviso || null);
+    } catch {
+      setItens([]);
+    }
+  }
+  useEffect(() => { carregar(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [eventoId]);
+
+  async function salvar() {
+    const cpf = soDigitos(form.cpf);
+    if (!cpfValido(cpf)) { toast.error('CPF inválido'); return; }
+    if (form.motivo.trim().length < 3) { toast.error('Diga o motivo (fica registrado)'); return; }
+    if (form.tipo === 'parcial' && !(Number(form.valor.replace(',', '.')) > 0)) {
+      toast.error('Informe quanto essa pessoa vai pagar'); return;
+    }
+    setSalvando(true);
+    try {
+      await api.criarBeneficio(eventoId, {
+        cpf, nome_referencia: form.nome_referencia, tipo: form.tipo,
+        valor: form.tipo === 'parcial' ? form.valor.replace(',', '.') : undefined,
+        motivo: form.motivo,
+      });
+      toast.success('Benefício cadastrado — vale quando essa pessoa se inscrever');
+      setForm({ cpf: '', nome_referencia: '', tipo: 'integral', valor: '', motivo: '' });
+      setAbrindo(false);
+      carregar();
+    } catch (e: any) {
+      toast.error(e?.message || 'Erro ao cadastrar');
+    } finally { setSalvando(false); }
+  }
+
+  async function remover(b: any) {
+    if (!window.confirm(b.usado_em
+      ? 'Este benefício já foi usado. Remover tira da lista, mas a inscrição continua com o valor concedido. Remover?'
+      : 'Remover este benefício?')) return;
+    try {
+      const r = await api.removerBeneficio(eventoId, b.id);
+      toast.success(r?.aviso || 'Benefício removido');
+      carregar();
+    } catch (e: any) {
+      toast.error(e?.message || 'Erro ao remover');
+    }
+  }
+
+  const valorTabela = evento?.valor_centavos
+    ? `R$ ${(Number(evento.valor_centavos) / 100).toFixed(2).replace('.', ',')}` : null;
+
+  return (
+    <Card className="glass-solid p-4">
+      <div className="flex items-center justify-between gap-3 flex-wrap mb-1">
+        <div className="text-sm font-semibold flex items-center gap-1.5">
+          <Gift className="h-4 w-4 text-primary" /> Gratuidade e desconto por CPF
+          {itens?.length ? <span className="text-xs text-muted-foreground font-normal">({itens.length})</span> : null}
+        </div>
+        {podeEditar && !abrindo && (
+          <Button size="sm" variant="outline" className="h-8" onClick={() => setAbrindo(true)}>
+            Adicionar CPF
+          </Button>
+        )}
+      </div>
+      <p className="text-xs text-muted-foreground mb-3">
+        Cadastre o CPF de quem vai pagar menos (ou nada). Quando a pessoa se inscrever com esse CPF,
+        o sistema aplica sozinho{valorTabela ? ` — o valor de tabela do evento é ${valorTabela}` : ''}.
+        Quem <b>já se inscreveu</b> recebe pelo botão "Dar bolsa" na ficha dela.
+      </p>
+
+      {aviso && <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-2.5 text-xs text-amber-700 mb-3">{aviso}</div>}
+
+      {abrindo && (
+        <div className="rounded-lg border border-primary/40 bg-primary/5 p-3 mb-3 space-y-2">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+            <div>
+              <label className="text-[11px] text-muted-foreground uppercase tracking-wide">CPF *</label>
+              <Input value={form.cpf} onChange={e => setForm(f => ({ ...f, cpf: mascaraCpf(e.target.value) }))}
+                placeholder="000.000.000-00" inputMode="numeric" className="h-9" />
+            </div>
+            <div>
+              <label className="text-[11px] text-muted-foreground uppercase tracking-wide">Nome (pra vocês reconhecerem)</label>
+              <Input value={form.nome_referencia} onChange={e => setForm(f => ({ ...f, nome_referencia: e.target.value }))}
+                placeholder="opcional" className="h-9" />
+            </div>
+          </div>
+          <div className="flex flex-wrap gap-3 items-end">
+            <div>
+              <label className="text-[11px] text-muted-foreground uppercase tracking-wide block mb-1">Benefício</label>
+              <div className="flex gap-1.5">
+                {[['integral', 'Gratuidade'], ['parcial', 'Desconto']].map(([v, l]) => (
+                  <button key={v} onClick={() => setForm(f => ({ ...f, tipo: v }))}
+                    className={`h-9 px-3 rounded-md text-xs font-medium border transition-colors ${
+                      form.tipo === v ? 'border-primary bg-primary/10 text-primary' : 'border-border text-muted-foreground'}`}>
+                    {l}
+                  </button>
+                ))}
+              </div>
+            </div>
+            {form.tipo === 'parcial' && (
+              <div className="min-w-[180px]">
+                <label className="text-[11px] text-muted-foreground uppercase tracking-wide">Quanto vai pagar (R$) *</label>
+                <Input value={form.valor} onChange={e => setForm(f => ({ ...f, valor: e.target.value }))}
+                  placeholder="ex.: 200,00" inputMode="decimal" className="h-9" />
+              </div>
+            )}
+          </div>
+          <div>
+            <label className="text-[11px] text-muted-foreground uppercase tracking-wide">Motivo * (fica registrado)</label>
+            <Input value={form.motivo} onChange={e => setForm(f => ({ ...f, motivo: e.target.value }))}
+              placeholder="ex.: bolsa aprovada pela liderança do AMI" className="h-9" />
+          </div>
+          <div className="flex gap-2 pt-1">
+            <Button size="sm" onClick={salvar} disabled={salvando}>
+              {salvando ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : 'Cadastrar benefício'}
+            </Button>
+            <Button size="sm" variant="outline" onClick={() => setAbrindo(false)}>Cancelar</Button>
+          </div>
+        </div>
+      )}
+
+      {itens === null ? (
+        <div className="flex justify-center py-4"><Loader2 className="h-4 w-4 animate-spin text-primary" /></div>
+      ) : itens.length === 0 ? (
+        <p className="text-xs text-muted-foreground py-2">Nenhum CPF com benefício cadastrado.</p>
+      ) : (
+        <div className="space-y-1.5">
+          {itens.map(b => (
+            <div key={b.id} className="rounded-lg border border-border px-2.5 py-2 flex items-center gap-2 flex-wrap text-sm">
+              <div className="flex-1 min-w-[200px]">
+                <div className="font-medium flex items-center gap-2 flex-wrap">
+                  {b.nome_referencia || 'Sem nome'}
+                  <span className="text-xs text-muted-foreground font-normal">{mascaraCpf(b.cpf)}</span>
+                  <span className={`rounded-full text-[11px] font-medium px-2 py-0.5 ${
+                    b.tipo === 'integral' ? 'bg-emerald-500/15 text-emerald-600' : 'bg-primary/15 text-primary'}`}>
+                    {b.tipo === 'integral'
+                      ? 'gratuidade'
+                      : `paga R$ ${(Number(b.valor_centavos || 0) / 100).toFixed(2).replace('.', ',')}`}
+                  </span>
+                  {
+                                                                               }
+                  {b.usado_em && (
+                    <span className="rounded-full text-[11px] font-medium px-2 py-0.5 bg-foreground/10 text-muted-foreground">
+                      usado em {new Date(b.usado_em).toLocaleDateString('pt-BR')}
+                    </span>
+                  )}
+                </div>
+                <div className="text-xs text-muted-foreground">
+                  {b.motivo}
+                  {b.criado_por_nome ? ` · por ${b.criado_por_nome}` : ''}
+                </div>
+              </div>
+              {podeEditar && (
+                <button onClick={() => remover(b)} className="text-red-500 p-1.5 shrink-0" title="Remover benefício">
+                  <Trash2 className="h-4 w-4" />
+                </button>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </Card>
+  );
+}
+
+const COMPROVANTE_LABEL: Record<string, string> = {
+  em_analise: 'Em análise', aceito: 'Aceito', recusado: 'Recusado',
+};
+const COMPROVANTE_BADGE: Record<string, string> = {
+  em_analise: 'bg-amber-500/15 text-amber-600',
+  aceito: 'bg-emerald-500/15 text-emerald-600',
+  recusado: 'bg-rose-500/15 text-rose-600',
+};
+
+
+
+
+
+
+
+
+
+function ComprovantesBloco({ eventoId, inscricao, podeEditar, onPago }: {
+  eventoId: string; inscricao: any; podeEditar?: boolean; onPago: () => void;
+}) {
+  const [itens, setItens] = useState<any[] | null>(null);
+  const [aviso, setAviso] = useState<string | null>(null);
+  const [agindo, setAgindo] = useState<string | null>(null);
+
+  async function carregar() {
+    try {
+      const r = await api.comprovantes(eventoId, inscricao.id);
+      setItens(r?.itens || []);
+      setAviso(r?.aviso || null);
+    } catch {
+      setItens([]);
+    }
+  }
+  useEffect(() => { carregar(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [inscricao.id]);
+
+  async function aceitar(c: any) {
+    if (!window.confirm('Confirmar que o dinheiro entrou na conta? Isso marca o pagamento como PAGO no seu nome.')) return;
+    setAgindo(c.id);
+    try {
+      const r = await api.aceitarComprovante(eventoId, inscricao.id, c.id);
+      toast.success(r?.ja_estava_pago ? 'Comprovante aceito (pagamento já constava pago)' : 'Pagamento confirmado');
+      await carregar();
+      onPago();
+    } catch (e: any) {
+      toast.error(e?.message || 'Erro ao confirmar');
+    } finally { setAgindo(null); }
+  }
+
+  async function recusar(c: any) {
+
+
+    const motivo = window.prompt('Por que está recusando? (a pessoa vai ler pra reenviar)');
+    if (!motivo || motivo.trim().length < 3) return;
+    setAgindo(c.id);
+    try {
+      await api.recusarComprovante(eventoId, inscricao.id, c.id, motivo.trim());
+      toast.success('Comprovante recusado');
+      await carregar();
+    } catch (e: any) {
+      toast.error(e?.message || 'Erro ao recusar');
+    } finally { setAgindo(null); }
+  }
+
+  if (itens === null) {
+    return (
+      <div className="rounded-lg border border-border p-2.5 text-xs text-muted-foreground flex items-center gap-2">
+        <Loader2 className="h-3 w-3 animate-spin" /> Carregando comprovantes…
+      </div>
+    );
+  }
+  if (aviso) return <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-2.5 text-xs text-amber-700">{aviso}</div>;
+  if (!itens.length) return null;
+
+  const pendentes = itens.filter((c) => c.status === 'em_analise').length;
+
+  return (
+    <div className={`rounded-lg border p-2.5 ${pendentes ? 'border-amber-500/40 bg-amber-500/5' : 'border-border'}`}>
+      <div className="text-[11px] uppercase tracking-wide mb-1.5 flex items-center gap-1 text-muted-foreground">
+        <Paperclip className="h-3 w-3" /> Comprovante anexado
+        {pendentes > 0 && <span className="text-amber-600 font-semibold normal-case">· {pendentes} pra conferir</span>}
+      </div>
+      <div className="space-y-2">
+        {itens.map((c) => (
+          <div key={c.id} className="rounded-md border border-border bg-card/50 p-2">
+            <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs">
+              <span className={`rounded-full font-medium px-2 py-0.5 ${COMPROVANTE_BADGE[c.status] || 'bg-foreground/10'}`}>
+                {COMPROVANTE_LABEL[c.status] || c.status}
+              </span>
+              <span>{c.metodo_declarado === 'transferencia' ? 'Transferência' : 'Pix'}</span>
+              <span className="text-muted-foreground">
+                enviado em {new Date(c.created_at).toLocaleString('pt-BR')}
+              </span>
+              {
+                                                                         }
+              {c.url && (
+                <a href={safeHref(c.url)} target="_blank" rel="noreferrer"
+                  className="text-primary hover:underline inline-flex items-center gap-1 font-medium">
+                  <ExternalLink className="h-3 w-3" /> Ver arquivo
+                </a>
+              )}
+            </div>
+            {c.observacao && <div className="text-xs text-muted-foreground mt-1">"{c.observacao}"</div>}
+            {c.status === 'recusado' && c.motivo_recusa && (
+              <div className="text-xs text-rose-600 mt-1">Recusado: {c.motivo_recusa}</div>
+            )}
+            {c.revisado_em && (
+              <div className="text-[11px] text-muted-foreground mt-1">
+                conferido por {c.revisado_por_nome || 'equipe'} em {new Date(c.revisado_em).toLocaleString('pt-BR')}
+              </div>
+            )}
+            {podeEditar && c.status === 'em_analise' && (
+              <div className="flex flex-wrap gap-2 mt-2">
+                <Button size="sm" className="h-7 text-xs" disabled={agindo === c.id} onClick={() => aceitar(c)}>
+                  {agindo === c.id ? <Loader2 className="h-3 w-3 animate-spin" /> : 'Confirmar pagamento'}
+                </Button>
+                <Button size="sm" variant="outline" className="h-7 text-xs" disabled={agindo === c.id} onClick={() => recusar(c)}>
+                  Recusar
+                </Button>
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+      {podeEditar && pendentes > 0 && (
+        <div className="text-[11px] text-muted-foreground mt-2">
+          Confira o valor e a data no extrato antes de confirmar — o comprovante sozinho não baixa o pagamento.
+        </div>
+      )}
+    </div>
+  );
+}
+
+function InscricaoDetalheDialog({ inscricao, campos, premios, eventoId, evento, podeEditar, onSaved, onPago, onClose }: {
+  inscricao: any; campos: any[]; premios: any[]; eventoId: string;
+  evento?: any; podeEditar?: boolean;
+  onSaved: (atualizada: any) => void; onPago?: () => void; onClose: () => void;
+}) {
+  const tel = String(inscricao.telefone || '').replace(/\D/g, '');
+  const [editando, setEditando] = useState(false);
+  const [salvando, setSalvando] = useState(false);
+  const [bolsaOpen, setBolsaOpen] = useState(false);
+  const [form, setForm] = useState<{ nome_completo: string; telefone: string; email: string; dados: Record<string, string> }>({ nome_completo: '', telefone: '', email: '', dados: {} });
+  const cancelada = inscricao.status === 'cancelada';
+
+  function entrarEdicao() {
+    setForm({
+      nome_completo: inscricao.nome_completo || '',
+      telefone: inscricao.telefone || '',
+      email: inscricao.email || '',
+
+
+
+      dados: Object.fromEntries(campos.map((c: any) => {
+        const v = inscricao.dados?.[c.key];
+        return [c.key, Array.isArray(v) ? v.join(', ') : String(v ?? '')];
+      })),
+    });
+    setEditando(true);
+  }
+
+  async function salvar() {
+    if (form.nome_completo.trim().length < 2) { toast.error('Nome inválido'); return; }
+    setSalvando(true);
+    try {
+      const atualizada = await api.atualizarInscricao(eventoId, inscricao.id, form);
+      toast.success('Inscrição atualizada');
+      setEditando(false);
+      onSaved(atualizada);
+    } catch (e: any) {
+      toast.error(e?.message || 'Erro ao salvar');
+    } finally {
+      setSalvando(false);
+    }
+  }
+
+  async function mudarStatus(novo: 'confirmada' | 'cancelada') {
+    setSalvando(true);
+    try {
+      const atualizada = await api.atualizarInscricao(eventoId, inscricao.id, { status: novo });
+      toast.success(novo === 'cancelada' ? 'Inscrição cancelada' : 'Inscrição reativada');
+      onSaved(atualizada);
+    } catch (e: any) {
+      toast.error(e?.message || 'Erro ao atualizar');
+    } finally {
+      setSalvando(false);
+    }
+  }
+
+  const setDado = (key: string, v: string) => setForm(f => ({ ...f, dados: { ...f.dados, [key]: v } }));
+
+  return (
+    <Dialog open onOpenChange={(o) => { if (!o) onClose(); }}>
+      <DialogContent className="max-w-lg flex flex-col max-h-[88vh]">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2 pr-6">
+            <span className="truncate">{inscricao.nome_completo}</span>
+            {inscricao.numero_sorte != null && (
+              <span className="inline-flex items-center gap-1 rounded-full bg-primary/15 text-primary text-xs font-semibold px-2 py-0.5 shrink-0">
+                <Ticket className="h-3 w-3" /> Nº {inscricao.numero_sorte}
+              </span>
+            )}
+            {cancelada && <span className="rounded-full bg-red-500/10 text-red-600 text-xs font-medium px-2 py-0.5 shrink-0">cancelada</span>}
+            {ehEInscricao(inscricao) && <EInscricaoBadge inscricao={inscricao} tamanho="sm" />}
+            <LoteBadge lote={inscricao.lote} tamanho="sm" />
+            {!editando && (
+              <Button size="sm" variant="outline" className="ml-auto shrink-0" onClick={entrarEdicao}>
+                <Pencil className="h-3.5 w-3.5 mr-1" /> Editar
+              </Button>
+            )}
+          </DialogTitle>
+        </DialogHeader>
+        <div className="flex-1 overflow-y-auto min-h-0 space-y-3 text-sm">
+          {editando ? (
+            <>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                <div className="sm:col-span-2">
+                  <div className="text-[11px] text-muted-foreground uppercase tracking-wide mb-1">Nome completo</div>
+                  <Input value={form.nome_completo} onChange={e => setForm(f => ({ ...f, nome_completo: e.target.value }))} className="h-9" />
+                </div>
+                <div>
+                  <div className="text-[11px] text-muted-foreground uppercase tracking-wide mb-1">WhatsApp</div>
+                  <Input value={form.telefone} inputMode="tel" onChange={e => setForm(f => ({ ...f, telefone: e.target.value }))} className="h-9" />
+                </div>
+                <div>
+                  <div className="text-[11px] text-muted-foreground uppercase tracking-wide mb-1">E-mail</div>
+                  <Input value={form.email} type="email" onChange={e => setForm(f => ({ ...f, email: e.target.value }))} className="h-9" />
+                </div>
+              </div>
+              {campos.length > 0 && (
+                <div className="space-y-2">
+                  <div className="text-[11px] text-muted-foreground uppercase tracking-wide">Respostas do formulário</div>
+                  {campos.map((c: any) => (
+                    <div key={c.key} className="rounded-lg border border-border p-2.5">
+                      <div className="text-[11px] text-muted-foreground mb-1">{c.label}</div>
+                      {c.tipo === 'imagem' ? (
+                        <div className="space-y-1.5">
+                          {ehImagemUrl(form.dados[c.key]) && (
+                            <a href={form.dados[c.key]} target="_blank" rel="noreferrer" title="Abrir imagem em tamanho real">
+                              <img src={form.dados[c.key]} alt={c.label} className="max-h-28 w-auto max-w-full object-contain rounded border border-border" />
+                            </a>
+                          )}
+                          <Input value={form.dados[c.key] || ''} onChange={e => setDado(c.key, e.target.value)} className="h-9"
+                            placeholder="@usuário ou link da rede social" />
+                          <p className="text-[11px] text-muted-foreground">Cole o @ ou o link da rede social. Para manter a imagem/logo enviada, deixe o link acima como está.</p>
+                        </div>
+                      ) : c.tipo === 'rede_social' ? (
+                        <RedeSocialEdit value={form.dados[c.key] || ''} onChange={v => setDado(c.key, v)} />
+                      ) : (c.tipo === 'select' || c.tipo === 'escolha') ? (
+                        <select value={form.dados[c.key] || ''} onChange={e => setDado(c.key, e.target.value)}
+                          className="h-9 w-full rounded-md border border-border bg-[var(--cbrio-input-bg)] text-sm px-2">
+                          <option value="">—</option>
+                          {(c.opcoes || []).map((o: string) => <option key={o} value={o}>{o}</option>)}
+                          {form.dados[c.key] && !(c.opcoes || []).includes(form.dados[c.key]) && (
+                            <option value={form.dados[c.key]}>{form.dados[c.key]}</option>
+                          )}
+                        </select>
+                      ) : c.tipo === 'textarea' ? (
+                        <textarea value={form.dados[c.key] || ''} onChange={e => setDado(c.key, e.target.value)}
+                          className="w-full rounded-md border border-border bg-[var(--cbrio-input-bg)] px-2 py-1.5 text-sm min-h-[70px]" />
+                      ) : (
+                        <Input value={form.dados[c.key] || ''} onChange={e => setDado(c.key, e.target.value)} className="h-9"
+                          placeholder={c.tipo === 'multi' ? 'separe as opções por vírgula' : undefined} />
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+              <div className="flex justify-end gap-2 pt-1">
+                <Button variant="outline" size="sm" onClick={() => setEditando(false)} disabled={salvando}>Cancelar</Button>
+                <Button size="sm" onClick={salvar} disabled={salvando} className="bg-primary text-primary-foreground">
+                  {salvando ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : null} Salvar
+                </Button>
+              </div>
+            </>
+          ) : (
+            <>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                <div className="rounded-lg border border-border p-2.5">
+                  <div className="text-[11px] text-muted-foreground uppercase tracking-wide mb-0.5">WhatsApp</div>
+                  {inscricao.telefone ? (
+                    <a href={`https://wa.me/55${tel}`} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1.5 text-emerald-600 hover:text-emerald-700 font-medium">
+                      <MessageCircle className="h-4 w-4" /> {inscricao.telefone}
+                    </a>
+                  ) : <span className="text-muted-foreground">—</span>}
+                </div>
+                <div className="rounded-lg border border-border p-2.5">
+                  <div className="text-[11px] text-muted-foreground uppercase tracking-wide mb-0.5">Inscrição feita em</div>
+                  {inscricao.created_at ? new Date(inscricao.created_at).toLocaleString('pt-BR') : '—'}
+                </div>
+                {inscricao.email && (
+                  <div className="rounded-lg border border-border p-2.5 sm:col-span-2">
+                    <div className="text-[11px] text-muted-foreground uppercase tracking-wide mb-0.5">E-mail</div>
+                    <span className="break-all">{inscricao.email}</span>
+                  </div>
+                )}
+                {inscricao.data_nascimento && (
+                  <div className="rounded-lg border border-border p-2.5">
+                    <div className="text-[11px] text-muted-foreground uppercase tracking-wide mb-0.5">Nascimento</div>
+                    {new Date(`${inscricao.data_nascimento}T00:00:00`).toLocaleDateString('pt-BR')}
+                    <span className="text-muted-foreground">
+                      {' · '}{idadeEmAnos(inscricao.data_nascimento)} anos · {faixaLabel(inscricao.data_nascimento, true)}
+                    </span>
+                  </div>
+                )}
+                {inscricao.sexo && (
+                  <div className="rounded-lg border border-border p-2.5">
+                    <div className="text-[11px] text-muted-foreground uppercase tracking-wide mb-0.5">Sexo</div>
+                    {sexoLabel(inscricao.sexo)}
+                  </div>
+                )}
+              </div>
+
+              {
+                                                                                  }
+              {ehEInscricao(inscricao) && !inscricao.pagamento && (
+                <div className="rounded-lg border border-sky-500/40 bg-sky-500/5 p-2.5">
+                  <div className="text-[11px] text-sky-700 dark:text-sky-300 uppercase tracking-wide mb-1 flex items-center gap-1">
+                    <ExternalLink className="h-3 w-3" /> Pago no {inscricao.dados?.e_inscricao?.plataforma || 'E-Inscrição'}
+                  </div>
+                  <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                    <span className="rounded-full text-xs font-medium px-2 py-0.5 bg-emerald-500/15 text-emerald-600">pago</span>
+                    {inscricao.dados?.e_inscricao?.forma_pagamento && (
+                      <span>{METODO_LABEL[inscricao.dados.e_inscricao.forma_pagamento] || inscricao.dados.e_inscricao.forma_pagamento}
+                        {inscricao.dados.e_inscricao.parcelas > 1 ? ` · ${inscricao.dados.e_inscricao.parcelas}x` : ''}
+                      </span>
+                    )}
+                    {inscricao.dados?.e_inscricao?.valor_bruto_centavos != null && (
+                      <span className="font-medium" title={`Taxa da plataforma: ${inscricao.dados.e_inscricao.taxa_pct ?? '—'}%`}>
+                        {brl(inscricao.dados.e_inscricao.valor_bruto_centavos)} bruto
+                        {inscricao.dados.e_inscricao.valor_liquido_centavos != null && ` · ${brl(inscricao.dados.e_inscricao.valor_liquido_centavos)} líquido`}
+                      </span>
+                    )}
+                    {inscricao.dados?.e_inscricao?.codigo && (
+                      <span className="text-[11px] font-mono text-muted-foreground" title="Código da inscrição na plataforma">{inscricao.dados.e_inscricao.codigo}</span>
+                    )}
+                    {inscricao.dados?.e_inscricao?.categoria && <span className="text-muted-foreground">{inscricao.dados.e_inscricao.categoria}</span>}
+                  </div>
+                </div>
+              )}
+
+              {inscricao.pagamento && (
+                <div className="rounded-lg border border-border p-2.5">
+                  <div className="text-[11px] text-muted-foreground uppercase tracking-wide mb-1 flex items-center gap-1">
+                    <CreditCard className="h-3 w-3" /> Pagamento
+                  </div>
+                  <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                    <span className={`rounded-full text-xs font-medium px-2 py-0.5 ${PAG_BADGE[inscricao.pagamento.status_pagamento] || 'bg-foreground/10 text-muted-foreground'}`}>
+                      {PAG_LABEL[inscricao.pagamento.status_pagamento] || inscricao.pagamento.status_pagamento}
+                    </span>
+                    {inscricao.pagamento.metodo && (
+                      <span>{METODO_LABEL[inscricao.pagamento.metodo] || inscricao.pagamento.metodo}
+                        {inscricao.pagamento.parcelas_total > 1 ? ` · ${inscricao.pagamento.parcelas_total}x` : ''}
+                      </span>
+                    )}
+                    {inscricao.pagamento.cartao_last4 && (
+                      <span className="text-muted-foreground">
+                        {inscricao.pagamento.cartao_brand || 'cartão'} ····{inscricao.pagamento.cartao_last4}
+                      </span>
+                    )}
+                    {inscricao.pagamento.valor_centavos != null && (
+                      <span className="font-medium">
+                        R$ {(inscricao.pagamento.valor_centavos / 100).toFixed(2).replace('.', ',')}
+                        {inscricao.pagamento.valor_pago_centavos != null
+                          && inscricao.pagamento.valor_pago_centavos !== inscricao.pagamento.valor_centavos
+                          && ` (pago R$ ${(inscricao.pagamento.valor_pago_centavos / 100).toFixed(2).replace('.', ',')})`}
+                      </span>
+                    )}
+                    {inscricao.pagamento.pago_em && (
+                      <span className="text-muted-foreground">em {new Date(inscricao.pagamento.pago_em).toLocaleString('pt-BR')}</span>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {
+                                                                             }
+              {evento?.pagamento_ativo && (
+                <ComprovantesBloco
+                  eventoId={eventoId}
+                  inscricao={inscricao}
+                  podeEditar={podeEditar}
+                  onPago={() => onPago?.()}
+                />
+              )}
+
+              {
+                                                       }
+              {evento?.pagamento_ativo && (
+                <div className={`rounded-lg border p-2.5 ${inscricao.bolsa_tipo ? 'border-primary/40 bg-primary/5' : 'border-border'}`}>
+                  <div className="text-[11px] uppercase tracking-wide mb-1 flex items-center justify-between gap-2">
+                    <span className={inscricao.bolsa_tipo ? 'text-primary' : 'text-muted-foreground'}>
+                      {inscricao.bolsa_tipo ? (inscricao.bolsa_tipo === 'integral' ? 'Isenta (bolsa integral)' : 'Bolsa parcial') : 'Valor desta inscrição'}
+                    </span>
+                    {podeEditar && (
+                      <button onClick={() => setBolsaOpen(true)} className="text-primary hover:underline text-[11px] font-semibold normal-case">
+                        {inscricao.bolsa_tipo ? 'Alterar' : 'Dar bolsa / isentar'}
+                      </button>
+                    )}
+                  </div>
+                  <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm">
+                    <span className="font-medium">
+                      {inscricao.valor_cobrado_centavos != null
+                        ? (inscricao.valor_cobrado_centavos === 0
+                          ? 'Gratuita'
+                          : `R$ ${(inscricao.valor_cobrado_centavos / 100).toFixed(2).replace('.', ',')}`)
+                        : (evento?.valor_centavos != null
+                          ? `R$ ${(evento.valor_centavos / 100).toFixed(2).replace('.', ',')} (valor de tabela)`
+                          : '—')}
+                    </span>
+                    {inscricao.bolsa_motivo && <span className="text-muted-foreground">· {inscricao.bolsa_motivo}</span>}
+                    {inscricao.bolsa_por_nome && (
+                      <span className="text-muted-foreground text-xs">
+                        concedida por {inscricao.bolsa_por_nome}
+                        {inscricao.bolsa_em ? ` em ${new Date(inscricao.bolsa_em).toLocaleDateString('pt-BR')}` : ''}
+                      </span>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {bolsaOpen && (
+                <BolsaDialog
+                  inscricao={inscricao}
+                  evento={evento}
+                  eventoId={eventoId}
+                  onClose={() => setBolsaOpen(false)}
+                  onSaved={(atualizada: any) => { setBolsaOpen(false); onSaved(atualizada); }}
+                />
+              )}
+
+              {premios.length > 0 && (
+                <div className="rounded-lg border border-primary/40 bg-primary/5 p-2.5">
+                  <div className="text-[11px] text-primary uppercase tracking-wide mb-1 flex items-center gap-1"><Gift className="h-3 w-3" /> Ganhou no sorteio</div>
+                  {premios.map((s: any) => (
+                    <div key={s.id} className="text-sm font-medium">🎉 {s.premio || 'Prêmio'}</div>
+                  ))}
+                </div>
+              )}
+
+              {campos.length > 0 && (
+                <div className="space-y-2">
+                  <div className="text-[11px] text-muted-foreground uppercase tracking-wide">Respostas do formulário</div>
+                  {campos.map((c: any) => {
+                    const v = inscricao.dados?.[c.key];
+                    return (
+                      <div key={c.key} className="rounded-lg border border-border p-2.5">
+                        <div className="text-[11px] text-muted-foreground mb-0.5">{c.label}</div>
+                        {c.tipo === 'imagem' ? (
+                          !v ? (
+                            <span className="text-muted-foreground">—</span>
+                          ) : ehImagemUrl(v) ? (
+                            <a href={v} target="_blank" rel="noreferrer" title="Abrir imagem em tamanho real">
+                              <img src={v} alt={c.label} className="max-h-40 w-auto max-w-full object-contain rounded border border-border" />
+                            </a>
+                          ) : /^https?:\/\//i.test(v) ? (
+                            <a href={v} target="_blank" rel="noreferrer" className="text-primary hover:underline break-all">{v}</a>
+                          ) : (
+                            <span className="break-words">{v}</span>
+                          )
+                        ) : (
+                          <div className="whitespace-pre-wrap break-words">{Array.isArray(v) ? v.join(', ') : (v || <span className="text-muted-foreground">—</span>)}</div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+
+              <div className="flex justify-end pt-1">
+                {cancelada ? (
+                  <Button size="sm" variant="outline" onClick={() => mudarStatus('confirmada')} disabled={salvando}>
+                    {salvando ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : null} Reativar inscrição
+                  </Button>
+                ) : (
+                  <Button size="sm" variant="outline" onClick={() => mudarStatus('cancelada')} disabled={salvando}
+                    className="text-red-600 hover:text-red-700">
+                    {salvando ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : null} Cancelar inscrição
+                  </Button>
+                )}
+              </div>
+            </>
+          )}
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}

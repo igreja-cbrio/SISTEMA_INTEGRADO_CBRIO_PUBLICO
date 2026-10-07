@@ -1,0 +1,888 @@
+
+
+
+
+
+
+
+
+
+
+
+
+const router = require('express').Router();
+const { authenticate, authorizeModule } = require('../middleware/auth');
+const { supabase } = require('../utils/supabase');
+const { montarProcedencia } = require('../utils/kpiProcedencia');
+const { montarSerie } = require('../utils/kpiSerie');
+const { periodoAtual } = require('../services/kpiAutoCollector');
+
+router.use(authenticate);
+
+const AREAS_VALIDAS = ['kids', 'ami', 'bridge', 'online', 'sede', 'cba'];
+
+
+
+function filtrarCultosPorArea(cultos, area) {
+  if (!cultos || cultos.length === 0) return [];
+  const n = (s) => String(s || '').toLowerCase();
+  if (area === 'ami') {
+    return cultos.filter(c => {
+      const st = n(c.service_type_name);
+      const nm = n(c.nome);
+      return (st.includes('ami') || nm.includes('ami')) && !st.includes('bridge') && !nm.includes('bridge');
+    });
+  }
+  if (area === 'bridge') {
+    return cultos.filter(c => {
+      const st = n(c.service_type_name);
+      const nm = n(c.nome);
+      return st.includes('bridge') || nm.includes('bridge');
+    });
+  }
+  if (area === 'online') {
+
+    return cultos.filter(c => (c.online_pico || 0) > 0);
+  }
+  if (area === 'kids') {
+
+    return cultos.filter(c => {
+      const st = n(c.service_type_name);
+      const nm = n(c.nome);
+
+      const sede = st.startsWith('domingo') || nm.startsWith('domingo');
+      const quartaKids = st.includes('quarta') || nm.includes('quarta');
+      return (sede || quartaKids) && (c.presencial_kids != null);
+    });
+  }
+  if (area === 'sede') {
+    return cultos.filter(c => {
+      const st = n(c.service_type_name);
+      if (st) return st.startsWith('domingo') || st.includes('quarta');
+
+
+      const nm = n(c.nome);
+      return nm.startsWith('domingo') || nm.includes('quarta');
+    });
+  }
+  return cultos;
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+router.get('/kpi/:id/procedencia', authorizeModule('painel-area', 1), async (req, res) => {
+  try {
+    const { data: kpi, error } = await supabase
+      .from('kpi_indicadores_taticos')
+
+
+
+      .select('id, indicador, area, periodicidade, tipo_calculo, fonte_auto, formula_config, meta_valor, meta_valor_absoluto, sentido_meta, descricao, ativo')
+      .eq('id', req.params.id)
+      .maybeSingle();
+    if (error) return res.status(400).json({ error: error.message });
+    if (!kpi) return res.status(404).json({ error: 'KPI não encontrado' });
+
+
+
+
+    const manual = String(kpi.tipo_calculo || '') === 'manual';
+    const [{ data: linhas }, { count }] = await Promise.all([
+      manual
+        ? supabase.from('kpi_registros').select('periodo_referencia')
+            .eq('indicador_id', kpi.id).not('valor_realizado', 'is', null)
+            .order('periodo_referencia')
+        : supabase.from('kpi_valores_calculados').select('periodo_referencia')
+            .eq('kpi_id', kpi.id).not('valor_calculado', 'is', null)
+            .order('periodo_referencia'),
+      manual
+        ? supabase.from('kpi_registros').select('id', { count: 'exact', head: true })
+            .eq('indicador_id', kpi.id).not('valor_realizado', 'is', null)
+        : supabase.from('kpi_valores_calculados').select('kpi_id', { count: 'exact', head: true })
+            .eq('kpi_id', kpi.id).not('valor_calculado', 'is', null),
+    ]);
+
+    const periodos = (linhas || []).map((l) => l.periodo_referencia).filter(Boolean);
+
+
+
+
+
+
+    let trajetoria = null;
+    try {
+      const { data } = await supabase.from('vw_kpi_trajetoria_atual')
+        .select('meta_efetiva, meta_periodo').eq('kpi_id', kpi.id).maybeSingle();
+      trajetoria = data || null;
+    } catch {                                       }
+
+    const ficha = montarProcedencia(kpi, {
+      primeiro_periodo: periodos[0] || null,
+      ultimo_periodo: periodos[periodos.length - 1] || null,
+      total_periodos: count || periodos.length,
+    }, trajetoria);
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    let serie = { tem_partes: false, linhas: [], divergencias: 0 };
+    try {
+      const [partes, gravados] = await Promise.all([
+        supabase.rpc('kpi_serie_partes', { p_kpi_id: kpi.id, p_n: 12 }),
+        manual
+          ? supabase.from('kpi_registros').select('periodo_referencia, valor_realizado')
+              .eq('indicador_id', kpi.id).not('valor_realizado', 'is', null)
+              .order('periodo_referencia', { ascending: false }).limit(12)
+          : supabase.from('kpi_valores_calculados').select('periodo_referencia, valor_calculado')
+              .eq('kpi_id', kpi.id).not('valor_calculado', 'is', null)
+              .order('periodo_referencia', { ascending: false }).limit(12),
+      ]);
+      const linhasGravadas = (gravados.data || []).map((g) => ({
+        periodo_referencia: g.periodo_referencia,
+        valor_calculado: manual ? g.valor_realizado : g.valor_calculado,
+      }));
+
+
+
+
+      serie = montarSerie(partes.data || [], linhasGravadas,
+        periodoAtual(kpi.periodicidade || 'mensal'));
+    } catch {                                           }
+
+    res.json({ ...ficha, serie });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+router.get('/:area', authorizeModule('painel-area', 1), async (req, res) => {
+  try {
+    const area = String(req.params.area).toLowerCase();
+    if (!AREAS_VALIDAS.includes(area)) {
+      return res.status(400).json({ error: 'Area invalida', validas: AREAS_VALIDAS });
+    }
+
+
+
+    const hoje = new Date();
+    let desde = req.query.desde;
+    let ate = req.query.ate || hoje.toISOString().slice(0, 10);
+    if (!desde) {
+      const periodo = String(req.query.periodo || '180d');
+      const dias = parseInt(periodo, 10) || 180;
+      const d = new Date(hoje); d.setDate(d.getDate() - dias);
+      desde = d.toISOString().slice(0, 10);
+    }
+
+
+
+
+    const { data: kpisRaw } = await supabase
+      .from('kpi_indicadores_taticos')
+      .select('id, indicador, descricao, area, valores, periodicidade, meta_descricao, meta_valor, unidade, is_okr, tipo_kpi, lider_funcionario_id, formula_config')
+      .eq('ativo', true)
+      .ilike('area', area)
+      .order('indicador', { ascending: true });
+    const kpis = kpisRaw || [];
+
+    const kpiIds = kpis.map(k => k.id);
+    let trajByKpi = {};
+    let lideresMap = {};
+
+    if (kpiIds.length > 0) {
+
+
+
+
+      const { data: traj, error: trajErr } = await supabase
+        .from('vw_kpi_trajetoria_atual')
+        .select('kpi_id, status_trajetoria, ultimo_periodo, ultimo_valor, checkpoint_meta, percentual_meta')
+        .in('kpi_id', kpiIds);
+      if (trajErr) console.error('[painelArea] trajetoria query falhou:', trajErr.message);
+      (traj || []).forEach(t => { trajByKpi[t.kpi_id] = t; });
+
+      const liderIds = kpis.map(k => k.lider_funcionario_id).filter(Boolean);
+      if (liderIds.length > 0) {
+        const { data: lideres } = await supabase
+          .from('rh_funcionarios')
+          .select('id, nome, cargo')
+          .in('id', liderIds);
+        (lideres || []).forEach(l => { lideresMap[l.id] = l; });
+      }
+    }
+
+    const enriched = kpis.map(k => ({
+      id: k.id,
+      indicador: k.indicador,
+      descricao: k.descricao,
+      area: k.area,
+      valores: Array.isArray(k.valores) ? k.valores : [],
+      periodicidade: k.periodicidade,
+      meta_descricao: k.meta_descricao,
+      meta_valor: k.meta_valor,
+      unidade: k.unidade,
+      is_okr: k.is_okr,
+      tipo_kpi: k.tipo_kpi,
+      lider: lideresMap[k.lider_funcionario_id] || null,
+      trajetoria: trajByKpi[k.id] || null,
+    }));
+
+    const porValor = {};
+    const semValor = [];
+    for (const k of enriched) {
+      if (k.valores.length === 0) semValor.push(k);
+      else for (const v of k.valores) {
+        if (!porValor[v]) porValor[v] = [];
+        porValor[v].push(k);
+      }
+    }
+
+
+
+
+
+
+    const mesAtual = hoje.toISOString().slice(0, 7);
+    const mesAnteriorD = new Date(hoje); mesAnteriorD.setMonth(mesAnteriorD.getMonth() - 1);
+    const mesAnterior = mesAnteriorD.toISOString().slice(0, 7);
+    const dataLimiteStr = desde;
+
+
+
+    const tiposEsperados = new Set();
+    const valoresPorTipo = new Map();
+    for (const k of kpis) {
+      const fc = k.formula_config || {};
+      const candidatos = [fc.dado_tipo, fc.numerador, fc.denominador].filter(Boolean);
+      const tiposK = [];
+      for (const c of candidatos) {
+        if (Array.isArray(c)) tiposK.push(...c);
+        else tiposK.push(c);
+      }
+      const vals = Array.isArray(k.valores) ? k.valores : [];
+      for (const t of tiposK) {
+        if (!t) continue;
+        tiposEsperados.add(t);
+        if (!valoresPorTipo.has(t)) valoresPorTipo.set(t, new Set());
+        vals.forEach(v => valoresPorTipo.get(t).add(v));
+      }
+    }
+
+
+
+    const tiposIds = Array.from(tiposEsperados);
+    let tiposCatalogo = [];
+    if (tiposIds.length > 0) {
+      const { data: catalogo } = await supabase
+        .from('tipos_dado_bruto')
+        .select('id, nome, descricao, unidade, agregacao, granularidade, ordem')
+        .in('id', tiposIds);
+      tiposCatalogo = catalogo || [];
+    }
+
+
+    const { data: dadosRaw } = await supabase
+      .from('dados_brutos')
+      .select('tipo_id, data, valor')
+      .eq('area', area)
+      .gte('data', dataLimiteStr)
+      .lte('data', ate)
+      .order('data', { ascending: false });
+
+
+    const registrosPorTipo = new Map();
+    for (const d of dadosRaw || []) {
+      if (!registrosPorTipo.has(d.tipo_id)) registrosPorTipo.set(d.tipo_id, []);
+      registrosPorTipo.get(d.tipo_id).push({ data: d.data, valor: Number(d.valor) });
+    }
+
+
+    const dados = tiposCatalogo.map(t => {
+      const regs = registrosPorTipo.get(t.id) || [];
+      const ultimo = regs[0] || null;
+      const historico6 = regs.slice(0, 6).reverse();
+      const totalMesAtual = regs
+        .filter(r => r.data.startsWith(mesAtual))
+        .reduce((a, r) => a + r.valor, 0);
+      const totalMesAnterior = regs
+        .filter(r => r.data.startsWith(mesAnterior))
+        .reduce((a, r) => a + r.valor, 0);
+      const variacaoMes = totalMesAnterior > 0
+        ? ((totalMesAtual - totalMesAnterior) / totalMesAnterior) * 100
+        : null;
+      const valoresJornada = Array.from(valoresPorTipo.get(t.id) || []);
+      return {
+        tipo_id: t.id,
+        tipo_nome: t.nome,
+        descricao: t.descricao,
+        unidade: t.unidade,
+        agregacao: t.agregacao,
+        granularidade: t.granularidade,
+        ordem: t.ordem ?? 999,
+        valores_jornada: valoresJornada,
+        total_registros: regs.length,
+        ultimo_valor: ultimo?.valor ?? null,
+        ultima_data: ultimo?.data ?? null,
+        total_mes_atual: totalMesAtual,
+        total_mes_anterior: totalMesAnterior,
+        variacao_mes_pct: variacaoMes,
+        historico_6: historico6,
+        vazio: regs.length === 0,
+      };
+    }).sort((a, b) => a.ordem - b.ordem);
+
+
+
+
+
+
+
+
+    let cultosRecentes = [];
+    let totaisCultos = null;
+    let serieCultos = [];
+    if (area !== 'sede' && area !== 'cba') {
+      const { data: cultosRaw } = await supabase
+        .from('vw_culto_stats')
+        .select('id, data, hora, nome, service_type_name, presencial_adulto, presencial_kids, decisoes_presenciais, decisoes_online, decisoes_kids, online_pico, online_ds, online_ddus, observacoes')
+        .gte('data', dataLimiteStr)
+        .lte('data', ate)
+        .order('data', { ascending: false });
+
+      const cultosArea = filtrarCultosPorArea(cultosRaw || [], area);
+      cultosRecentes = cultosArea.slice(0, 60);
+
+
+      if (cultosArea.length > 0) {
+        const sum = (arr, k) => arr.reduce((a, c) => a + (Number(c[k]) || 0), 0);
+        const total_pres = sum(cultosArea, 'presencial_adulto');
+        const total_kids = sum(cultosArea, 'presencial_kids');
+        const total_dec_pres = sum(cultosArea, 'decisoes_presenciais');
+        const total_dec_onl = sum(cultosArea, 'decisoes_online');
+        const total_dec_kids = sum(cultosArea, 'decisoes_kids');
+        const total_pico = sum(cultosArea, 'online_pico');
+        const total_ddus = sum(cultosArea, 'online_ddus');
+        totaisCultos = {
+          total_cultos: cultosArea.length,
+          presencial_adulto: total_pres,
+          presencial_kids: total_kids,
+          decisoes_presenciais: total_dec_pres,
+          decisoes_online: total_dec_onl,
+          decisoes_kids: total_dec_kids,
+          decisoes_total: total_dec_pres + total_dec_onl + total_dec_kids,
+          online_pico_total: total_pico,
+          online_ddus_total: total_ddus,
+        };
+      }
+
+
+
+      const freqDe = (c) => area === 'kids' ? (Number(c.presencial_kids) || 0)
+        : area === 'online' ? (Number(c.online_pico) || 0)
+        : (Number(c.presencial_adulto) || 0);
+      const decDe = (c) => area === 'kids' ? (Number(c.decisoes_kids) || 0)
+        : area === 'online' ? (Number(c.decisoes_online) || 0)
+        : (Number(c.decisoes_presenciais) || 0) + (Number(c.decisoes_online) || 0);
+      const porMes = new Map();
+      for (const c of cultosArea) {
+        const mes = String(c.data).slice(0, 7);
+        if (!porMes.has(mes)) porMes.set(mes, { mes, cultos: 0, frequencia: 0, decisoes: 0 });
+        const m = porMes.get(mes);
+        m.cultos += 1;
+        m.frequencia += freqDe(c);
+        m.decisoes += decDe(c);
+      }
+      serieCultos = Array.from(porMes.values())
+        .sort((a, b) => a.mes.localeCompare(b.mes))
+        .map(m => ({ ...m, media_freq: m.cultos > 0 ? Math.round(m.frequencia / m.cultos) : 0 }));
+    }
+
+
+
+
+    const totalKpis = enriched.length;
+    const noAlvo = enriched.filter(k => k.trajetoria?.status_trajetoria === 'no_alvo').length;
+    const atrasado = enriched.filter(k => k.trajetoria?.status_trajetoria === 'atrasado').length;
+    const critico = enriched.filter(k => k.trajetoria?.status_trajetoria === 'critico').length;
+    const semDado = enriched.filter(k => !k.trajetoria || k.trajetoria.ultimo_valor == null).length;
+    const comMeta = enriched.filter(k => k.trajetoria?.checkpoint_meta != null).length;
+
+
+    const limite30 = new Date(hoje); limite30.setDate(limite30.getDate() - 30);
+    const limite30Str = limite30.toISOString().slice(0, 10);
+    const dadosRecentes = dados.filter(d => d.ultima_data && d.ultima_data >= limite30Str).length;
+    const totalTipos = dados.length;
+
+    const kpisAtivosCobertos = totalKpis > 0 ? (totalKpis - semDado) : 0;
+    const pctKpisNoAlvo = totalKpis > 0 ? Math.round((noAlvo / totalKpis) * 100) : 0;
+    const pctKpisCobertos = totalKpis > 0 ? Math.round((kpisAtivosCobertos / totalKpis) * 100) : 0;
+    const pctDadosRecentes = totalTipos > 0 ? Math.round((dadosRecentes / totalTipos) * 100) : 0;
+
+
+    const score = Math.round(
+      (pctKpisNoAlvo * 0.5) +
+      (pctKpisCobertos * 0.3) +
+      (pctDadosRecentes * 0.2)
+    );
+
+    const saude = {
+      score,
+      diagnostico: score >= 75 ? 'saudavel' : score >= 50 ? 'atencao' : score >= 25 ? 'risco' : 'critico',
+      kpis_total: totalKpis,
+      kpis_no_alvo: noAlvo,
+      kpis_atrasado: atrasado,
+      kpis_critico: critico,
+      kpis_sem_dado: semDado,
+      kpis_com_meta: comMeta,
+      pct_no_alvo: pctKpisNoAlvo,
+      pct_cobertos: pctKpisCobertos,
+      tipos_dado: totalTipos,
+      dados_recentes_30d: dadosRecentes,
+      pct_dados_recentes: pctDadosRecentes,
+    };
+
+    res.json({
+      area,
+      total: totalKpis,
+      periodo: { desde: dataLimiteStr, ate },
+      stats: { com_meta: comMeta, no_alvo: noAlvo, atrasado, critico },
+      por_valor: porValor,
+      sem_valor: semValor,
+      kpis: enriched,
+      dados,
+      saude,
+      cultos_recentes: cultosRecentes,
+      totais_cultos: totaisCultos,
+      serie_cultos: serieCultos,
+    });
+  } catch (e) {
+    console.error('painel-area:', e.message);
+    res.status(500).json({ error: 'Erro ao buscar dados da área' });
+  }
+});
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+const VALOR_LABELS = {
+  seguir: 'Seguir a Jesus',
+  conectar: 'Conectar com Pessoas',
+  investir: 'Investir Tempo com Deus',
+  servir: 'Servir em Comunidade',
+  generosidade: 'Viver Generosamente',
+};
+const VALOR_CORES = {
+  seguir: '#8B5CF6',
+  conectar: '#3B82F6',
+  investir: '#F59E0B',
+  servir: '#10B981',
+  generosidade: '#EC4899',
+};
+const ORDEM_VALORES = ['seguir', 'conectar', 'investir', 'servir', 'generosidade'];
+
+function mesesDoRange(inicio, fim) {
+  const out = [];
+  let [y, m] = inicio.slice(0, 7).split('-').map(Number);
+  const [yf, mf] = fim.slice(0, 7).split('-').map(Number);
+  while (y < yf || (y === yf && m <= mf)) {
+    out.push(`${y}-${String(m).padStart(2, '0')}`);
+    m++; if (m > 12) { m = 1; y++; }
+  }
+  return out;
+}
+
+router.get('/:area/series', authorizeModule('painel-area', 1), async (req, res) => {
+  try {
+    const area = String(req.params.area).toLowerCase();
+    if (!AREAS_VALIDAS.includes(area)) {
+      return res.status(400).json({ error: 'Area invalida', validas: AREAS_VALIDAS });
+    }
+    const mesesPermitidos = [3, 6, 12, 24, 60];
+    const meses = mesesPermitidos.includes(parseInt(req.query.meses, 10))
+      ? parseInt(req.query.meses, 10) : 12;
+    const hoje = new Date();
+    const fim = hoje.toISOString().slice(0, 10);
+    const ini = new Date(hoje); ini.setMonth(ini.getMonth() - (meses - 1)); ini.setDate(1);
+    const inicio = ini.toISOString().slice(0, 10);
+    const mesesRange = mesesDoRange(inicio, fim);
+
+    const porValor = {};
+    const pushDado = (valor, dado) => {
+      if (!porValor[valor]) porValor[valor] = [];
+      porValor[valor].push(dado);
+    };
+
+
+    if (area !== 'cba') {
+      const { data: cultosRaw } = await supabase
+        .from('vw_culto_stats')
+        .select('id, data, nome, service_type_name, presencial_adulto, presencial_kids, decisoes_presenciais, decisoes_online, decisoes_kids, online_pico')
+        .gte('data', inicio)
+        .lte('data', fim);
+      const cultosArea = filtrarCultosPorArea(cultosRaw || [], area);
+
+      const freqDe = (c) => area === 'kids' ? (Number(c.presencial_kids) || 0)
+        : area === 'online' ? (Number(c.online_pico) || 0)
+        : (Number(c.presencial_adulto) || 0);
+      const decDe = (c) => area === 'kids' ? (Number(c.decisoes_kids) || 0)
+        : area === 'online' ? (Number(c.decisoes_online) || 0)
+        : (Number(c.decisoes_presenciais) || 0) + (Number(c.decisoes_online) || 0);
+
+      const porMes = new Map();
+      for (const c of cultosArea) {
+        const mes = String(c.data).slice(0, 7);
+        if (!porMes.has(mes)) porMes.set(mes, { cultos: 0, freq: 0, dec: 0 });
+        const m = porMes.get(mes);
+        m.cultos += 1; m.freq += freqDe(c); m.dec += decDe(c);
+      }
+      if (cultosArea.length > 0) {
+
+
+        pushDado('seguir', {
+          id: 'frequencia',
+          label: area === 'online' ? 'Pico médio por culto' : 'Frequência média por culto',
+          unidade: 'pessoas',
+          agregacao: 'media',
+          serie: mesesRange.map(mes => {
+            const m = porMes.get(mes);
+            return { periodo: mes, valor: m && m.cultos > 0 ? Math.round(m.freq / m.cultos) : null };
+          }),
+        });
+        pushDado('seguir', {
+          id: 'decisoes',
+          label: 'Decisões',
+          unidade: 'pessoas',
+          agregacao: 'soma',
+          serie: mesesRange.map(mes => ({ periodo: mes, valor: porMes.get(mes)?.dec ?? 0 })),
+        });
+      }
+    }
+
+
+    const { data: kpisRaw } = await supabase
+      .from('kpi_indicadores_taticos')
+      .select('valores, formula_config')
+      .eq('ativo', true)
+      .ilike('area', area);
+    const valoresPorTipo = new Map();
+    for (const k of kpisRaw || []) {
+      const fc = k.formula_config || {};
+      const candidatos = [fc.dado_tipo, fc.numerador, fc.denominador].filter(Boolean);
+      const tiposK = [];
+      for (const c of candidatos) {
+        if (Array.isArray(c)) tiposK.push(...c);
+        else tiposK.push(c);
+      }
+      const vals = Array.isArray(k.valores) ? k.valores : [];
+      for (const t of tiposK) {
+        if (!t) continue;
+        if (!valoresPorTipo.has(t)) valoresPorTipo.set(t, new Set());
+        vals.forEach(v => valoresPorTipo.get(t).add(v));
+      }
+    }
+    const tiposIds = Array.from(valoresPorTipo.keys());
+    if (tiposIds.length > 0) {
+      const [{ data: catalogo }, { data: registros }] = await Promise.all([
+        supabase.from('tipos_dado_bruto')
+          .select('id, nome, unidade, agregacao, ordem')
+          .in('id', tiposIds),
+        supabase.from('dados_brutos')
+          .select('tipo_id, data, valor')
+          .eq('area', area)
+          .in('tipo_id', tiposIds)
+          .gte('data', inicio)
+          .lte('data', fim),
+      ]);
+      const regsPorTipo = new Map();
+      for (const r of registros || []) {
+        if (!regsPorTipo.has(r.tipo_id)) regsPorTipo.set(r.tipo_id, []);
+        regsPorTipo.get(r.tipo_id).push(r);
+      }
+      const catalogoOrdenado = (catalogo || []).sort((a, b) => (a.ordem ?? 999) - (b.ordem ?? 999));
+      for (const t of catalogoOrdenado) {
+        const regs = regsPorTipo.get(t.id) || [];
+        if (regs.length === 0) continue;
+        const ehMedia = String(t.agregacao || '').toLowerCase().startsWith('med');
+        const porMes = new Map();
+        for (const r of regs) {
+          const mes = String(r.data).slice(0, 7);
+          if (!porMes.has(mes)) porMes.set(mes, { soma: 0, n: 0 });
+          const m = porMes.get(mes);
+          m.soma += Number(r.valor) || 0; m.n += 1;
+        }
+        const serie = mesesRange.map(mes => {
+          const m = porMes.get(mes);
+          if (!m) return { periodo: mes, valor: ehMedia ? null : 0 };
+          return { periodo: mes, valor: ehMedia ? Math.round((m.soma / m.n) * 100) / 100 : m.soma };
+        });
+        const dado = { id: t.id, label: t.nome, unidade: t.unidade, agregacao: ehMedia ? 'media' : 'soma', serie };
+        const valsDoTipo = Array.from(valoresPorTipo.get(t.id) || []);
+        for (const v of valsDoTipo) {
+          if (!ORDEM_VALORES.includes(v)) continue;
+          pushDado(v, dado);
+        }
+      }
+    }
+
+    res.json({
+      area,
+      inicio,
+      fim,
+      meses,
+      valores: ORDEM_VALORES
+        .filter(v => (porValor[v] || []).length > 0)
+        .map(v => ({
+          key: v,
+          label: VALOR_LABELS[v],
+          cor: VALOR_CORES[v],
+          dados: porValor[v],
+        })),
+    });
+  } catch (e) {
+    console.error('painel-area/series:', e.message);
+    res.status(500).json({ error: 'Erro ao montar séries da área' });
+  }
+});
+
+
+
+
+
+
+
+
+
+
+
+
+
+router.post('/:area/nps', authorizeModule('painel-area', 3), async (req, res) => {
+  try {
+    const area = String(req.params.area).toLowerCase();
+    if (!AREAS_VALIDAS.includes(area)) {
+      return res.status(400).json({ error: 'Area invalida', validas: AREAS_VALIDAS });
+    }
+    const { nota, mes, qtd_respostas, observacao } = req.body || {};
+    const notaNum = Number(nota);
+    if (!Number.isFinite(notaNum) || notaNum < 0 || notaNum > 10) {
+      return res.status(400).json({ error: 'nota deve ser entre 0 e 10' });
+    }
+    const mesUsado = (mes && /^\d{4}-\d{2}$/.test(mes)) ? mes : new Date().toISOString().slice(0, 7);
+
+    const dataReg = `${mesUsado}-01`;
+
+    const payload = {
+      tipo_id: 'nps_culto',
+      area,
+      data: dataReg,
+      valor: notaNum,
+      contexto: qtd_respostas ? { qtd_respostas: Number(qtd_respostas) } : {},
+      observacao: observacao ? String(observacao).slice(0, 500) : null,
+      registrado_por: req.user?.id || null,
+      origem: 'painel-area-nps',
+    };
+
+
+    const { data, error } = await supabase
+      .from('dados_brutos')
+      .upsert(payload, { onConflict: 'tipo_id,area,data,contexto' })
+      .select()
+      .single();
+    if (error) return res.status(500).json({ error: error.message });
+    res.json({ ok: true, registro: data });
+  } catch (e) {
+    console.error('painel-area/nps:', e.message);
+    res.status(500).json({ error: 'Erro ao registrar NPS' });
+  }
+});
+
+
+
+
+
+
+
+
+function faixaEtaria(dataNasc) {
+  if (!dataNasc) return null;
+  const n = new Date(dataNasc);
+  if (isNaN(n.getTime())) return null;
+  const h = new Date();
+  let idade = h.getFullYear() - n.getFullYear();
+  const m = h.getMonth() - n.getMonth();
+  if (m < 0 || (m === 0 && h.getDate() < n.getDate())) idade--;
+  if (idade < 13) return 'crianca';
+  if (idade <= 17) return 'adolescente';
+  if (idade <= 25) return 'jovem';
+  return 'adulto';
+}
+
+
+
+
+
+
+
+function janelaJovemAdolescente() {
+  const h = new Date();
+  const fmt = (y) => `${y}-${String(h.getMonth() + 1).padStart(2, '0')}-${String(h.getDate()).padStart(2, '0')}`;
+  return { minBirth: fmt(h.getFullYear() - 31), maxBirth: fmt(h.getFullYear() - 13) };
+}
+
+
+
+router.get('/:area/pessoas', authorizeModule('painel-area', 1), async (req, res) => {
+  try {
+    const area = String(req.params.area).toLowerCase();
+    if (!['ami', 'bridge'].includes(area)) {
+      return res.status(400).json({ error: 'Aba Pessoas só existe para AMI e Bridge' });
+    }
+    const { minBirth, maxBirth } = janelaJovemAdolescente();
+    const orFilter = `frequenta_area.eq.${area},and(data_nascimento.gt.${minBirth},data_nascimento.lte.${maxBirth})`;
+
+
+    let all = [];
+    let from = 0;
+    const page = 1000;
+    while (true) {
+      const { data, error } = await supabase
+        .from('mem_membros')
+        .select('id, nome, foto_url, telefone, data_nascimento, status, frequenta_area')
+        .is('deleted_at', null)
+        .or(orFilter)
+        .order('nome')
+        .range(from, from + page - 1);
+      if (error) throw error;
+      all = all.concat(data || []);
+      if (!data || data.length < page) break;
+      from += page;
+    }
+
+    const pessoas = all.map((m) => ({
+      ...m,
+      faixa_etaria: faixaEtaria(m.data_nascimento),
+      frequenta_declarado: m.frequenta_area === area,
+    }));
+    const por_faixa = pessoas.reduce((acc, p) => {
+      const f = p.faixa_etaria || 'sem_data';
+      acc[f] = (acc[f] || 0) + 1;
+      return acc;
+    }, {});
+    const confirmados = pessoas.filter((p) => p.frequenta_declarado).length;
+    res.json({
+      pessoas,
+      total: pessoas.length,
+      confirmados,
+      potenciais: pessoas.length - confirmados,
+      por_faixa,
+    });
+  } catch (e) {
+    console.error('painel-area/pessoas:', e.message);
+    res.status(500).json({ error: 'Erro ao listar pessoas' });
+  }
+});
+
+
+router.get('/:area/pessoas/:id', authorizeModule('painel-area', 1), async (req, res) => {
+  try {
+    const area = String(req.params.area).toLowerCase();
+    if (!['ami', 'bridge'].includes(area)) {
+      return res.status(400).json({ error: 'Area invalida' });
+    }
+    const { id } = req.params;
+
+    const { data: m, error } = await supabase
+      .from('mem_membros')
+      .select('id, nome, foto_url, telefone, email, data_nascimento, status, frequenta_area, familia_id, created_at')
+      .eq('id', id)
+      .is('deleted_at', null)
+      .maybeSingle();
+    if (error) throw error;
+    if (!m) return res.status(404).json({ error: 'Pessoa não encontrada' });
+
+
+    const faixa = faixaEtaria(m.data_nascimento);
+    const ehPotencial = faixa === 'jovem' || faixa === 'adolescente';
+    if (m.frequenta_area !== area && !ehPotencial) {
+      return res.status(403).json({ error: 'Pessoa fora do escopo deste ministério.' });
+    }
+
+
+    let familia = null;
+    if (m.familia_id) {
+      const { data: f } = await supabase.from('mem_familias').select('id, nome').eq('id', m.familia_id).maybeSingle();
+      familia = f || null;
+    }
+
+    let grupo = null;
+    const { data: gm } = await supabase
+      .from('mem_grupo_membros')
+      .select('grupo_id, funcao, mem_grupos(id, nome)')
+      .eq('membro_id', id)
+      .is('saiu_em', null)
+      .limit(1)
+      .maybeSingle();
+    if (gm) {
+      const g = Array.isArray(gm.mem_grupos) ? gm.mem_grupos[0] : gm.mem_grupos;
+      grupo = g ? { id: g.id, nome: g.nome, funcao: gm.funcao || null } : null;
+    }
+
+    const { data: vols } = await supabase
+      .from('mem_voluntarios')
+      .select('ministerio, area, desde')
+      .eq('membro_id', id)
+      .is('ate', null);
+
+    const { data: trilha } = await supabase
+      .from('mem_trilha_valores')
+      .select('etapa, concluida, concluida_em')
+      .eq('membro_id', id);
+
+    res.json({
+      membro: { ...m, faixa_etaria: faixaEtaria(m.data_nascimento) },
+      familia,
+      grupo,
+      ministerios: vols || [],
+      trilha: trilha || [],
+
+    });
+  } catch (e) {
+    console.error('painel-area/pessoas/:id:', e.message);
+    res.status(500).json({ error: 'Erro ao abrir pessoa' });
+  }
+});
+
+
+
+module.exports = router;

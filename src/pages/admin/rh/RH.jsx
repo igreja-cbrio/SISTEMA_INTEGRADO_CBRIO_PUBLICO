@@ -1,0 +1,3709 @@
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
+import { Users, Pencil, Trash2, Palmtree, X, Save, Check, AlertTriangle, Download, UserPlus, Briefcase, Calendar, Search, Filter, Eye, Edit, MoreVertical, LayoutDashboard, Network, Receipt, Clock, CalendarDays, Scale, Camera, UserMinus, RotateCcw, Sparkles, ShieldCheck, FileText, GraduationCap, StickyNote, Wallet, Mail, Phone, Megaphone } from 'lucide-react';
+import { toast as sonnerToast } from 'sonner';
+import { Button } from '../../../components/ui/button';
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../../../components/ui/card';
+import { StatisticsCard } from '../../../components/ui/statistics-card';
+import Paginacao, { usePaginacaoLocal } from '../../../components/Paginacao';
+
+
+import {
+  DOCS_CLT, DOCS_PJ,
+  faltando as faltandoDocs,
+  foraDoCatalogo as foraDoCatalogoDocs,
+  tipoEhExtensao as tipoEhExtensaoDoc,
+} from '../../../lib/documentosRh';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '../../../components/ui/tabs';
+import { ScrollArea, ScrollBar } from '../../../components/ui/scroll-area';
+import { Select as ShadSelect, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../../../components/ui/select';
+import { Dialog, DialogContent, DialogHeader, DialogFooter, DialogTitle, DialogDescription } from '../../../components/ui/dialog';
+import { useAuth } from '../../../contexts/AuthContext';
+import { rh, permissoes, pcs } from '../../../api';
+import { exportCSV, exportPDF } from '../../../lib/export';
+import { mascaraTelefone } from '../../../lib/inscricao';
+import { supabase } from '../../../supabaseClient';
+import { C, fmtDate, fmtMoney, TIPO_CONTRATO, TIPO_FERIAS, FERIAS_STATUS } from '../../../lib/theme';
+import { ResponsiveContainer, ComposedChart, AreaChart, BarChart, PieChart, Pie, Cell, Bar, Area, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend } from 'recharts';
+import { AdmissaoFormModal, ContratoEditorModal, gerarContratoAdmissao, formParaFuncionario, funcionarioParaForm } from './admissao';
+import TabFolha from './TabFolha';
+import TabAvaliacao360 from './TabAvaliacao360';
+import TabExtras from './TabExtras';
+import TabFeriasCalendar from './TabFeriasCalendar';
+import TabPCS from './TabPCS';
+import TabPainelRH from './TabPainelRH';
+import TabProcessosSeletivos from './TabProcessosSeletivos';
+import { DatePicker } from '@/components/ui/date-picker';
+import { mascaraCep, cepCompleto, buscarCep } from '../../../lib/cepAutopreenche';
+import SeletorBairro from '../../../components/ui/seletor-bairro';
+
+
+function Toast({ message, type = 'error', onClose }) {
+  if (!message) return null;
+  const colors = { error: { bg: '#ef444418', border: '#ef444450', text: '#ef4444' }, success: { bg: '#10b98118', border: '#10b98150', text: '#10b981' }, warning: { bg: '#f59e0b18', border: '#f59e0b50', text: '#f59e0b' } };
+  const c = colors[type] || colors.error;
+  return (
+    <div className="fixed top-5 right-5 z-[9999] flex items-center gap-2.5 rounded-xl border bg-card p-3 pr-4 shadow-lg max-w-[400px]"
+      style={{ borderLeft: `4px solid ${c.text}`, borderColor: c.border, animation: 'slideInRight 0.25s ease-out' }}>
+      <div className="flex-1 text-[13px] font-medium" style={{ color: c.text }}>{message}</div>
+      <button onClick={onClose} className="text-muted-foreground hover:text-foreground transition-colors cursor-pointer">
+        <X className="h-3.5 w-3.5" />
+      </button>
+    </div>
+  );
+}
+
+
+function ConfirmDialog({ message, onConfirm, onCancel }) {
+  if (!message) return null;
+  return (
+    <div className="fixed inset-0 z-[1000] flex items-center justify-center bg-black/50">
+      <div className="bg-popover rounded-2xl p-7 max-w-[400px] shadow-2xl text-center" style={{ animation: 'cbrio-modal-center-in 0.2s ease-out' }}>
+        <AlertTriangle className="w-9 h-9 mx-auto mb-3 text-warning" />
+        <div className="text-[15px] font-semibold text-foreground mb-5">{message}</div>
+        <div className="flex gap-2.5 justify-center">
+          <Button variant="ghost" onClick={onCancel}>Cancelar</Button>
+          <Button variant="destructive" onClick={onConfirm}>Confirmar</Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
+
+function DesligarModal({ func, onClose, onConfirm }) {
+  const hoje = new Date().toISOString().slice(0, 10);
+  const [data, setData] = useState(hoje);
+  const [motivo, setMotivo] = useState('');
+  useEffect(() => { if (func) { setData(hoje); setMotivo(''); } }, [func]);
+  if (!func) return null;
+  return (
+    <div className="fixed inset-0 z-[1000] flex items-center justify-center bg-black/50 p-4">
+      <div className="bg-popover rounded-2xl p-6 w-full max-w-[420px] shadow-2xl" style={{ animation: 'cbrio-modal-center-in 0.2s ease-out' }}>
+        <div className="flex items-center gap-3 mb-1">
+          <div className="h-10 w-10 rounded-full bg-amber-500/15 text-amber-600 flex items-center justify-center"><UserMinus className="h-5 w-5" /></div>
+          <div className="text-[15px] font-semibold text-foreground">Desligar colaborador</div>
+        </div>
+        <p className="text-xs text-muted-foreground mb-4">
+          {func.nome ? <strong className="text-foreground">{func.nome}</strong> : 'O colaborador'} fica como <strong>inativo</strong> — o registro e o histórico <strong>não são apagados</strong> e dá pra reativar depois.
+        </p>
+        <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">Data do desligamento</label>
+        <DatePicker value={data} onChange={v => setData(v)} max={hoje}
+          className="mt-1 mb-3" />
+        <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">Motivo (opcional)</label>
+        <textarea value={motivo} onChange={e => setMotivo(e.target.value)} rows={3} placeholder="Ex.: pedido de demissão, fim de contrato…"
+          className="mt-1 mb-4 flex w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring resize-none" />
+        <div className="flex gap-2.5 justify-end">
+          <Button variant="ghost" onClick={onClose}>Cancelar</Button>
+          <Button variant="destructive" disabled={!data} onClick={() => onConfirm({ data_demissao: data, motivo: motivo.trim() || null })}>
+            <UserMinus className="h-4 w-4 mr-1.5" />Desligar
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
+const STATUS_COLORS = {
+  ativo: { c: C.green, bg: C.greenBg, label: 'Ativo' },
+  em_admissao: { c: '#8b5cf6', bg: '#8b5cf618', label: 'Em admissão' },
+  inativo: { c: '#737373', bg: '#73737318', label: 'Inativo' },
+  ferias: { c: C.blue, bg: C.blueBg, label: 'Férias' },
+  licenca: { c: C.amber, bg: C.amberBg, label: 'Licença' },
+};
+
+
+
+const OPCOES_CONTRATO = ['CLT', 'PJ', 'PJ+', 'PREBENDA'];
+
+
+
+
+
+function _normCargo(s) {
+  return (s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').trim();
+}
+const SUGESTAO_CARGO_OVERRIDES = [
+  [/coordenador.*integracao/, 'lider-ministerial'],
+  [/coordenador.*cuidados/, 'lider-ministerial'],
+  [/coordenador.*(grupos|cba)/, 'lider-ministerial'],
+  [/supervisor.*jornada/, 'supervisor-jornada'],
+  [/assistente.*(cbkids|kids)/, 'assistente-kids'],
+  [/(coordenador|lider).*(cbkids|kids)/, 'coordenador-kids'],
+  [/coordenador.*ami/, 'coordenador-ami'],
+  [/coordenador.*bridge/, 'coordenador-bridge'],
+  [/(coordenador|lider).*online/, 'coordenador-online'],
+  [/coordenador.*adoracao/, 'coordenador-adoracao'],
+  [/coordenador.*producao/, 'coordenador-producao'],
+  [/assistente.*producao/, 'assistente-producao'],
+  [/(coordenador|lider).*marketing/, 'coordenador-marketing'],
+  [/(designer|social media|produtor|audiovisual|\bvideo)/, 'assistente-marketing'],
+  [/coordenador.*financeiro/, 'coordenador-financeiro'],
+  [/assistente.*(financeiro|administrativo)/, 'assistente-financeiro'],
+  [/(coordenador|diretor).*\brh\b/, 'diretor-rh'],
+  [/coordenador.*voluntariado/, 'coordenador-voluntarios'],
+  [/pastor.*senior/, 'pastor-senior'],
+  [/pastor.*(presidente|executivo)/, 'pastor-presidente'],
+  [/diretor.*criativo/, 'diretor-criativo'],
+  [/diretor.*ministerial/, 'diretor-ministerial'],
+  [/diretor.*(operacional|administrativo|gestao)/, 'diretor-administrativo'],
+  [/(auxiliar|assistente).*(infra|infraestrutura|operacoes)/, 'assistente-operacoes'],
+  [/(auxiliar|assistente).*(logistica|almoxarifado)/, 'assistente-logistica'],
+  [/(coordenador|lider|encarregado).*(operacoes|infra|infraestrutura|logistica)/, 'lider-operacoes'],
+  [/assistente.*\bti\b/, 'assistente-area'],
+  [/(assistente|auxiliar).*(ministerial|pastoral)/, 'assistente-ministerial'],
+];
+function sugerirCargoPermissao(cargoRh, cargos) {
+  const n = _normCargo(cargoRh);
+  if (!n || !cargos || !cargos.length) return null;
+  const bySlug = {};
+  cargos.forEach(c => { if (c.slug) bySlug[c.slug] = c; });
+  for (const [re, slug] of SUGESTAO_CARGO_OVERRIDES) {
+    if (re.test(n) && bySlug[slug]) return bySlug[slug];
+  }
+
+  const tokens = new Set(n.split(/[^a-z0-9+]+/).filter(t => t.length > 2));
+  let best = null, bestScore = 0;
+  for (const c of cargos) {
+    if (!c.slug) continue;
+    const cn = _normCargo(c.nome_completo || c.nome);
+    if (cn === n) return c;
+    let score = 0;
+    cn.split(/[^a-z0-9+]+/).filter(t => t.length > 2).forEach(t => { if (tokens.has(t)) score += 1; });
+    if (score > bestScore) { bestScore = score; best = c; }
+  }
+  return bestScore >= 1 ? best : null;
+}
+
+
+
+
+
+
+function buildAcessoIndex(acessos) {
+  const cargos = acessos?.cargos || [];
+  const map = {};
+  let semAcesso = 0, comAcesso = 0, divergente = 0;
+  (acessos?.itens || []).forEach(i => {
+    const sug = sugerirCargoPermissao(i.cargo_rh, cargos);
+    const div = i.situacao === 'com_acesso' && sug && i.cargo_perm_id && sug.id !== i.cargo_perm_id;
+    map[i.id] = { ...i, sugestao: sug, divergente: div };
+    if (i.situacao === 'sem_acesso') semAcesso += 1;
+    else { comAcesso += 1; if (div) divergente += 1; }
+  });
+  return { map, total: comAcesso + semAcesso, comAcesso, semAcesso, divergente, carregado: !!acessos };
+}
+
+
+function AcessoCell({ info, carregado }) {
+
+  if (!info) return <span className="text-sm text-muted-foreground">{carregado ? '—' : '…'}</span>;
+  if (info.situacao === 'sem_acesso') {
+    return (
+      <div>
+        <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-semibold" style={{ color: '#ef4444', background: '#ef444418' }}>
+          <ShieldCheck className="h-3 w-3" /> Sem acesso
+        </span>
+        {info.motivo && <div className="text-[11px] text-muted-foreground mt-0.5">{info.motivo}</div>}
+      </div>
+    );
+  }
+  const sugNome = info.sugestao ? (info.sugestao.nome_completo || info.sugestao.nome) : null;
+  return (
+    <div>
+      <span className="text-sm">{info.cargo_perm_nome || '—'}</span>
+      {info.divergente && sugNome && (
+        <div className="text-[11px] text-amber-600 mt-0.5" title={`Sugestão pelo cargo do RH: ${sugNome}`}>
+          ≠ sugestão ({sugNome})
+        </div>
+      )}
+    </div>
+  );
+}
+
+
+const ACESSO_FILTROS = [
+  ['todos', 'Todos'],
+  ['com_acesso', 'Com acesso'],
+  ['sem_acesso', 'Sem acesso'],
+  ['divergente', 'Divergentes'],
+];
+
+
+const styles = {
+  table: { width: '100%', borderCollapse: 'collapse' },
+  th: { padding: '12px 16px', fontSize: 12, fontWeight: 700, color: 'var(--cbrio-text2)', textTransform: 'uppercase', letterSpacing: 0.5, textAlign: 'left', borderBottom: '1px solid var(--cbrio-border)', background: 'var(--cbrio-table-header)' },
+  td: { padding: '12px 16px', fontSize: 14, color: 'var(--cbrio-text)', borderBottom: '1px solid var(--cbrio-border)', lineHeight: 1.5 },
+  badge: (color, bg) => ({ display: 'inline-block', padding: '2px 10px', borderRadius: 20, fontSize: 12, fontWeight: 600, color, background: bg }),
+  card: { background: 'var(--cbrio-card)', borderRadius: 16, border: '1px solid var(--hairline)', boxShadow: 'var(--shadow)', overflow: 'hidden' },
+  cardHeader: { padding: 16, borderBottom: '1px solid var(--cbrio-border)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' },
+  cardTitle: { fontSize: 14, fontWeight: 600, color: 'var(--cbrio-text)', lineHeight: 1.5 },
+  formGroup: { marginBottom: 14 },
+  empty: { textAlign: 'center', padding: 40, color: 'var(--cbrio-text3)', fontSize: 14, lineHeight: 1.5 },
+};
+
+
+function Modal({ open, onClose, title, children, footer }) {
+  if (!open) return null;
+  return (
+    <div className="fixed inset-0 z-[1000] flex">
+      <div className="flex-1 bg-black/50" onClick={onClose} />
+      <div className="w-full sm:w-1/2 sm:min-w-[440px] max-w-[600px] bg-popover overflow-y-auto flex flex-col shadow-2xl" style={{ animation: 'slideInRight 0.25s ease-out' }}>
+        <div className="sticky top-0 z-10 bg-popover px-6 pt-5 pb-3 border-b border-border flex justify-between items-center">
+          <div className="text-lg font-bold text-foreground">{title}</div>
+          <Button variant="ghost" size="icon" onClick={onClose}><X className="h-4 w-4" /></Button>
+        </div>
+        <div className="px-6 py-4 flex-1">{children}</div>
+        {footer && <div className="px-6 py-3 flex gap-2 justify-end border-t border-border">{footer}</div>}
+      </div>
+    </div>
+  );
+}
+
+function Input({ label, ...props }) {
+  return (
+    <div style={styles.formGroup}>
+      {label && <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-1 block">{label}</label>}
+      <input className="flex h-9 w-full rounded-lg border border-input bg-background px-3 py-2 text-sm shadow-sm shadow-black/5 placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" {...props} />
+    </div>
+  );
+}
+
+function FormSelect({ label, value, onChange, children, placeholder, ...props }) {
+  const safeValue = value || '__none__';
+  return (
+    <div style={styles.formGroup}>
+      {label && <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-1 block">{label}</label>}
+      <ShadSelect value={safeValue} onValueChange={v => {
+        const actual = (v === '__none__' || v === '__all__') ? '' : v;
+        onChange && onChange({ target: { value: actual } });
+      }} {...props}>
+        <SelectTrigger className="w-full">
+          <SelectValue placeholder={placeholder || 'Selecione...'} />
+        </SelectTrigger>
+        <SelectContent className="z-[1001]">
+          {children}
+        </SelectContent>
+      </ShadSelect>
+    </div>
+  );
+}
+
+function Badge({ status, map }) {
+  const s = map[status] || { label: status };
+  const color = s.c || s.color || '#737373';
+  const bg = s.bg || '#73737318';
+  return <span className="inline-block px-2.5 py-0.5 rounded-full text-xs font-semibold" style={{ color, background: bg }}>{s.label || status}</span>;
+}
+
+
+const TABS = [
+  { key: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
+  { key: 'colaboradores', label: 'Colaboradores', icon: Users },
+  { key: 'pcs', label: 'PCS', icon: Scale },
+  { key: 'folha', label: 'Folha', icon: Receipt },
+  { key: 'processos-seletivos', label: 'Processos seletivos', icon: Briefcase },
+  { key: 'aval360', label: 'Avaliação 360', icon: ShieldCheck },
+  { key: 'treinamentos', label: 'Treinamentos', icon: Briefcase },
+  { key: 'ferias', label: 'Férias/Licenças', icon: CalendarDays },
+  { key: 'extras', label: 'Extras', icon: Clock },
+  { key: 'painel', label: 'Painel da home', icon: Megaphone },
+];
+
+
+
+
+export default function RH() {
+  const { isAdmin, getAccessLevel, canAccessModule } = useAuth();
+
+
+
+  const podeRemun = isAdmin || getAccessLevel(['rh']) >= 4;
+
+  const pode360 = isAdmin || getAccessLevel(['rh']) >= 3;
+
+
+
+
+
+
+  const podeEditarRemun = canAccessModule(['rh'], 'escrita', 4);
+
+
+
+  const podeDispararOnboarding = isAdmin || getAccessLevel(['rh']) >= 5;
+  const [tab, setTab] = useState(() => {
+    const inicial = new URLSearchParams(window.location.search).get('tab');
+    return inicial === 'avaliacoes' ? 'pcs' : inicial || 'dashboard';
+  });
+  const [dash, setDash] = useState(null);
+  const [funcs, setFuncs] = useState([]);
+  const [acessos, setAcessos] = useState(null);
+  const [treinos, setTreinos] = useState([]);
+  const [setores, setSetores] = useState([]);
+  const [areas, setAreas] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+
+
+  const [filtroStatus, setFiltroStatus] = useState('');
+  const [filtroArea, setFiltroArea] = useState('');
+  const [busca, setBusca] = useState('');
+
+
+  const [modalFunc, setModalFunc] = useState(null);
+  const [modalTreino, setModalTreino] = useState(null);
+  const [modalFerias, setModalFerias] = useState(null);
+  const [modalDetail, setModalDetail] = useState(null);
+  const [modalDoc, setModalDoc] = useState(null);
+  const [desligarFunc, setDesligarFunc] = useState(null);
+  const [modalAdmissao, setModalAdmissao] = useState(null);
+  const [modalContrato, setModalContrato] = useState(null);
+  const [savingAdm, setSavingAdm] = useState(false);
+
+
+  const [toast, setToast] = useState(null);
+  const [confirmAction, setConfirmAction] = useState(null);
+  const showToast = (message, type = 'error') => { setToast({ message, type }); setTimeout(() => setToast(null), 4000); };
+  const showSuccess = (msg) => showToast(msg, 'success');
+  const askConfirm = (message, onConfirm) => setConfirmAction({ message, onConfirm });
+
+
+  const loadDash = useCallback(async () => {
+    try { setDash(await rh.dashboard()); } catch (e) { console.error(e); }
+  }, []);
+
+  const loadFuncs = useCallback(async () => {
+    try {
+      setLoading(true);
+      const params = {};
+      if (filtroStatus) params.status = filtroStatus;
+      if (filtroArea) params.area = filtroArea;
+      if (busca) params.busca = busca;
+      setFuncs(await rh.funcionarios.list(params));
+    } catch (e) { setError(e.message); }
+    finally { setLoading(false); }
+  }, [filtroStatus, filtroArea, busca]);
+
+
+
+  const loadAcessos = useCallback(async () => {
+    try { setAcessos(await rh.acessos()); } catch (e) { console.error('[RH] acessos:', e); }
+  }, []);
+
+  const loadTreinos = useCallback(async () => {
+    try { setTreinos(await rh.treinamentos.list()); } catch (e) { console.error(e); }
+  }, []);
+
+  const loadSetores = useCallback(async () => {
+    try {
+      const [{ data: setoresData }, { data: areasData }] = await Promise.all([
+        supabase.from('setores').select('*').order('nome'),
+        supabase.from('areas').select('*').order('nome'),
+      ]);
+      setSetores(setoresData || []);
+      setAreas(areasData || []);
+    } catch (e) { console.error(e); }
+  }, []);
+
+  useEffect(() => { loadDash(); loadFuncs(); loadAcessos(); loadTreinos(); loadSetores(); }, []);
+  useEffect(() => { loadFuncs(); }, [filtroStatus, filtroArea, busca]);
+
+
+
+  const CAMPOS_RESTAURAVEIS = ['nome', 'cpf', 'email', 'telefone', 'cargo', 'area', 'tipo_contrato', 'data_admissao', 'data_demissao', 'salario', 'remuneracao_bruta', 'grau_id', 'data_enquadramento', 'status', 'gestor_id', 'observacoes'];
+
+  async function saveFuncionario(data) {
+    const anterior = data.id ? funcs.find(x => x.id === data.id) : null;
+
+
+    if (!podeEditarRemun) { delete data.cpf; delete data.salario; }
+    try {
+      if (data.id) await rh.funcionarios.update(data.id, data);
+      else await rh.funcionarios.create(data);
+      setModalFunc(null);
+      loadFuncs(); loadDash(); loadAcessos();
+      if (data.id && anterior) {
+
+        const restaura = {};
+        for (const k of CAMPOS_RESTAURAVEIS) if (k in anterior) restaura[k] = anterior[k] ?? null;
+        sonnerToast.success('Colaborador atualizado', {
+          description: 'Mexeu em algo sem querer?',
+          duration: 10000,
+          action: {
+            label: 'Desfazer',
+            onClick: async () => {
+              try {
+                await rh.funcionarios.update(data.id, restaura);
+                loadFuncs(); loadDash();
+                sonnerToast.success('Alteração desfeita');
+              } catch (e) { sonnerToast.error(e.message || 'Erro ao desfazer'); }
+            },
+          },
+        });
+      } else {
+        showSuccess('Colaborador criado!');
+      }
+    } catch (e) { showToast(e.message); }
+  }
+
+
+  async function saveAdmissao(form) {
+    setSavingAdm(true);
+    try {
+      const payload = formParaFuncionario(form);
+
+
+
+
+
+      if (!podeEditarRemun) { delete payload.cpf; delete payload.salario; }
+      if (form.id) await rh.funcionarios.update(form.id, payload);
+      else await rh.funcionarios.create({ ...payload, status: 'em_admissao' });
+      setModalAdmissao(null);
+      loadFuncs(); loadDash(); loadAcessos();
+      showSuccess(form.id ? 'Admissão atualizada!' : 'Admissão criada · colaborador em admissão');
+    } catch (e) { showToast(e.message); }
+    finally { setSavingAdm(false); }
+  }
+
+  function concluirAdmissao(id) {
+    askConfirm('Concluir a admissão? O colaborador passa a Ativo.', async () => {
+      try {
+        await rh.funcionarios.concluirAdmissao(id);
+        setModalDetail(null);
+        loadFuncs(); loadDash(); loadAcessos();
+        showSuccess('Admissão concluída · colaborador ativo');
+      } catch (e) { showToast(e.message); }
+    });
+  }
+
+  function abrirContratoAdmissao(func) {
+    const adm = funcionarioParaForm(func);
+    if (!adm.contrato_editado) adm.contrato_editado = gerarContratoAdmissao(adm);
+    setModalContrato(adm);
+  }
+
+  async function salvarContratoAdmissao(adm) {
+    setSavingAdm(true);
+    try {
+
+      const payload = formParaFuncionario({ ...adm, etapa: adm.etapa || 'contrato_gerado' });
+      await rh.funcionarios.update(adm.id, { admissao_dados: payload.admissao_dados });
+      setModalContrato(null);
+      if (modalDetail?.id === adm.id) { try { setModalDetail(await rh.funcionarios.get(adm.id)); } catch {            } }
+      loadFuncs();
+      showSuccess('Contrato salvo');
+    } catch (e) { showToast(e.message); }
+    finally { setSavingAdm(false); }
+  }
+
+
+  function abrirDesligamento(id) {
+    setDesligarFunc(funcs.find(x => x.id === id) || { id });
+  }
+
+  async function confirmarDesligamento({ data_demissao, motivo }) {
+    if (!desligarFunc) return;
+    try {
+      await rh.funcionarios.desligar(desligarFunc.id, { data_demissao, motivo });
+      setDesligarFunc(null); setModalDetail(null);
+      loadFuncs(); loadDash(); loadAcessos();
+      showSuccess('Colaborador desligado · histórico preservado');
+    } catch (e) { showToast(e.message); }
+  }
+
+  function reativarFuncionario(id) {
+    askConfirm('Reativar este colaborador (voltar para ativo)?', async () => {
+      try { await rh.funcionarios.reativar(id); loadFuncs(); loadDash(); loadAcessos(); setModalDetail(null); showSuccess('Colaborador reativado'); }
+      catch (e) { showToast(e.message); }
+    });
+  }
+
+  async function openDetail(id) {
+    try { setModalDetail(await rh.funcionarios.get(id)); } catch (e) { showToast(e.message); }
+  }
+
+  async function saveTreinamento(data) {
+    try {
+      if (data.id) await rh.treinamentos.update(data.id, data);
+      else await rh.treinamentos.create(data);
+      setModalTreino(null); loadTreinos();
+      showSuccess('Treinamento salvo!');
+    } catch (e) { showToast(e.message); }
+  }
+
+  function deleteTreinamento(id) {
+    askConfirm('Remover treinamento?', async () => {
+      try { await rh.treinamentos.remove(id); loadTreinos(); } catch (e) { showToast(e.message); }
+    });
+  }
+
+  async function saveFerias(data) {
+    try {
+      await rh.ferias.create(data.funcionario_id, data);
+      setModalFerias(null); loadDash();
+      showSuccess('Solicitação registrada!');
+    } catch (e) { showToast(e.message); }
+  }
+
+  async function aprovarFerias(id, status) {
+    try { await rh.ferias.update(id, { status }); loadDash(); } catch (e) { showToast(e.message); }
+  }
+
+  async function saveDocumento(funcId, data) {
+    try {
+      await rh.documentos.create(funcId, data);
+      setModalDoc(null);
+      openDetail(funcId);
+      showSuccess('Documento salvo!');
+    } catch (e) { showToast(e.message); }
+  }
+
+  function deleteDocumento(docId, funcId) {
+    askConfirm('Remover documento?', async () => {
+      try { await rh.documentos.remove(docId); openDetail(funcId); } catch (e) { showToast(e.message); }
+    });
+  }
+
+
+  return (
+    <div className="w-full" style={{ maxWidth: 1600, margin: '0 auto', padding: '0 24px' }}>
+      {            }
+      <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between pb-2">
+        <div className="flex items-center gap-3">
+          <div className="flex items-center justify-center size-9 rounded-lg bg-primary/10">
+            <Users className="size-4 text-primary" />
+          </div>
+          <div>
+            <h1 className="text-xl font-semibold tracking-tight text-foreground" style={{ lineHeight: 1.3 }}>
+              Recursos Humanos
+            </h1>
+            <p className="text-xs text-muted-foreground" style={{ marginTop: 2 }}>Colaboradores · Treinamentos · Férias</p>
+          </div>
+        </div>
+      </div>
+
+      {error && <div className="text-destructive text-sm mb-3 px-3 py-2 rounded-lg bg-destructive/10 border border-destructive/20">{error}</div>}
+
+      {          }
+      <Tabs value={tab} onValueChange={setTab}>
+        <ScrollArea className="w-full">
+          <TabsList className="inline-flex flex-wrap h-auto w-auto bg-transparent p-0 gap-1 border-b border-border rounded-none">
+            {TABS.filter(t => (podeRemun || !['folha', 'processos-seletivos'].includes(t.key)) && (pode360 || t.key !== 'aval360')).map((t) => {
+              const Icon = t.icon;
+              return (
+                <TabsTrigger
+                  key={t.key}
+                  value={t.key}
+                  className="relative rounded-none border-b-2 border-transparent px-4 py-3 text-[13px] font-medium text-muted-foreground transition-colors hover:text-foreground data-[state=active]:border-b-primary data-[state=active]:text-primary data-[state=active]:bg-transparent data-[state=active]:shadow-none bg-transparent"
+                >
+                  <Icon className="size-3.5 mr-1.5 hidden sm:inline-block" />
+                  {t.label}
+                </TabsTrigger>
+              );
+            })}
+          </TabsList>
+          <ScrollBar orientation="horizontal" className="invisible" />
+        </ScrollArea>
+
+        <TabsContent value="dashboard">
+          <DashboardTab dash={dash} onNavigate={setTab} setFiltroStatus={setFiltroStatus} podeRemun={podeRemun} />
+        </TabsContent>
+        <TabsContent value="colaboradores">
+          <FuncionariosTab
+            funcs={funcs} acessos={acessos} loading={loading} busca={busca} setBusca={setBusca}
+            filtroStatus={filtroStatus} setFiltroStatus={setFiltroStatus}
+            filtroArea={filtroArea} setFiltroArea={setFiltroArea}
+            onEdit={(f) => setModalFunc(f)} onDetail={openDetail} onDelete={abrirDesligamento} onReativar={reativarFuncionario} onImport={() => { loadFuncs(); loadDash(); loadAcessos(); }}
+            onNovaAdmissao={() => setModalAdmissao({})}
+            onVerOrganograma={() => setTab('organograma')}
+            podeDispararOnboarding={podeDispararOnboarding}
+            podeRemun={podeRemun}
+            showToast={showToast}
+          />
+        </TabsContent>
+        <TabsContent value="processos-seletivos">{podeRemun && <TabProcessosSeletivos />}</TabsContent>
+        <TabsContent value="pcs">
+          <TabPCS funcionarios={funcs} podeRemun={podeRemun}
+            initialSub={new URLSearchParams(window.location.search).get('tab') === 'avaliacoes' ? 'ciclo' : undefined} />
+        </TabsContent>
+        {                                                                                       }
+        <TabsContent value="organograma"><OrgChartTab funcs={funcs} onDetail={openDetail} onVoltar={() => setTab('colaboradores')} onChanged={() => { loadFuncs(); loadDash(); loadAcessos(); }} /></TabsContent>
+        <TabsContent value="folha">{podeRemun && <TabFolha />}</TabsContent>
+        {pode360 && <TabsContent value="aval360"><TabAvaliacao360 /></TabsContent>}
+        <TabsContent value="treinamentos">
+          <TreinamentosTab treinos={treinos} funcs={funcs}
+            onNew={() => setModalTreino({})} onEdit={(t) => setModalTreino(t)} onDelete={deleteTreinamento}
+            onInscrever={async (treinoId, funcId) => { await rh.treinamentos.inscrever(treinoId, { funcionario_id: funcId }); loadTreinos(); }}
+            showToast={showToast}
+          />
+        </TabsContent>
+        <TabsContent value="ferias">
+          <TabFeriasCalendar funcs={funcs} onAprovar={aprovarFerias} />
+        </TabsContent>
+        <TabsContent value="painel">
+          <TabPainelRH />
+        </TabsContent>
+        <TabsContent value="extras">
+          <div style={{ minHeight: 200, padding: '4px 0' }}>
+            <TabExtras funcionarios={funcs} onRefresh={() => { loadDash(); loadFuncs(); }} />
+          </div>
+        </TabsContent>
+      </Tabs>
+
+      {            }
+      <FuncionarioFormModal open={!!modalFunc} data={modalFunc} onClose={() => setModalFunc(null)} onSave={saveFuncionario} funcionarios={funcs} setores={setores} areas={areas} podeRemun={podeEditarRemun} />{                                                                                                                                   }
+      <TreinamentoFormModal open={!!modalTreino} data={modalTreino} onClose={() => setModalTreino(null)} onSave={saveTreinamento} />
+
+      <FuncionarioDetailPanel
+        open={!!modalDetail} data={modalDetail} onClose={() => setModalDetail(null)}
+        funcs={funcs} podeRemun={podeRemun}
+        onEdit={(f) => { setModalDetail(null); setModalFunc(f); }}
+        onDelete={abrirDesligamento}
+        onReativar={reativarFuncionario}
+        onEditAdmissao={(func) => setModalAdmissao(funcionarioParaForm(func))}
+        onContratoAdmissao={abrirContratoAdmissao}
+        onConcluirAdmissao={concluirAdmissao}
+        onNewDoc={(funcId) => setModalDoc({ funcionario_id: funcId })}
+        onDeleteDoc={deleteDocumento}
+        onSaveInline={async (updated) => {
+          await rh.funcionarios.update(modalDetail.id, updated);
+          showSuccess('Colaborador atualizado!');
+          const refreshed = await rh.funcionarios.get(modalDetail.id);
+          setModalDetail(refreshed);
+          loadFuncs(); loadDash(); loadAcessos();
+        }}
+        onChanged={async () => {
+          try { const r = await rh.funcionarios.get(modalDetail.id); setModalDetail(r); } catch {            }
+          loadFuncs(); loadDash(); loadAcessos();
+        }}
+        onPhotoUpdated={(novoUrl) => {
+          setModalDetail((prev) => prev ? { ...prev, foto_url: novoUrl } : prev);
+          loadFuncs();
+        }}
+      />
+      <DocumentoFormModal open={!!modalDoc} data={modalDoc} onClose={() => setModalDoc(null)} onSave={saveDocumento} />
+
+      <DesligarModal func={desligarFunc} onClose={() => setDesligarFunc(null)} onConfirm={confirmarDesligamento} />
+
+      {                                                        }
+      {modalAdmissao && <AdmissaoFormModal data={modalAdmissao} onClose={() => setModalAdmissao(null)} onSave={saveAdmissao} saving={savingAdm} podeRemun={podeEditarRemun} />}
+      {modalContrato && <ContratoEditorModal data={modalContrato} onClose={() => setModalContrato(null)} onSave={salvarContratoAdmissao} saving={savingAdm} />}
+
+      {                     }
+      <Toast message={toast?.message} type={toast?.type} onClose={() => setToast(null)} />
+      <ConfirmDialog
+        message={confirmAction?.message}
+        onConfirm={() => { confirmAction?.onConfirm(); setConfirmAction(null); }}
+        onCancel={() => setConfirmAction(null)}
+      />
+    </div>
+  );
+}
+
+
+
+
+function DashboardTab({ dash, onNavigate, setFiltroStatus, podeRemun = false }) {
+  const [meses, setMeses] = useState(12);
+  const [series, setSeries] = useState(null);
+  useEffect(() => {
+    let vivo = true;
+    rh.dashboardSeries(meses).then(s => { if (vivo) setSeries(s); }).catch(() => { if (vivo) setSeries({ quadro: [], folha: [] }); });
+    return () => { vivo = false; };
+  }, [meses]);
+
+  if (!dash) return (
+    <div className="space-y-4 py-6">
+      <div className="grid gap-3 grid-cols-2 sm:grid-cols-3 md:grid-cols-4">
+        {[...Array(4)].map((_, i) => (
+          <div key={i} className="h-[88px] rounded-xl bg-muted animate-pulse" />
+        ))}
+      </div>
+      <div className="grid gap-3 md:grid-cols-2">
+        {[...Array(2)].map((_, i) => (
+          <div key={i} className="h-[200px] rounded-xl bg-muted animate-pulse" />
+        ))}
+      </div>
+    </div>
+  );
+
+  const goTo = (tabKey, status) => { if (setFiltroStatus) setFiltroStatus(status || ''); if (onNavigate) onNavigate(tabKey); };
+
+  const fmtMes = (m) => {
+    const [y, mo] = String(m || '').split('-');
+    const nomes = ['jan', 'fev', 'mar', 'abr', 'mai', 'jun', 'jul', 'ago', 'set', 'out', 'nov', 'dez'];
+    return mo ? `${nomes[+mo - 1]}/${String(y).slice(2)}` : m;
+  };
+  const tipoCores = { CLT: '#3b82f6', PJ: '#8b5cf6', 'PJ+': '#a855f7', PREBENDA: '#f59e0b' };
+  const tipoData = Object.entries(dash.porContrato || {}).map(([k, v]) => ({ name: TIPO_CONTRATO[k] || k, value: v, cor: tipoCores[k] || '#94a3b8' }));
+  const tipoTotal = tipoData.reduce((a, b) => a + b.value, 0);
+  const areaData = Object.entries(dash.porArea || {}).sort((a, b) => b[1] - a[1]).map(([k, v]) => ({ name: k, value: v }));
+  const quadro = (series?.quadro || []).map(q => ({ ...q, mesLabel: fmtMes(q.mes) }));
+  const folha = (series?.folha || []).map(f => ({ ...f, mesLabel: fmtMes(f.mes) }));
+  const tipTooltip = { background: 'var(--cbrio-card)', border: '1px solid var(--cbrio-border)', borderRadius: 8, fontSize: 12, color: 'var(--cbrio-text)' };
+
+  const anchors = [
+    { title: 'Total', value: dash.total, icon: Users, iconColor: '#3b82f6', onClick: () => goTo('colaboradores') },
+    { title: 'Ativos', value: dash.ativos, icon: Users, iconColor: '#10b981', onClick: () => goTo('colaboradores', 'ativo') },
+    { title: 'Em admissão', value: dash.admissoesPendentes ?? 0, icon: UserPlus, iconColor: '#8b5cf6', onClick: () => goTo('colaboradores', 'em_admissao') },
+    { title: 'Em Férias / Licença', value: (dash.ferias || 0) + (dash.licenca || 0), icon: CalendarDays, iconColor: '#f59e0b', onClick: () => goTo('ferias'), subtitle: `${dash.ferias || 0} férias · ${dash.licenca || 0} licença` },
+  ];
+
+  return (
+    <div className="space-y-6 pt-4 pb-8">
+      {                                  }
+      <section>
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="text-xs font-semibold uppercase tracking-widest text-muted-foreground">Resumo</h3>
+          <div className="flex gap-1">
+            {[12, 24].map(n => (
+              <button key={n} onClick={() => setMeses(n)}
+                className={`px-2.5 py-1 rounded-full text-xs font-medium transition-colors ${meses === n ? 'bg-primary text-primary-foreground' : 'bg-muted text-muted-foreground hover:text-foreground'}`}>
+                {n} meses
+              </button>
+            ))}
+          </div>
+        </div>
+        <div className="cbrio-stagger grid gap-4 grid-cols-2 lg:grid-cols-4">
+          {anchors.map((stat) => (
+            <StatisticsCard key={stat.title} title={stat.title} value={stat.value} icon={stat.icon} iconColor={stat.iconColor} onClick={stat.onClick} subtitle={stat.subtitle} />
+          ))}
+        </div>
+      </section>
+
+      {                                                            }
+      <Card className="py-0 gap-0 overflow-hidden border-border/50 shadow-sm">
+        <CardHeader className="px-5 pt-5 pb-1">
+          <CardTitle className="text-sm font-semibold text-foreground">Saúde do quadro</CardTitle>
+          <p className="text-xs text-muted-foreground mt-0.5">Entradas/saídas (eixo esq.) e total no quadro (eixo dir., ampliado pra destacar a variação) · {meses} meses</p>
+        </CardHeader>
+        <CardContent className="px-2 pb-4 pt-2">
+          {!series ? <div className="h-[300px] rounded-xl bg-muted animate-pulse" /> : (
+            <ResponsiveContainer width="100%" height={300}>
+              <ComposedChart data={quadro} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="var(--cbrio-border)" vertical={false} />
+                <XAxis dataKey="mesLabel" tick={{ fontSize: 11, fill: 'var(--cbrio-text3)' }} axisLine={false} tickLine={false} />
+                {                                                             }
+                <YAxis yAxisId="fluxo" allowDecimals={false} tick={{ fontSize: 11, fill: 'var(--cbrio-text3)' }} axisLine={false} tickLine={false} width={28} />
+                {                                                                                }
+                <YAxis yAxisId="total" orientation="right" allowDecimals={false} width={34}
+                  domain={[(min) => Math.max(0, Math.floor(min) - 2), (max) => Math.ceil(max) + 2]}
+                  tick={{ fontSize: 11, fill: '#00B39D' }} axisLine={false} tickLine={false} />
+                <Tooltip contentStyle={tipTooltip} />
+                <Legend wrapperStyle={{ fontSize: 12 }} />
+                <Bar yAxisId="fluxo" name="Entradas" dataKey="entradas" fill="#10b981" radius={[3, 3, 0, 0]} maxBarSize={22} />
+                <Bar yAxisId="fluxo" name="Saídas" dataKey="saidas" fill="#ef4444" radius={[3, 3, 0, 0]} maxBarSize={22} />
+                <Line yAxisId="total" name="Total no quadro" type="monotone" dataKey="headcount" stroke="#00B39D" strokeWidth={2.5} dot={{ r: 2 }} />
+              </ComposedChart>
+            </ResponsiveContainer>
+          )}
+        </CardContent>
+      </Card>
+
+      {                                                                        }
+      <div className="grid gap-5 lg:grid-cols-2">
+        {podeRemun && (
+          <Card className="py-0 gap-0 overflow-hidden border-border/50 shadow-sm">
+            <CardHeader className="px-5 pt-5 pb-1">
+              <CardTitle className="text-sm font-semibold text-foreground">Folha por mês</CardTitle>
+              <p className="text-xs text-muted-foreground mt-0.5">Salários e custo total · foto mensal (exata daqui pra frente)</p>
+            </CardHeader>
+            <CardContent className="px-2 pb-3 pt-2">
+              {!series ? <div className="h-[260px] rounded-xl bg-muted animate-pulse" /> : folha.length === 0 ? (
+                <p className="text-sm text-muted-foreground text-center py-16">Sem snapshots ainda.</p>
+              ) : (
+                <ResponsiveContainer width="100%" height={260}>
+                  <AreaChart data={folha} margin={{ top: 8, right: 16, left: 0, bottom: 0 }}>
+                    <defs>
+                      <linearGradient id="gFolha" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="5%" stopColor="#00B39D" stopOpacity={0.3} />
+                        <stop offset="95%" stopColor="#00B39D" stopOpacity={0} />
+                      </linearGradient>
+                    </defs>
+                    <CartesianGrid strokeDasharray="3 3" stroke="var(--cbrio-border)" vertical={false} />
+                    <XAxis dataKey="mesLabel" tick={{ fontSize: 11, fill: 'var(--cbrio-text3)' }} axisLine={false} tickLine={false} />
+                    <YAxis tick={{ fontSize: 11, fill: 'var(--cbrio-text3)' }} axisLine={false} tickLine={false} width={52} tickFormatter={(v) => `R$${(v / 1000).toLocaleString('pt-BR')}k`} />
+                    <Tooltip contentStyle={tipTooltip} formatter={(v) => fmtMoney(v)} />
+                    <Legend wrapperStyle={{ fontSize: 12 }} />
+                    <Area name="Salários" type="monotone" dataKey="total_salarios" stroke="#00B39D" strokeWidth={2} fill="url(#gFolha)" />
+                    <Line name="Custo total" type="monotone" dataKey="total_custo" stroke="#f59e0b" strokeWidth={2} dot={false} />
+                  </AreaChart>
+                </ResponsiveContainer>
+              )}
+              {series && folha.length <= 1 && (
+                <p className="text-[11px] text-muted-foreground px-3 mt-1">A série de folha começa agora (caminho de exatidão) e ganha um ponto a cada mês.</p>
+              )}
+            </CardContent>
+          </Card>
+        )}
+
+        <Card className="py-0 gap-0 overflow-hidden border-border/50 shadow-sm">
+          <CardHeader className="px-5 pt-5 pb-1">
+            <CardTitle className="text-sm font-semibold text-foreground">Por tipo de contrato</CardTitle>
+            <p className="text-xs text-muted-foreground mt-0.5">Composição do vínculo</p>
+          </CardHeader>
+          <CardContent className="px-5 pb-6">
+            {tipoData.length === 0 ? <p className="text-sm text-muted-foreground text-center py-10">Nenhum dado</p> : (
+              <div className="flex items-center gap-4">
+                <ResponsiveContainer width="55%" height={180}>
+                  <PieChart>
+                    <Pie data={tipoData} dataKey="value" nameKey="name" cx="50%" cy="50%" innerRadius={45} outerRadius={75} paddingAngle={2}>
+                      {tipoData.map((d, i) => <Cell key={i} fill={d.cor} />)}
+                    </Pie>
+                    <Tooltip contentStyle={tipTooltip} />
+                  </PieChart>
+                </ResponsiveContainer>
+                <div className="flex-1 space-y-1.5">
+                  {tipoData.map(d => (
+                    <div key={d.name} className="flex items-center gap-2 text-sm">
+                      <span className="size-2.5 rounded-full shrink-0" style={{ background: d.cor }} />
+                      <span className="text-foreground flex-1">{d.name}</span>
+                      <span className="font-bold tabular-nums">{d.value}</span>
+                      <span className="text-xs text-muted-foreground w-9 text-right">{tipoTotal ? Math.round(d.value / tipoTotal * 100) : 0}%</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      </div>
+
+      {                           }
+      <Card className="py-0 gap-0 overflow-hidden border-border/50 shadow-sm">
+        <CardHeader className="px-5 pt-5 pb-1">
+          <CardTitle className="text-sm font-semibold text-foreground">Por área</CardTitle>
+          <p className="text-xs text-muted-foreground mt-0.5">{areaData.length} áreas com colaboradores</p>
+        </CardHeader>
+        <CardContent className="px-3 pb-5 pt-2">
+          {areaData.length === 0 ? <p className="text-sm text-muted-foreground text-center py-8">Nenhum dado</p> : (
+            <ResponsiveContainer width="100%" height={Math.max(160, areaData.length * 30 + 10)}>
+              <BarChart data={areaData} layout="vertical" margin={{ top: 0, right: 24, left: 8, bottom: 0 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="var(--cbrio-border)" horizontal={false} />
+                <XAxis type="number" allowDecimals={false} tick={{ fontSize: 11, fill: 'var(--cbrio-text3)' }} axisLine={false} tickLine={false} />
+                <YAxis type="category" dataKey="name" width={130} tick={{ fontSize: 11, fill: 'var(--cbrio-text2)' }} axisLine={false} tickLine={false} />
+                <Tooltip contentStyle={tipTooltip} cursor={{ fill: 'var(--cbrio-border)', opacity: 0.3 }} />
+                <Bar dataKey="value" fill="#00B39D" radius={[0, 4, 4, 0]} maxBarSize={20} />
+              </BarChart>
+            </ResponsiveContainer>
+          )}
+        </CardContent>
+      </Card>
+
+      {                          }
+      <section>
+        <h3 className="text-xs font-semibold uppercase tracking-widest text-muted-foreground mb-4">Alertas operacionais</h3>
+        <div className="grid gap-5 lg:grid-cols-2">
+          {                     }
+          <Card className="py-0 gap-0 overflow-hidden border-border/50 shadow-sm">
+            <CardHeader className="px-5 pt-5 pb-3">
+              <div className="flex items-center gap-2">
+                <div className="flex items-center justify-center size-7 rounded-lg bg-amber-500/10">
+                  <CalendarDays className="size-3.5 text-amber-500" />
+                </div>
+                <div>
+                  <CardTitle className="text-sm font-semibold text-foreground">Férias Próximas</CardTitle>
+                  <p className="text-xs text-muted-foreground">Próximos 30 dias</p>
+                </div>
+              </div>
+            </CardHeader>
+            <CardContent className="px-5 pb-6">
+              {(dash.feriasProximas || []).length === 0 && (
+                <div className="text-center py-8">
+                  <CalendarDays className="size-8 text-muted-foreground/30 mx-auto mb-2" />
+                  <p className="text-sm text-muted-foreground">Nenhuma férias agendada</p>
+                </div>
+              )}
+              {(dash.feriasProximas || []).map(f => (
+                <div key={f.id} className="flex items-center justify-between py-3 border-b border-border/30 last:border-0">
+                  <div className="flex items-center gap-2.5">
+                    <div className="size-8 rounded-full bg-primary/10 text-primary flex items-center justify-center text-xs font-bold shrink-0">
+                      {(f.rh_funcionarios?.nome || '?')[0].toUpperCase()}
+                    </div>
+                    <span className="text-sm text-foreground font-medium">{f.rh_funcionarios?.nome || '—'}</span>
+                  </div>
+                  <span className="text-xs text-muted-foreground tabular-nums shrink-0 ml-2">{fmtDate(f.data_inicio)} → {fmtDate(f.data_fim)}</span>
+                </div>
+              ))}
+            </CardContent>
+          </Card>
+
+          {                         }
+          <Card className="py-0 gap-0 overflow-hidden border-border/50 shadow-sm">
+            <CardHeader className="px-5 pt-5 pb-3">
+              <div className="flex items-center gap-2">
+                <div className="flex items-center justify-center size-7 rounded-lg bg-destructive/10">
+                  <AlertTriangle className="size-3.5 text-destructive" />
+                </div>
+                <div>
+                  <CardTitle className="text-sm font-semibold text-foreground">Documentos Vencendo</CardTitle>
+                  <p className="text-xs text-muted-foreground">Próximos 60 dias</p>
+                </div>
+              </div>
+            </CardHeader>
+            <CardContent className="px-5 pb-6">
+              {(dash.docsVencendo || []).length === 0 && (
+                <div className="text-center py-8">
+                  <AlertTriangle className="size-8 text-muted-foreground/30 mx-auto mb-2" />
+                  <p className="text-sm text-muted-foreground">Nenhum documento vencendo</p>
+                </div>
+              )}
+              {(dash.docsVencendo || []).map(d => (
+                <div key={d.id} className="flex items-center justify-between py-3 border-b border-border/30 last:border-0">
+                  <div className="min-w-0 flex-1">
+                    <span className="text-sm text-foreground block truncate">{d.rh_funcionarios?.nome}</span>
+                    <span className="text-xs text-muted-foreground">{d.nome}</span>
+                  </div>
+                  <span className="text-xs font-semibold text-destructive tabular-nums shrink-0 ml-3">{fmtDate(d.data_expiracao)}</span>
+                </div>
+              ))}
+            </CardContent>
+          </Card>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+
+
+
+
+
+const ADERENCIA_PCS = {
+  adequado: { label: 'Adequado', c: '#10b981' },
+  abaixo: { label: 'Abaixo da faixa', c: '#f59e0b' },
+  acima: { label: 'Acima do teto', c: '#ef4444' },
+  sem_salario: { label: 'Sem salário', c: '#737373' },
+  sem_enquadramento: { label: 'Sem grau', c: '#737373' },
+};
+
+function enquadramentoPcsTexto(row) {
+  if (!row) return '';
+  const ad = ADERENCIA_PCS[row.aderencia]?.label || '';
+  return row.grau_codigo ? `${row.grau_codigo} · ${ad}` : ad;
+}
+
+function EnquadramentoPcsCell({ idx, row }) {
+  if (idx === null) return <span className="text-xs text-muted-foreground">…</span>;
+  if (idx === 'erro') return <span className="text-xs text-muted-foreground" title="Não foi possível carregar o enquadramento PCS">indisponível</span>;
+  if (!row) return <span className="text-xs text-muted-foreground">—</span>;
+  const ad = ADERENCIA_PCS[row.aderencia] || ADERENCIA_PCS.sem_enquadramento;
+  return (
+    <div className="flex items-center gap-1.5 whitespace-nowrap">
+      {row.grau_codigo && <span className="font-mono text-xs font-semibold">{row.grau_codigo}</span>}
+      <span className="inline-block px-2 py-0.5 rounded-full text-[11px] font-semibold" style={{ color: ad.c, background: `${ad.c}18` }}>{ad.label}</span>
+    </div>
+  );
+}
+
+function FuncionariosTab({ funcs, acessos, loading, busca, setBusca, filtroStatus, setFiltroStatus, filtroArea, setFiltroArea, onDetail, onDelete, onReativar, onImport, onNovaAdmissao, onVerOrganograma, podeDispararOnboarding, podeRemun = false, showToast }) {
+  const areas = [...new Set(funcs.map(f => f.area).filter(Boolean))];
+  const csvRef = useRef(null);
+  const [localError, setLocalError] = useState('');
+  const [filtroAcesso, setFiltroAcesso] = useState('todos');
+  const [modalOnboardingLote, setModalOnboardingLote] = useState(false);
+  const setError = (msg) => { setLocalError(msg); if (showToast) showToast(msg, msg.includes('concluída') ? 'success' : 'warning'); };
+
+
+  const acessoIdx = useMemo(() => buildAcessoIndex(acessos), [acessos]);
+
+  const [pcsIdx, setPcsIdx] = useState(null);
+  useEffect(() => {
+    if (!podeRemun) return undefined;
+    let vivo = true;
+    pcs.aderencia.list()
+      .then(l => { if (vivo) setPcsIdx(Object.fromEntries((l || []).map(r => [r.funcionario_id, r]))); })
+      .catch(() => { if (vivo) setPcsIdx('erro'); });
+    return () => { vivo = false; };
+  }, [podeRemun, funcs]);
+  const colunas = podeRemun ? 9 : 8;
+  const funcsVisiveis = useMemo(() => {
+    if (filtroAcesso === 'todos') return funcs;
+    return funcs.filter(f => {
+      const info = acessoIdx.map[f.id];
+      if (!info) return false;
+      if (filtroAcesso === 'divergente') return info.divergente;
+      return info.situacao === filtroAcesso;
+    });
+  }, [funcs, filtroAcesso, acessoIdx]);
+  const { pageItems: funcsPag, paginacaoProps: rhPagProps } = usePaginacaoLocal(funcsVisiveis, 25);
+  const acessoContagem = { todos: funcsVisiveis.length, com_acesso: acessoIdx.comAcesso, sem_acesso: acessoIdx.semAcesso, divergente: acessoIdx.divergente };
+  const acessoLabel = (info) => !info ? '—' : info.situacao === 'sem_acesso' ? 'Sem acesso' : (info.cargo_perm_nome || '—');
+
+  async function handleCSVImport(e) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const text = await file.text();
+    const lines = text.split('\n').map(l => l.split(',').map(c => c.replace(/^"|"$/g, '').trim()));
+    if (lines.length < 2) { setError('CSV vazio ou inválido'); return; }
+    const header = lines[0].map(h => h.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, ''));
+    const map = (name) => header.indexOf(name);
+    const iNome = map('nome'); const iCargo = map('cargo'); const iArea = map('area');
+    const iEmail = map('email'); const iTel = map('telefone'); const iCpf = map('cpf');
+    const iTipo = map('tipo_contrato'); const iAdm = map('data_admissao'); const iSal = map('salario');
+    if (iNome < 0) { setError('CSV precisa ter coluna "Nome"'); return; }
+    let ok = 0, errs = 0;
+    for (let i = 1; i < lines.length; i++) {
+      const r = lines[i];
+      if (!r[iNome]) continue;
+      try {
+        await rh.funcionarios.create({
+          nome: r[iNome], cargo: r[iCargo] || 'A definir', area: r[iArea] || '',
+          email: iEmail >= 0 ? r[iEmail] : '', telefone: iTel >= 0 ? r[iTel] : '',
+          cpf: iCpf >= 0 ? r[iCpf] : '', tipo_contrato: iTipo >= 0 ? r[iTipo] || 'clt' : 'clt',
+          data_admissao: iAdm >= 0 && r[iAdm] ? r[iAdm] : new Date().toISOString().slice(0, 10),
+          salario: iSal >= 0 ? r[iSal] || null : null, status: 'ativo',
+        });
+        ok++;
+      } catch { errs++; }
+    }
+    setError(`Importação concluída: ${ok} importados, ${errs} erros`);
+    if (csvRef.current) csvRef.current.value = '';
+    onImport?.();
+  }
+
+  return (
+    <Card className="py-0 gap-0" style={{ background: 'var(--cbrio-card)', borderColor: 'var(--hairline)' }}>
+      <CardHeader className="px-5 pt-5 pb-4">
+        <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+          <div>
+            <CardTitle style={{ color: 'var(--cbrio-text)' }}>Diretório de Colaboradores</CardTitle>
+            <CardDescription style={{ color: 'var(--cbrio-text3)' }}>{funcsVisiveis.length} colaboradores encontrados</CardDescription>
+          </div>
+          <div className="flex flex-col gap-2 sm:flex-row">
+            <div className="relative">
+              <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-muted-foreground" />
+              <input
+                className="flex h-9 w-full rounded-md border border-input bg-transparent pl-9 pr-3 py-2 text-sm shadow-xs placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring sm:w-[250px]"
+                placeholder="Buscar por nome..."
+                value={busca} onChange={e => setBusca(e.target.value)}
+              />
+            </div>
+            <ShadSelect value={filtroStatus || '__all__'} onValueChange={v => setFiltroStatus(v === '__all__' ? '' : v)}>
+              <SelectTrigger className="w-[180px]">
+                <SelectValue placeholder="Todos os status" />
+              </SelectTrigger>
+              <SelectContent className="z-[1100]">
+                <SelectItem value="__all__">Todos os status</SelectItem>
+                {Object.entries(STATUS_COLORS).map(([k, v]) => <SelectItem key={k} value={k}>{v.label}</SelectItem>)}
+              </SelectContent>
+            </ShadSelect>
+            <ShadSelect value={filtroArea || '__all__'} onValueChange={v => setFiltroArea(v === '__all__' ? '' : v)}>
+              <SelectTrigger className="w-[180px]">
+                <SelectValue placeholder="Todas as áreas" />
+              </SelectTrigger>
+              <SelectContent className="z-[1100]">
+                <SelectItem value="__all__">Todas as áreas</SelectItem>
+                {areas.map(a => <SelectItem key={a} value={a}>{a}</SelectItem>)}
+              </SelectContent>
+            </ShadSelect>
+          </div>
+        </div>
+        <div className="flex flex-col gap-2 mt-2 sm:flex-row sm:items-center sm:justify-between">
+          {                                                                   }
+          <div className="flex gap-2 flex-wrap items-center">
+            <span className="inline-flex items-center gap-1 text-xs font-semibold text-muted-foreground"><ShieldCheck className="h-3.5 w-3.5" /> Acesso:</span>
+            {ACESSO_FILTROS.map(([k, l]) => (
+              <button key={k} type="button" onClick={() => setFiltroAcesso(k)} disabled={!acessoIdx.carregado}
+                className={`px-2.5 py-1 rounded-full text-xs font-medium transition-colors disabled:opacity-50 ${filtroAcesso === k ? 'bg-primary text-primary-foreground' : 'bg-muted text-muted-foreground hover:text-foreground'}`}>
+                {l}{k !== 'todos' && acessoIdx.carregado ? ` (${acessoContagem[k]})` : ''}
+              </button>
+            ))}
+          </div>
+          <div className="flex gap-2 justify-end">
+            {onNovaAdmissao && (
+              <Button size="sm" onClick={onNovaAdmissao}>
+                <UserPlus className="h-3.5 w-3.5" /> Nova admissão
+              </Button>
+            )}
+            {onVerOrganograma && (
+              <Button variant="outline" size="sm" onClick={onVerOrganograma}>
+                <Network className="h-3.5 w-3.5" /> Organograma
+              </Button>
+            )}
+            {podeDispararOnboarding && (
+              <Button variant="outline" size="sm" onClick={() => setModalOnboardingLote(true)}>
+                <Mail className="h-3.5 w-3.5" /> Pedir dados faltando
+              </Button>
+            )}
+            <input ref={csvRef} type="file" accept=".csv" style={{ display: 'none' }} onChange={handleCSVImport} />
+            <Button variant="outline" size="sm" onClick={() => csvRef.current?.click()}>Importar CSV</Button>
+            <Button variant="outline" size="sm" onClick={() => {
+              const comPcs = podeRemun && pcsIdx && pcsIdx !== 'erro';
+              const headers = ['Nome', 'Cargo', 'Área', 'Contrato', ...(comPcs ? ['Enquadramento PCS'] : []), 'Admissão', 'Status', 'Acesso', 'Email'];
+              const rows = funcsVisiveis.map(f => [f.nome, f.cargo, f.area || '', f.tipo_contrato, ...(comPcs ? [enquadramentoPcsTexto(pcsIdx[f.id])] : []), f.data_admissao || '', f.status, acessoLabel(acessoIdx.map[f.id]), f.email || '']);
+              exportPDF('Colaboradores', headers, rows, { subtitle: `${funcsVisiveis.length} colaboradores` });
+            }}>
+              <Download className="h-3.5 w-3.5" /> Exportar
+            </Button>
+          </div>
+        </div>
+      </CardHeader>
+      <CardContent className="px-5 pb-5">
+        <div className="overflow-x-auto rounded-md" style={{ border: `1px solid var(--cbrio-border)` }}>
+          <table style={styles.table}>
+            <thead>
+              <tr>
+                <th style={styles.th}>Nome</th>
+                <th style={styles.th}>Cargo</th>
+                <th style={styles.th}>Acesso</th>
+                <th style={styles.th}>Área</th>
+                <th style={styles.th}>Contrato</th>
+                {podeRemun && <th style={styles.th}>Enquadramento PCS</th>}
+                <th style={styles.th}>Admissão</th>
+                <th style={styles.th}>Status</th>
+                <th style={styles.th}></th>
+              </tr>
+            </thead>
+            <tbody>
+              {loading && <tr><td colSpan={colunas}><div className="flex items-center justify-center py-6 gap-2"><div className="h-4 w-4 animate-spin rounded-full border-2 border-muted-foreground/25 border-t-primary" /><span className="text-xs text-muted-foreground">Carregando...</span></div></td></tr>}
+              {!loading && funcsVisiveis.length === 0 && <tr><td colSpan={colunas}><div className="flex flex-col items-center py-10 gap-2"><div className="h-10 w-10 rounded-full bg-muted flex items-center justify-center mb-1"><Users className="h-5 w-5 text-muted-foreground" /></div><span className="text-sm font-medium text-foreground">Nenhum colaborador encontrado</span><span className="text-xs text-muted-foreground">Tente ajustar os filtros</span></div></td></tr>}
+              {funcsPag.map(f => (
+                <tr key={f.id} className="cbrio-row hover:bg-muted/50 transition-colors"
+                  onClick={() => onDetail(f.id)}>
+                  <td style={{ ...styles.td, fontWeight: 600 }}>
+                    <div className="flex items-center gap-3">
+                      {f.foto_url ? (
+                        <img data-foto-avatar="" src={f.foto_url} alt="" className="w-8 h-8 rounded-full object-cover shrink-0" />
+                      ) : (
+                        <div className="w-8 h-8 rounded-full bg-primary/10 text-primary flex items-center justify-center text-sm font-bold shrink-0">
+                          {(f.nome || '?')[0].toUpperCase()}
+                        </div>
+                      )}
+                      <div>
+                        <p className="font-medium text-sm">{f.nome}</p>
+                        {f.email && <p className="text-xs text-muted-foreground truncate max-w-[200px]">{f.email}</p>}
+                      </div>
+                    </div>
+                  </td>
+                  <td style={styles.td}><span className="text-sm">{f.cargo}</span></td>
+                  <td style={styles.td}><AcessoCell info={acessoIdx.map[f.id]} carregado={acessoIdx.carregado} /></td>
+                  <td style={styles.td}><span className="text-sm text-muted-foreground">{f.area || '—'}</span></td>
+                  <td style={styles.td}><span className="text-sm">{TIPO_CONTRATO[f.tipo_contrato] || f.tipo_contrato}</span></td>
+                  {podeRemun && <td style={styles.td}><EnquadramentoPcsCell idx={pcsIdx} row={pcsIdx && pcsIdx !== 'erro' ? pcsIdx[f.id] : null} /></td>}
+                  <td style={styles.td}><span className="text-sm text-muted-foreground">{fmtDate(f.data_admissao)}</span></td>
+                  <td style={styles.td}>
+                    <Badge status={f.status} map={STATUS_COLORS} />
+                    {f.status === 'inativo' && f.data_demissao && (
+                      <div className="text-[11px] text-muted-foreground mt-1">desde {fmtDate(f.data_demissao)}</div>
+                    )}
+                  </td>
+                  <td style={styles.td}>
+                    {f.status === 'inativo' ? (
+                      <Button variant="ghost" size="icon" className="h-8 w-8 text-primary" title="Reativar colaborador" onClick={e => { e.stopPropagation(); onReativar(f.id); }}>
+                        <RotateCcw className="h-4 w-4" />
+                      </Button>
+                    ) : (
+                      <Button variant="ghost" size="icon" className="h-8 w-8 text-amber-600" title="Desligar colaborador" onClick={e => { e.stopPropagation(); onDelete(f.id); }}>
+                        <UserMinus className="h-4 w-4" />
+                      </Button>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <Paginacao {...rhPagProps} itemLabel="colaboradores" />
+      </CardContent>
+      {modalOnboardingLote && (
+        <OnboardingLoteDialog onClose={() => setModalOnboardingLote(false)} showToast={showToast} />
+      )}
+    </Card>
+  );
+}
+
+
+
+
+function OnboardingLoteDialog({ onClose, showToast }) {
+  const [loading, setLoading] = useState(true);
+  const [erro, setErro] = useState('');
+  const [preview, setPreview] = useState(null);
+  const [confirmTexto, setConfirmTexto] = useState('');
+  const [disparando, setDisparando] = useState(false);
+  const [resultado, setResultado] = useState(null);
+
+  useEffect(() => {
+    let ativo = true;
+    (async () => {
+      try {
+        const r = await rh.onboarding.preview();
+        if (ativo) setPreview(r);
+      } catch (e) {
+        if (ativo) setErro(e.message || 'Erro ao montar a prévia');
+      } finally {
+        if (ativo) setLoading(false);
+      }
+    })();
+    return () => { ativo = false; };
+  }, []);
+
+  async function disparar() {
+    setDisparando(true);
+    setErro('');
+    try {
+      const r = await rh.onboarding.disparar();
+      setResultado(r);
+      showToast?.(`Enfileirados ${r.enfileirados} de ${r.total_pendentes} colaboradores pendentes.`, 'success');
+    } catch (e) {
+      setErro(e.message || 'Erro ao disparar o formulário em lote');
+    } finally {
+      setDisparando(false);
+    }
+  }
+
+  const numeroConfirmacao = String(preview?.enviaveis ?? 0);
+  const podeDisparar = !loading && preview && !preview.erro && preview.enviaveis > 0
+    && preview.canal_configurado && preview.template_configurado
+    && confirmTexto.trim() === numeroConfirmacao;
+
+  return (
+    <Dialog open onOpenChange={(v) => { if (!v) onClose(); }}>
+      <DialogContent className="sm:max-w-[520px] flex flex-col max-h-[85vh]">
+        <DialogHeader>
+          <DialogTitle>Pedir dados faltando — todos os colaboradores</DialogTitle>
+          <DialogDescription>
+            Envia o link do formulário de onboarding, pelo WhatsApp, para todos os
+            colaboradores cujo cadastro está incompleto (telefone, CPF, data de
+            nascimento ou endereço).
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="flex-1 overflow-y-auto min-h-0 space-y-4 py-2">
+          {loading && <div className="text-sm text-muted-foreground">Carregando prévia…</div>}
+          {erro && (
+            <div className="text-sm rounded-md p-3" style={{ background: 'var(--cbrio-card)', border: '1px solid #f59e0b', color: '#b45309' }}>
+              {erro}
+            </div>
+          )}
+
+          {!loading && preview && !preview.erro && !resultado && (
+            <>
+              {!preview.canal_configurado && (
+                <div className="text-sm rounded-md p-3" style={{ border: '1px solid #f59e0b', color: '#b45309' }}>
+                  O envio de WhatsApp não está configurado no servidor — nada será enviado.
+                </div>
+              )}
+              {preview.canal_configurado && !preview.template_configurado && (
+                <div className="text-sm rounded-md p-3" style={{ border: '1px solid #f59e0b', color: '#b45309' }}>
+                  O template de onboarding ainda não foi aprovado na Meta (variável
+                  WHATSAPP_TEMPLATE_RH_ONBOARDING vazia) — nada será enviado até isso
+                  ser configurado.
+                </div>
+              )}
+              <div className="grid grid-cols-2 gap-3 text-sm">
+                <div><span className="text-muted-foreground">Colaboradores no total:</span> {preview.total_colaboradores}</div>
+                <div><span className="text-muted-foreground">Com dados faltando:</span> {preview.total_pendentes}</div>
+                <div><span className="text-muted-foreground">Vão receber o WhatsApp:</span> {preview.enviaveis}</div>
+                <div><span className="text-muted-foreground">Sem telefone cadastrado:</span> {preview.sem_telefone}</div>
+              </div>
+              {preview.exemplo?.length > 0 && (
+                <div>
+                  <div className="text-xs font-medium text-muted-foreground mb-1">Exemplo de quem vai receber:</div>
+                  <ul className="text-sm space-y-1">
+                    {preview.exemplo.map((f) => (
+                      <li key={f.id}>{f.nome} <span className="text-xs text-muted-foreground">— falta: {f.faltando.join(', ')}</span></li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+              {preview.enviaveis > 0 && preview.canal_configurado && preview.template_configurado && (
+                <div>
+                  <label className="text-sm font-medium">
+                    Pra confirmar, digite o número de colaboradores que vão receber ({numeroConfirmacao}):
+                  </label>
+                  <input
+                    className="mt-1 flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-xs"
+                    value={confirmTexto} onChange={(e) => setConfirmTexto(e.target.value)}
+                    placeholder={numeroConfirmacao}
+                  />
+                </div>
+              )}
+              {preview.enviaveis === 0 && (
+                <div className="text-sm text-muted-foreground">Nenhum colaborador com dados faltando e telefone cadastrado no momento.</div>
+              )}
+            </>
+          )}
+
+          {resultado && (
+            <div className="text-sm space-y-1">
+              <div>Enfileirados: <strong>{resultado.enfileirados}</strong> de {resultado.total_pendentes} pendentes.</div>
+              {resultado.erros?.sem_telefone > 0 && <div className="text-muted-foreground">Sem telefone: {resultado.erros.sem_telefone}</div>}
+              {resultado.erros?.sem_template > 0 && <div className="text-muted-foreground">Sem template configurado: {resultado.erros.sem_template}</div>}
+              {resultado.erros?.link > 0 && <div className="text-muted-foreground">Falha ao gerar link: {resultado.erros.link}</div>}
+            </div>
+          )}
+        </div>
+
+        <DialogFooter>
+          {!resultado ? (
+            <>
+              <Button variant="outline" onClick={onClose}>Cancelar</Button>
+              <Button onClick={disparar} disabled={!podeDisparar || disparando}>
+                {disparando ? 'Enviando…' : 'Enviar para todos'}
+              </Button>
+            </>
+          ) : (
+            <Button onClick={onClose}>Fechar</Button>
+          )}
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+
+
+
+function TreinamentosTab({ treinos, funcs, onNew, onEdit, onDelete, onInscrever, showToast }) {
+  const [inscrevendo, setInscrevendo] = useState(null);
+  const [funcSel, setFuncSel] = useState('');
+
+  function gerarCertificado(treino, func) {
+    if (!func) return;
+    const w = window.open('', '_blank');
+    w.document.write(`<html><head><title>Certificado — ${func.nome}</title>
+    <style>
+      body { font-family: 'Georgia', serif; max-width: 800px; margin: 60px auto; text-align: center; color: #1a1a1a; }
+      .border { border: 3px double #00B39D; padding: 60px 50px; border-radius: 12px; }
+      h1 { font-size: 32px; color: #00B39D; margin-bottom: 8px; letter-spacing: 4px; }
+      h2 { font-size: 20px; font-weight: 400; color: #666; margin-bottom: 40px; }
+      .nome { font-size: 28px; font-weight: 700; color: #1a1a1a; border-bottom: 2px solid #00B39D; display: inline-block; padding-bottom: 8px; margin: 20px 0; }
+      .desc { font-size: 16px; color: #444; line-height: 1.8; margin: 24px 0; }
+      .treino { font-size: 18px; font-weight: 700; color: #00B39D; }
+      .footer { display: flex; justify-content: space-around; margin-top: 60px; }
+      .sig { text-align: center; width: 200px; }
+      .sig-line { border-top: 1px solid #333; padding-top: 8px; font-size: 13px; }
+      @media print { body { margin: 20px; } }
+    </style></head><body>
+    <div class="border">
+      <h1>CERTIFICADO</h1>
+      <h2>Igreja Comunidade Batista do Rio de Janeiro — CBRio</h2>
+      <p style="font-size:14px;color:#888;">Certificamos que</p>
+      <div class="nome">${func.nome}</div>
+      <p class="desc">concluiu com êxito o treinamento</p>
+      <div class="treino">${treino.titulo}</div>
+      ${treino.descricao ? `<p style="font-size:14px;color:#666;margin-top:8px;">${treino.descricao}</p>` : ''}
+      <p style="font-size:14px;color:#888;margin-top:16px;">
+        Período: ${treino.data_inicio ? new Date(treino.data_inicio + 'T12:00:00').toLocaleDateString('pt-BR') : '—'}
+        ${treino.data_fim ? ' a ' + new Date(treino.data_fim + 'T12:00:00').toLocaleDateString('pt-BR') : ''}
+        ${treino.instrutor ? '<br/>Instrutor(a): ' + treino.instrutor : ''}
+      </p>
+      <p style="font-size:14px;color:#888;margin-top:24px;">Rio de Janeiro, ${new Date().toLocaleDateString('pt-BR')}</p>
+      <div class="footer">
+        <div class="sig"><div class="sig-line">Coordenação de RH</div></div>
+        <div class="sig"><div class="sig-line">${treino.instrutor || 'Instrutor(a)'}</div></div>
+      </div>
+    </div>
+    </body></html>`);
+    w.document.close();
+    w.print();
+  }
+
+  return (
+    <>
+      <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 16 }}>
+        <Button onClick={onNew}>+ Novo Treinamento</Button>
+      </div>
+
+      {treinos.length === 0 && <div style={styles.empty}>Nenhum treinamento cadastrado</div>}
+
+      <div style={{ display: 'grid', gap: 16 }}>
+        {treinos.map(t => {
+          return (
+            <div key={t.id} style={styles.card}>
+              <div style={styles.cardHeader}>
+                <div>
+                  <div style={styles.cardTitle}>{t.titulo}</div>
+                  <div style={{ fontSize: 12, color: C.text2, marginTop: 2 }}>
+                    {fmtDate(t.data_inicio)}{t.data_fim ? ` → ${fmtDate(t.data_fim)}` : ''}
+                    {t.instrutor && ` • ${t.instrutor}`}
+                    {t.obrigatorio && <span style={{ ...styles.badge(C.red, C.redBg), marginLeft: 8 }}>Obrigatório</span>}
+                  </div>
+                </div>
+                <div style={{ display: 'flex', gap: 6 }}>
+                  <Button variant="outline" size="sm" onClick={() => onEdit(t)}><Pencil style={{ width: 14, height: 14 }} /></Button>
+                  <Button variant="ghost" size="sm" onClick={() => onDelete(t.id)}><Trash2 style={{ width: 14, height: 14 }} /></Button>
+                </div>
+              </div>
+              {t.descricao && <div style={{ padding: '8px 20px', fontSize: 13, color: C.text2 }}>{t.descricao}</div>}
+
+              {               }
+              <div style={{ padding: '8px 20px 12px' }}>
+                {                        }
+                {(() => {
+                  const inscritos = t.rh_treinamentos_funcionarios || [];
+                  const total = inscritos.length;
+                  const concluidos = inscritos.filter(tf => tf.status === 'concluido').length;
+                  const pct = total > 0 ? Math.round(concluidos / total * 100) : 0;
+                  return total > 0 ? (
+                    <div style={{ marginBottom: 10 }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, color: C.text2, marginBottom: 4 }}>
+                        <span>Progresso: {concluidos}/{total} concluídos</span>
+                        <span style={{ fontWeight: 700, color: pct === 100 ? C.green : C.primary }}>{pct}%</span>
+                      </div>
+                      <div style={{ height: 6, background: C.border, borderRadius: 3, overflow: 'hidden' }}>
+                        <div style={{ height: '100%', width: `${pct}%`, background: pct === 100 ? C.green : C.primary, borderRadius: 3, transition: 'width 0.3s' }} />
+                      </div>
+                    </div>
+                  ) : null;
+                })()}
+                <div style={{ fontSize: 11, fontWeight: 700, color: C.text2, marginBottom: 6, textTransform: 'uppercase' }}>
+                  Inscritos ({(t.rh_treinamentos_funcionarios || []).length})
+                </div>
+                {(t.rh_treinamentos_funcionarios || []).map(tf => (
+                  <div key={tf.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '4px 0', borderBottom: `1px solid ${C.border}` }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                      {tf.rh_funcionarios?.foto_url ? (
+                        <img data-foto-avatar="" src={tf.rh_funcionarios.foto_url} alt="" style={{ width: 24, height: 24, borderRadius: '50%', objectFit: 'cover' }} />
+                      ) : (
+                        <div style={{ width: 24, height: 24, borderRadius: '50%', background: C.primaryBg, color: C.primary, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 11, fontWeight: 700 }}>
+                          {(tf.rh_funcionarios?.nome || '?')[0].toUpperCase()}
+                        </div>
+                      )}
+                      <span style={{ fontSize: 13 }}>{tf.rh_funcionarios?.nome || '—'}</span>
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                      <Badge status={tf.status} map={{
+                        inscrito: { c: C.blue, bg: C.blueBg, label: 'Inscrito' },
+                        concluido: { c: C.green, bg: C.greenBg, label: 'Concluído' },
+                        cancelado: { c: C.red, bg: C.redBg, label: 'Cancelado' },
+                      }} />
+                      {tf.status === 'concluido' && (
+                        <Button variant="ghost" size="xs" className="text-[10px]" onClick={() => gerarCertificado(t, tf.rh_funcionarios)}>
+                          Certificado
+                        </Button>
+                      )}
+                    </div>
+                  </div>
+                ))}
+                {inscrevendo === t.id ? (
+                  <div style={{ display: 'flex', gap: 8, marginTop: 8, alignItems: 'center' }}>
+                    <div style={{ flex: 1 }}>
+                      <ShadSelect value={funcSel} onValueChange={v => setFuncSel(v)}>
+                        <SelectTrigger className="w-full">
+                          <SelectValue placeholder="Selecionar colaborador" />
+                        </SelectTrigger>
+                        <SelectContent className="z-[1100]">
+                          {funcs.filter(f => f.status === 'ativo').map(f => <SelectItem key={f.id} value={f.id}>{f.nome}</SelectItem>)}
+                        </SelectContent>
+                      </ShadSelect>
+                    </div>
+                    <Button size="sm"
+                      onClick={async () => { if (funcSel) { await onInscrever(t.id, funcSel); setInscrevendo(null); setFuncSel(''); } }}>
+                      OK
+                    </Button>
+                    <Button variant="ghost" size="sm" onClick={() => setInscrevendo(null)}>✕</Button>
+                  </div>
+                ) : (
+                  <Button variant="ghost" className="mt-1.5 text-xs" onClick={() => setInscrevendo(t.id)}>+ Inscrever colaborador</Button>
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </>
+  );
+}
+
+
+
+
+
+
+
+function OrgProfilePanel({ func, funcs, onClose, onDetail }) {
+  if (!func) return null;
+  const gestor = func.gestor_id ? funcs.find(f => f.id === func.gestor_id) : null;
+  const subordinados = funcs.filter(f => f.gestor_id === func.id && f.status === 'ativo');
+  return (
+    <div className="fixed inset-0 z-[1000] flex justify-end" onClick={onClose}>
+      <div className="flex-1 bg-black/40" />
+      <div
+        className="w-[380px] max-w-full bg-card border-l border-border shadow-2xl overflow-y-auto flex flex-col"
+        style={{ animation: 'slideInRight 0.25s ease-out' }}
+        onClick={e => e.stopPropagation()}
+      >
+        {            }
+        <div className="px-6 pt-6 pb-4 border-b border-border flex items-start justify-between">
+          <div className="flex items-center gap-4">
+            {func.foto_url ? (
+              <img data-foto-avatar="" src={func.foto_url} alt="" className="w-16 h-16 rounded-full object-cover border-[3px] border-primary" />
+            ) : (
+              <div className="w-16 h-16 rounded-full bg-primary/10 text-primary flex items-center justify-center text-2xl font-bold border-[3px] border-primary">
+                {func.nome[0]?.toUpperCase()}
+              </div>
+            )}
+            <div>
+              <div className="text-base font-bold text-foreground">{func.nome}</div>
+              <div className="text-sm text-muted-foreground">{func.cargo || '—'}</div>
+              {func.area && <span className="inline-block mt-1 px-2 py-0.5 rounded-full bg-primary/10 text-primary text-[11px] font-semibold">{func.area}</span>}
+            </div>
+          </div>
+          <Button variant="ghost" size="icon" onClick={onClose}><X className="h-4 w-4" /></Button>
+        </div>
+
+        {          }
+        <div className="px-6 py-4 space-y-3 text-sm flex-1">
+          {func.email && (
+            <div className="flex items-center gap-2 text-muted-foreground">
+              <span className="font-medium text-foreground w-20">Email</span>
+              <span className="truncate">{func.email}</span>
+            </div>
+          )}
+          {func.telefone && (
+            <div className="flex items-center gap-2 text-muted-foreground">
+              <span className="font-medium text-foreground w-20">Telefone</span>
+              <span>{mascaraTelefone(func.telefone)}</span>
+            </div>
+          )}
+          {func.tipo_contrato && (
+            <div className="flex items-center gap-2 text-muted-foreground">
+              <span className="font-medium text-foreground w-20">Contrato</span>
+              <span>{TIPO_CONTRATO[func.tipo_contrato]?.label || func.tipo_contrato}</span>
+            </div>
+          )}
+          {func.data_admissao && (
+            <div className="flex items-center gap-2 text-muted-foreground">
+              <span className="font-medium text-foreground w-20">Admissão</span>
+              <span>{fmtDate(func.data_admissao)}</span>
+            </div>
+          )}
+
+          {            }
+          {gestor && (
+            <div className="pt-3 border-t border-border">
+              <div className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2">Gestor Direto</div>
+              <div
+                className="flex items-center gap-3 p-2 rounded-xl bg-muted/50 cursor-pointer hover:bg-muted transition-colors"
+                onClick={() => onDetail(gestor.id)}
+              >
+                {gestor.foto_url ? (
+                  <img data-foto-avatar="" src={gestor.foto_url} alt="" className="w-8 h-8 rounded-full object-cover border border-primary/40" />
+                ) : (
+                  <div className="w-8 h-8 rounded-full bg-primary/10 text-primary flex items-center justify-center text-xs font-bold">
+                    {gestor.nome[0]?.toUpperCase()}
+                  </div>
+                )}
+                <div>
+                  <div className="text-sm font-medium text-foreground">{gestor.nome}</div>
+                  <div className="text-xs text-muted-foreground">{gestor.cargo || '—'}</div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {                  }
+          {subordinados.length > 0 && (
+            <div className="pt-3 border-t border-border">
+              <div className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2">
+                Subordinados Diretos ({subordinados.length})
+              </div>
+              <div className="space-y-1.5 max-h-[200px] overflow-y-auto">
+                {subordinados.map(s => (
+                  <div
+                    key={s.id}
+                    className="flex items-center gap-3 p-2 rounded-xl cursor-pointer hover:bg-muted/50 transition-colors"
+                    onClick={() => onDetail(s.id)}
+                  >
+                    {s.foto_url ? (
+                      <img data-foto-avatar="" src={s.foto_url} alt="" className="w-7 h-7 rounded-full object-cover border border-border" />
+                    ) : (
+                      <div className="w-7 h-7 rounded-full bg-primary/10 text-primary flex items-center justify-center text-[10px] font-bold">
+                        {s.nome[0]?.toUpperCase()}
+                      </div>
+                    )}
+                    <div>
+                      <div className="text-sm font-medium text-foreground">{s.nome}</div>
+                      <div className="text-xs text-muted-foreground">{s.cargo || '—'}</div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+
+        {            }
+        <div className="px-6 py-3 border-t border-border">
+          <Button variant="outline" className="w-full" onClick={() => { onClose(); onDetail(func.id); }}>
+            <Eye className="h-4 w-4 mr-2" /> Ver perfil completo
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function OrgChartTab({ funcs, onDetail, onChanged, onVoltar }) {
+  const ativos = funcs.filter(f => f.status === 'ativo');
+  const containerRef = useRef(null);
+  const contentRef = useRef(null);
+  const [zoom, setZoom] = useState(0.85);
+  const [pan, setPan] = useState({ x: 0, y: 0 });
+  const [dragging, setDragging] = useState(false);
+  const dragStart = useRef({ x: 0, y: 0, panX: 0, panY: 0 });
+  const [searchTerm, setSearchTerm] = useState('');
+  const [filterArea, setFilterArea] = useState('all');
+  const [previewFunc, setPreviewFunc] = useState(null);
+  const [expandAll, setExpandAll] = useState(true);
+  const [collapsed, setCollapsed] = useState({});
+
+  const [iaTexto, setIaTexto] = useState('');
+  const [iaLoading, setIaLoading] = useState(false);
+  const [iaAplicando, setIaAplicando] = useState(false);
+  const [iaProposta, setIaProposta] = useState(null);
+
+  async function pedirIA() {
+    const instrucao = iaTexto.trim();
+    if (!instrucao || iaLoading) return;
+    setIaLoading(true);
+    try {
+      const r = await rh.organograma.ia(instrucao);
+      if (!r.mudancas?.length) {
+        sonnerToast.message('Nada para mudar', { description: r.observacao || 'Não identifiquei uma mudança clara. Tente ser mais direto (ex.: "Pessoa A reporta à Pessoa B").' });
+        setIaProposta(null);
+      } else {
+        setIaProposta(r);
+      }
+    } catch (e) {
+      sonnerToast.error(e.message || 'Erro ao consultar a IA');
+    } finally {
+      setIaLoading(false);
+    }
+  }
+
+  async function aplicarIA() {
+    if (!iaProposta?.mudancas?.length || iaAplicando) return;
+    setIaAplicando(true);
+    try {
+      const r = await rh.organograma.aplicar(iaProposta.mudancas);
+      sonnerToast.success(`Organograma atualizado · ${r.aplicadas} mudança(s) aplicada(s)`);
+      setIaProposta(null);
+      setIaTexto('');
+      onChanged?.();
+    } catch (e) {
+      sonnerToast.error(e.message || 'Erro ao aplicar');
+    } finally {
+      setIaAplicando(false);
+    }
+  }
+
+
+  const areas = [...new Set(ativos.map(f => f.area).filter(Boolean))].sort();
+
+  function handleWheel(e) {
+    e.preventDefault();
+    const delta = e.deltaY > 0 ? -0.05 : 0.05;
+    setZoom(z => Math.max(0.3, Math.min(2, z + delta)));
+  }
+
+  function handleMouseDown(e) {
+    if (e.target.closest('[data-orgcard]')) return;
+    setDragging(true);
+    dragStart.current = { x: e.clientX, y: e.clientY, panX: pan.x, panY: pan.y };
+  }
+
+  function handleMouseMove(e) {
+    if (!dragging) return;
+    setPan({
+      x: dragStart.current.panX + (e.clientX - dragStart.current.x),
+      y: dragStart.current.panY + (e.clientY - dragStart.current.y),
+    });
+  }
+
+  function handleMouseUp() { setDragging(false); }
+
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    el.addEventListener('wheel', handleWheel, { passive: false });
+    return () => el.removeEventListener('wheel', handleWheel);
+  }, []);
+
+  function toggleCollapse(id) {
+    setCollapsed(prev => ({ ...prev, [id]: !prev[id] }));
+  }
+
+  useEffect(() => {
+    if (expandAll) setCollapsed({});
+    else {
+      const c = {};
+      ativos.forEach(f => { c[f.id] = true; });
+      setCollapsed(c);
+    }
+  }, [expandAll]);
+
+  function getChildren(gestorId) {
+    return ativos
+      .filter(f => (f.gestor_id || null) === gestorId)
+      .filter(f => {
+        if (filterArea !== 'all' && f.area !== filterArea) return false;
+        if (searchTerm && !f.nome.toLowerCase().includes(searchTerm.toLowerCase()) && !(f.cargo || '').toLowerCase().includes(searchTerm.toLowerCase())) return false;
+        return true;
+      })
+      .sort((a, b) => a.nome.localeCompare(b.nome));
+  }
+
+  function countDescendants(id) {
+    const children = ativos.filter(f => f.gestor_id === id);
+    let total = children.length;
+    children.forEach(c => { total += countDescendants(c.id); });
+    return total;
+  }
+
+
+  function OrgCard({ func, level }) {
+    const numReports = countDescendants(func.id);
+    const directReports = ativos.filter(f => f.gestor_id === func.id).length;
+    const isHighlighted = searchTerm && (func.nome.toLowerCase().includes(searchTerm.toLowerCase()) || (func.cargo || '').toLowerCase().includes(searchTerm.toLowerCase()));
+
+
+    if (level === 0) {
+      return (
+        <div
+          data-orgcard
+          onClick={() => setPreviewFunc(func)}
+          className={`bg-card border-2 rounded-3xl p-5 text-center cursor-pointer transition-all duration-200 hover:border-primary/50 hover:shadow-xl group ${isHighlighted ? 'border-primary ring-2 ring-primary/20' : 'border-border'}`}
+          style={{ minWidth: 240, maxWidth: 280 }}
+        >
+          {func.foto_url ? (
+            <img data-foto-avatar="" src={func.foto_url} alt="" className="w-20 h-20 rounded-full object-cover mx-auto mb-3 border-[3px] border-primary shadow-md group-hover:scale-105 transition-transform" />
+          ) : (
+            <div className="w-20 h-20 rounded-full bg-primary/10 text-primary flex items-center justify-center text-3xl font-bold mx-auto mb-3 border-[3px] border-primary">
+              {func.nome[0]?.toUpperCase()}
+            </div>
+          )}
+          <div className="text-[15px] font-bold text-foreground leading-tight">{func.nome}</div>
+          <div className="text-sm text-primary font-semibold mt-1">{func.cargo || '—'}</div>
+          {func.area && <span className="inline-block mt-2 px-2.5 py-0.5 rounded-full bg-primary/10 text-primary text-[11px] font-semibold">{func.area}</span>}
+          {numReports > 0 && (
+            <div className="mt-3 flex items-center justify-center gap-1.5 text-xs text-muted-foreground">
+              <Users className="w-3.5 h-3.5" />
+              <span>{directReports} diretos · {numReports} total</span>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+
+    if (directReports > 0) {
+      return (
+        <div
+          data-orgcard
+          onClick={() => setPreviewFunc(func)}
+          className={`bg-card border rounded-2xl p-3.5 cursor-pointer transition-all duration-200 hover:border-primary/40 hover:shadow-lg group flex items-center gap-3 ${isHighlighted ? 'border-primary ring-2 ring-primary/20' : 'border-border'}`}
+          style={{ minWidth: 220, maxWidth: 260 }}
+        >
+          {func.foto_url ? (
+            <img data-foto-avatar="" src={func.foto_url} alt="" className="w-12 h-12 rounded-full object-cover border-2 border-primary/60 shrink-0 group-hover:scale-105 transition-transform" />
+          ) : (
+            <div className="w-12 h-12 rounded-full bg-primary/10 text-primary flex items-center justify-center text-lg font-bold shrink-0 border-2 border-primary/60">
+              {func.nome[0]?.toUpperCase()}
+            </div>
+          )}
+          <div className="flex-1 text-left min-w-0">
+            <div className="text-sm font-semibold text-foreground truncate">{func.nome}</div>
+            <div className="text-xs text-muted-foreground truncate">{func.cargo || '—'}</div>
+            <div className="flex items-center gap-1.5 mt-1">
+              {func.area && <span className="px-2 py-0.5 rounded-full bg-primary/10 text-primary text-[10px] font-semibold">{func.area}</span>}
+              <span className="text-[10px] text-muted-foreground flex items-center gap-0.5"><Users className="w-3 h-3" />{directReports}</span>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+
+    return (
+      <div
+        data-orgcard
+        onClick={() => setPreviewFunc(func)}
+        className={`bg-card border rounded-2xl p-3 cursor-pointer transition-all duration-200 hover:border-primary/30 hover:shadow-md group text-center ${isHighlighted ? 'border-primary ring-2 ring-primary/20' : 'border-border'}`}
+        style={{ minWidth: 160, maxWidth: 180 }}
+      >
+        {func.foto_url ? (
+          <img data-foto-avatar="" src={func.foto_url} alt="" className="w-10 h-10 rounded-full object-cover mx-auto mb-2 border-2 border-border group-hover:border-primary/40 transition-colors" />
+        ) : (
+          <div className="w-10 h-10 rounded-full bg-muted text-muted-foreground flex items-center justify-center text-sm font-bold mx-auto mb-2 group-hover:bg-primary/10 group-hover:text-primary transition-colors">
+            {func.nome[0]?.toUpperCase()}
+          </div>
+        )}
+        <div className="text-xs font-semibold text-foreground truncate">{func.nome}</div>
+        <div className="text-[11px] text-muted-foreground truncate mt-0.5">{func.cargo || '—'}</div>
+      </div>
+    );
+  }
+
+
+  function OrgTreeNode({ func, level = 0 }) {
+    const children = getChildren(func.id);
+    const isCollapsed = collapsed[func.id];
+    const hasChildren = children.length > 0;
+
+    return (
+      <div className="flex flex-col items-center">
+        <div className="relative">
+          <OrgCard func={func} level={level} />
+          {hasChildren && (
+            <button
+              onClick={(e) => { e.stopPropagation(); toggleCollapse(func.id); }}
+              className="absolute -bottom-3 left-1/2 -translate-x-1/2 w-6 h-6 rounded-full bg-card border border-border shadow-sm flex items-center justify-center text-muted-foreground hover:text-primary hover:border-primary/40 transition-colors z-10 text-xs font-bold"
+            >
+              {isCollapsed ? '+' : '−'}
+            </button>
+          )}
+        </div>
+        {hasChildren && !isCollapsed && (
+          <>
+            {                                    }
+            <div className="w-px h-6 bg-border" />
+            {                        }
+            <div className="relative flex gap-4 justify-center">
+              {                                               }
+              {children.length > 1 && (
+                <div className="absolute top-0 left-1/2 -translate-x-1/2 h-px bg-border" style={{ width: `calc(100% - 80px)` }} />
+              )}
+              {children.map(child => (
+                <div key={child.id} className="flex flex-col items-center">
+                  {                                              }
+                  <div className="w-px h-6 bg-border" />
+                  <OrgTreeNode func={child} level={level + 1} />
+                </div>
+              ))}
+            </div>
+          </>
+        )}
+      </div>
+    );
+  }
+
+
+
+
+  const idsVisiveis = new Set(ativos.map(f => f.id));
+  const passaFiltroRaiz = (f) => {
+    if (filterArea !== 'all' && f.area !== filterArea) return false;
+    if (searchTerm && !f.nome.toLowerCase().includes(searchTerm.toLowerCase()) && !(f.cargo || '').toLowerCase().includes(searchTerm.toLowerCase())) return false;
+    return true;
+  };
+  let roots = ativos.filter(f => !f.gestor_id || !idsVisiveis.has(f.gestor_id)).filter(passaFiltroRaiz).sort((a, b) => a.nome.localeCompare(b.nome));
+
+  if (roots.length === 0 && ativos.length > 0 && filterArea === 'all' && !searchTerm) {
+    roots = [...ativos].sort((a, b) => a.nome.localeCompare(b.nome));
+  }
+  const comGestor = ativos.filter(f => f.gestor_id).length;
+
+
+
+
+
+  const centralizar = useCallback(() => {
+    const c = containerRef.current;
+    const el = contentRef.current;
+    if (!c || !el) return;
+    setPan({ x: (c.clientWidth - el.offsetWidth) / 2, y: 0 });
+  }, []);
+
+  useEffect(() => {
+    const t = setTimeout(() => centralizar(), 60);
+    return () => clearTimeout(t);
+
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [roots.length, filterArea, searchTerm]);
+
+  return (
+    <>
+      {                                                                                }
+      {onVoltar && (
+        <div className="mb-3">
+          <Button variant="ghost" size="sm" onClick={onVoltar} className="gap-1.5 -ml-2 text-muted-foreground">
+            <span aria-hidden>←</span> Colaboradores
+          </Button>
+        </div>
+      )}
+      {                                               }
+      <div className="mb-4 rounded-xl border border-primary/30 bg-primary/5 p-3">
+        <div className="flex items-center gap-2 mb-2 text-sm font-semibold text-foreground">
+          <Sparkles className="h-4 w-4 text-primary" />
+          Organizar com IA
+        </div>
+        <p className="text-xs text-muted-foreground mb-2">
+          Descreva a mudança em português e a IA ajusta a hierarquia — você confirma antes de aplicar.
+          Ex.: <em>"Pessoa A reporta à Pessoa B"</em> · <em>"remove o gestor da Pessoa A"</em> · <em>"coloca o time de mídia sob a Pessoa B"</em>.
+        </p>
+        <div className="flex flex-col sm:flex-row gap-2">
+          <input
+            type="text"
+            value={iaTexto}
+            onChange={e => setIaTexto(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Enter') pedirIA(); }}
+            placeholder="Descreva o que quer mudar no organograma..."
+            disabled={iaLoading}
+            className="flex-1 h-9 px-3 rounded-md border border-input bg-background text-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          />
+          <Button size="sm" onClick={pedirIA} disabled={iaLoading || !iaTexto.trim()} className="gap-1.5 shrink-0">
+            {iaLoading ? <div className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-primary-foreground/30 border-t-primary-foreground" /> : <Sparkles className="h-3.5 w-3.5" />}
+            {iaLoading ? 'Pensando...' : 'Sugerir'}
+          </Button>
+        </div>
+      </div>
+
+      {                                                                        }
+      {iaProposta && (
+        <div className="fixed inset-0 z-[1000] flex items-center justify-center bg-black/50 p-4" onClick={() => !iaAplicando && setIaProposta(null)}>
+          <div className="bg-popover rounded-2xl p-6 w-full max-w-[480px] shadow-2xl max-h-[85vh] overflow-y-auto" onClick={e => e.stopPropagation()} style={{ animation: 'cbrio-modal-center-in 0.2s ease-out' }}>
+            <div className="flex items-center gap-3 mb-1">
+              <div className="h-10 w-10 rounded-full bg-primary/10 text-primary flex items-center justify-center"><Sparkles className="h-5 w-5" /></div>
+              <div className="text-[15px] font-semibold text-foreground">Confirmar mudanças</div>
+            </div>
+            {iaProposta.observacao && <p className="text-xs text-muted-foreground mb-3">{iaProposta.observacao}</p>}
+            <div className="space-y-2 mb-3">
+              {iaProposta.mudancas.map((m, i) => (
+                <div key={i} className="rounded-lg border border-border bg-card px-3 py-2 text-sm">
+                  <div className="font-medium text-foreground">{m.funcionario_nome}</div>
+                  <div className="text-xs text-muted-foreground mt-0.5">
+                    ↳ {m.gestor_nome ? <>passa a reportar a <strong className="text-foreground">{m.gestor_nome}</strong></> : <>fica <strong className="text-foreground">sem gestor</strong> (vai para o topo)</>}
+                  </div>
+                  {m.motivo && <div className="text-[11px] text-muted-foreground mt-1 italic">{m.motivo}</div>}
+                </div>
+              ))}
+            </div>
+            {iaProposta.avisos?.length > 0 && (
+              <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 mb-3">
+                {iaProposta.avisos.map((a, i) => <div key={i}>⚠️ {a}</div>)}
+              </div>
+            )}
+            <div className="flex gap-2.5 justify-end">
+              <Button variant="ghost" onClick={() => setIaProposta(null)} disabled={iaAplicando}>Cancelar</Button>
+              <Button onClick={aplicarIA} disabled={iaAplicando} className="gap-1.5">
+                {iaAplicando ? <div className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-primary-foreground/30 border-t-primary-foreground" /> : <Save className="h-3.5 w-3.5" />}
+                Aplicar
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {             }
+      <div className="flex flex-col gap-3 mb-4">
+        {ativos.length > 0 && comGestor === 0 && (
+          <div className="rounded-lg border border-primary/20 bg-primary/5 px-4 py-2.5 text-xs text-muted-foreground">
+            Ainda não há hierarquia: defina o <strong className="text-foreground">"Gestor Direto"</strong> de cada colaborador (no detalhe ou no formulário de edição) para o organograma montar a árvore. Por enquanto todos aparecem no topo.
+          </div>
+        )}
+        <div className="flex items-center justify-between flex-wrap gap-2">
+          <div className="text-sm text-muted-foreground">
+            {ativos.length} colaboradores · {comGestor} com gestor definido
+          </div>
+          <div className="flex items-center gap-2">
+            <Button
+              variant={expandAll ? 'default' : 'outline'}
+              size="sm"
+              onClick={() => setExpandAll(prev => !prev)}
+              className="text-xs rounded-full"
+            >
+              {expandAll ? 'Recolher' : 'Expandir Tudo'}
+            </Button>
+          </div>
+        </div>
+
+        {                }
+        <div className="flex items-center gap-2 flex-wrap">
+          <div className="relative">
+            <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground" />
+            <input
+              type="text"
+              placeholder="Buscar nome ou cargo..."
+              value={searchTerm}
+              onChange={e => setSearchTerm(e.target.value)}
+              className="h-8 pl-8 pr-3 w-56 rounded-full border border-input bg-background text-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            />
+          </div>
+          <div className="flex items-center gap-1 overflow-x-auto">
+            <button
+              onClick={() => setFilterArea('all')}
+              className={`px-3 py-1 rounded-full text-xs font-medium transition-colors whitespace-nowrap ${filterArea === 'all' ? 'bg-primary text-primary-foreground' : 'bg-muted text-muted-foreground hover:text-foreground'}`}
+            >
+              Todos
+            </button>
+            {areas.map(area => (
+              <button
+                key={area}
+                onClick={() => setFilterArea(area)}
+                className={`px-3 py-1 rounded-full text-xs font-medium transition-colors whitespace-nowrap ${filterArea === area ? 'bg-primary text-primary-foreground' : 'bg-muted text-muted-foreground hover:text-foreground'}`}
+              >
+                {area}
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {          }
+      <div className="text-[11px] text-muted-foreground mb-2">Scroll para zoom · Arraste para mover · Clique no card para preview</div>
+
+      {roots.length === 0 ? (
+        <div className="text-center py-16 text-muted-foreground">
+          <Network className="w-10 h-10 mx-auto mb-3 opacity-40" />
+          <div className="text-sm">Defina o campo "Gestor Direto" em cada colaborador para montar o organograma.</div>
+        </div>
+      ) : (
+        <div className="relative">
+          <div
+            ref={containerRef}
+            onMouseDown={handleMouseDown}
+            onMouseMove={handleMouseMove}
+            onMouseUp={handleMouseUp}
+            onMouseLeave={handleMouseUp}
+            className="overflow-hidden rounded-2xl border border-border bg-muted/30"
+            style={{
+              cursor: dragging ? 'grabbing' : 'grab',
+              height: 'calc(100vh - 300px)',
+              minHeight: 400,
+              position: 'relative',
+            }}
+          >
+            <div ref={contentRef} style={{
+              transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
+              transformOrigin: 'top center',
+              display: 'flex', flexDirection: 'column', alignItems: 'center',
+              minWidth: 'max-content', padding: '40px 60px 80px',
+              transition: dragging ? 'none' : 'transform 0.1s ease-out',
+            }}>
+              {roots.map(r => <OrgTreeNode key={r.id} func={r} />)}
+            </div>
+          </div>
+
+          {                            }
+          <div className="absolute bottom-4 right-4 flex flex-col gap-1 bg-card border border-border rounded-2xl shadow-lg p-1.5 z-10">
+            <button
+              onClick={() => setZoom(z => Math.min(2, z + 0.1))}
+              className="w-8 h-8 rounded-xl flex items-center justify-center text-sm font-bold text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
+            >+</button>
+            <div className="text-[10px] text-muted-foreground text-center py-0.5">{Math.round(zoom * 100)}%</div>
+            <button
+              onClick={() => setZoom(z => Math.max(0.3, z - 0.1))}
+              className="w-8 h-8 rounded-xl flex items-center justify-center text-sm font-bold text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
+            >−</button>
+            <div className="h-px bg-border mx-1" />
+            <button
+              onClick={() => { setZoom(0.85); centralizar(); }}
+              className="w-8 h-8 rounded-xl flex items-center justify-center text-[10px] font-medium text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
+            >fit</button>
+          </div>
+        </div>
+      )}
+
+      {                            }
+      {previewFunc && (
+        <OrgProfilePanel
+          func={previewFunc}
+          funcs={ativos}
+          onClose={() => setPreviewFunc(null)}
+          onDetail={(id) => { setPreviewFunc(null); onDetail(id); }}
+        />
+      )}
+    </>
+  );
+}
+
+
+
+
+
+function FuncionarioFormModal({ open, data, onClose, onSave, funcionarios = [], setores = [], areas = [], podeRemun = true }) {
+  const [f, setF] = useState({});
+  const [uploading, setUploading] = useState(false);
+  const [dragging, setDragging] = useState(false);
+  const [uploadError, setUploadError] = useState('');
+  const fileRef = useRef(null);
+  useEffect(() => { if (data) setF({ ...data }); }, [data]);
+  const upd = (k, v) => setF(p => ({ ...p, [k]: v }));
+
+  async function uploadFoto(file) {
+    if (!file) return;
+    if (!file.type.startsWith('image/')) { setUploadError('Selecione um arquivo de imagem (JPG, PNG, etc.)'); return; }
+    if (file.size > 5 * 1024 * 1024) { setUploadError('A imagem deve ter no máximo 5MB'); return; }
+    setUploading(true);
+    try {
+
+
+
+
+
+      const r = await rh.uploadFotoNova(file);
+      if (!r?.foto_url) throw new Error('resposta sem foto_url');
+      upd('foto_url', r.foto_url);
+    } catch (err) {
+      console.error('Erro upload:', err);
+      setUploadError('Erro ao enviar foto. Tente novamente.');
+    } finally { setUploading(false); }
+  }
+
+  function handleDrop(e) {
+    e.preventDefault(); setDragging(false);
+    const file = e.dataTransfer.files?.[0];
+    if (file) uploadFoto(file);
+  }
+
+  return (
+    <Modal open={open} onClose={onClose}
+      title={f?.id ? 'Editar Colaborador' : 'Novo Colaborador'}
+      footer={<>
+        <Button variant="ghost" onClick={onClose}>Cancelar</Button>
+        <Button className="text-sm px-8 py-2.5" onClick={() => onSave(f)} disabled={uploading}>
+          {uploading ? 'Enviando foto...' : f?.id ? '💾 Salvar Alterações' : '✅ Admitir Colaborador'}
+        </Button>
+      </>}>
+      <Input label="Nome *" value={f.nome || ''} onChange={e => upd('nome', e.target.value)} />
+      <div style={styles.formRow}>
+        {podeRemun && <Input label="CPF" value={f.cpf || ''} onChange={e => upd('cpf', e.target.value)} />}
+        <Input label="Email" type="email" value={f.email || ''} onChange={e => upd('email', e.target.value)} />
+      </div>
+      <div style={styles.formRow}>
+        <Input label="Telefone" value={f.telefone || ''} onChange={e => upd('telefone', e.target.value)} />
+        <FormSelect label="Setor" value={String(f.setor_id || '')} onChange={e => {
+          const id = e.target.value ? parseInt(e.target.value) : null;
+          setF(p => ({ ...p, setor_id: id, area: '' }));
+        }} placeholder="Selecione o setor">
+          <SelectItem value="__none__">Nenhum</SelectItem>
+          {setores.map(s => <SelectItem key={s.id} value={String(s.id)}>{s.nome}</SelectItem>)}
+        </FormSelect>
+      </div>
+      <div style={styles.formRow}>
+        <FormSelect label="Área" value={f.area || ''} onChange={e => upd('area', e.target.value)} placeholder="Selecione a área">
+          <SelectItem value="__none__">Nenhuma</SelectItem>
+          {(f.setor_id ? areas.filter(a => a.setor_id === f.setor_id) : areas).map(a => (
+            <SelectItem key={a.id} value={a.nome}>{a.nome}</SelectItem>
+          ))}
+        </FormSelect>
+      </div>
+      <div style={styles.formRow}>
+        <Input label="Cargo *" value={f.cargo || ''} onChange={e => upd('cargo', e.target.value)} />
+        <FormSelect label="Tipo de Contrato" value={f.tipo_contrato || 'CLT'} onChange={e => upd('tipo_contrato', e.target.value)}>
+          {OPCOES_CONTRATO.map(k => <SelectItem key={k} value={k}>{TIPO_CONTRATO[k] || k}</SelectItem>)}
+        </FormSelect>
+      </div>
+      <div style={styles.formRow}>
+        <div style={styles.formGroup}>
+          <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-1 block">Data Admissão *</label>
+          <DatePicker value={f.data_admissao || ''} onChange={v => upd('data_admissao', v)} />
+        </div>
+        {podeRemun && <Input label="Salário (R$)" type="number" value={f.salario || ''} onChange={e => upd('salario', e.target.value)} />}
+      </div>
+      {
+                                                                                   }
+      {f.id && (
+        <div style={styles.formRow}>
+          <FormSelect label="Status" value={f.status || 'ativo'} onChange={e => upd('status', e.target.value)}>
+            {Object.entries(STATUS_COLORS).map(([k, v]) => <SelectItem key={k} value={k}>{v.label}</SelectItem>)}
+          </FormSelect>
+          <div style={styles.formGroup}>
+            <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-1 block">Data Demissão</label>
+            <DatePicker value={f.data_demissao || ''} onChange={v => upd('data_demissao', v)} />
+          </div>
+        </div>
+      )}
+      {                                 }
+      <div style={styles.formGroup}>
+        <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-1 block">Foto do Colaborador</label>
+        <div
+          onDragOver={e => { e.preventDefault(); setDragging(true); }}
+          onDragLeave={() => setDragging(false)}
+          onDrop={handleDrop}
+          onClick={() => !uploading && fileRef.current?.click()}
+          style={{
+            border: `2px dashed ${dragging ? C.primary : '#444'}`,
+            borderRadius: 12, padding: 20, textAlign: 'center',
+            cursor: uploading ? 'wait' : 'pointer',
+            background: dragging ? `${C.primary}10` : 'transparent',
+            transition: 'all 0.2s',
+          }}
+        >
+          <input ref={fileRef} type="file" accept="image/*" style={{ display: 'none' }}
+            onChange={e => { uploadFoto(e.target.files?.[0]); e.target.value = ''; }} />
+          {f.foto_url ? (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 16, justifyContent: 'center' }}>
+              <img src={f.foto_url} alt="Foto" style={{ width: 64, height: 64, borderRadius: '50%', objectFit: 'cover', border: `2px solid ${C.primary}` }}
+                onError={e => { e.target.style.display = 'none'; }} />
+              <div style={{ textAlign: 'left' }}>
+                <div style={{ color: C.text, fontSize: 14, fontWeight: 600 }}>Foto enviada</div>
+                <div style={{ color: C.text2, fontSize: 12, marginTop: 4 }}>Clique ou arraste para trocar</div>
+                <button type="button" onClick={e => { e.stopPropagation(); upd('foto_url', ''); }}
+                  style={{ marginTop: 6, background: 'transparent', border: `1px solid #ef4444`, color: '#ef4444', borderRadius: 6, padding: '4px 12px', fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>
+                  Remover
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div>
+              {uploading ? (
+                <div style={{ color: C.primary, fontSize: 14, fontWeight: 600 }}>Enviando...</div>
+              ) : (
+                <>
+                  <div style={{ fontSize: 28, marginBottom: 6 }}>📷</div>
+                  <div style={{ color: C.text, fontSize: 14, fontWeight: 600 }}>Arraste uma foto aqui</div>
+                  <div style={{ color: C.text2, fontSize: 12, marginTop: 4 }}>ou clique para selecionar — JPG, PNG — máx. 5MB</div>
+                </>
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+      <div style={styles.formGroup}>
+        <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-1 block">Observações</label>
+        <textarea className="flex w-full rounded-lg border border-input bg-background px-3 py-2 text-sm shadow-sm shadow-black/5 placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" style={{ minHeight: 60, resize: 'vertical' }} value={f.observacoes || ''} onChange={e => upd('observacoes', e.target.value)} />
+      </div>
+    </Modal>
+  );
+}
+
+function TreinamentoFormModal({ open, data, onClose, onSave }) {
+  const [f, setF] = useState({});
+  useEffect(() => { if (data) setF({ ...data }); }, [data]);
+  const upd = (k, v) => setF(p => ({ ...p, [k]: v }));
+
+  return (
+    <Modal open={open} onClose={onClose}
+      title={f?.id ? 'Editar Treinamento' : 'Novo Treinamento'}
+      footer={<Button onClick={() => onSave(f)}>Salvar</Button>}>
+      <Input label="Título *" value={f.titulo || ''} onChange={e => upd('titulo', e.target.value)} />
+      <div style={styles.formRow}>
+        <div style={styles.formGroup}>
+          <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-1 block">Data Início *</label>
+          <DatePicker value={f.data_inicio || ''} onChange={v => upd('data_inicio', v)} />
+        </div>
+        <div style={styles.formGroup}>
+          <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-1 block">Data Fim</label>
+          <DatePicker value={f.data_fim || ''} onChange={v => upd('data_fim', v)} />
+        </div>
+      </div>
+      <Input label="Instrutor" value={f.instrutor || ''} onChange={e => upd('instrutor', e.target.value)} />
+      <div style={styles.formGroup}>
+        <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-1 flex items-center gap-2">
+          <input type="checkbox" checked={f.obrigatorio || false} onChange={e => upd('obrigatorio', e.target.checked)} />
+          Obrigatório
+        </label>
+      </div>
+      <div style={styles.formGroup}>
+        <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-1 block">Descrição</label>
+        <textarea className="flex w-full rounded-lg border border-input bg-background px-3 py-2 text-sm shadow-sm shadow-black/5 placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" style={{ minHeight: 60, resize: 'vertical' }} value={f.descricao || ''} onChange={e => upd('descricao', e.target.value)} />
+      </div>
+    </Modal>
+  );
+}
+
+
+
+const BENEFICIOS_FIELDS = [
+  { key: 'complemento_salario', label: 'Complemento Salário' },
+  { key: 'alimentacao', label: 'Alimentação' },
+  { key: 'transporte', label: 'Transporte' },
+  { key: 'saude', label: 'Saúde' },
+  { key: 'seguro_vida', label: 'Seguro de Vida' },
+  { key: 'educacao', label: 'Educação' },
+  { key: 'saldo_livre', label: 'Saldo Livre' },
+  { key: 'plano_saude', label: 'Plano de Saúde' },
+  { key: 'gratificacao', label: 'Gratificação' },
+  { key: 'adicional_nivel', label: 'Adicional de Nível' },
+  { key: 'participacao_comite', label: 'Comitê Estratégico' },
+  { key: 'veiculo', label: 'Veículo' },
+  { key: 'adicional_pastores', label: 'Adicional Pastores' },
+  { key: 'adicional_lideranca', label: 'Adicional Liderança' },
+  { key: 'adicional_pulpito', label: 'Adicional Púlpito' },
+];
+
+const DESCONTOS_FIELDS = [
+  { key: 'fgts', label: 'FGTS' },
+  { key: 'ir', label: 'IR' },
+  { key: 'inss', label: 'INSS' },
+];
+
+const TOTAIS_FIELDS = [
+  { key: 'remuneracao_bruta', label: 'Remuneração Bruta' },
+  { key: 'remuneracao_liquida', label: 'Remuneração Líquida' },
+  { key: 'custo_total_mensal', label: 'Custo Total Mensal' },
+];
+
+const BONUS_FIELDS = [
+  { key: 'bonus_anual_50', label: 'Bônus Anual 50%' },
+  { key: 'bonus_anual_integral', label: 'Bônus Anual Integral' },
+  { key: 'ferias_integral', label: 'Férias Integral' },
+];
+
+function BeneficiosSection({ data, onSave }) {
+  const [expanded, setExpanded] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [form, setForm] = useState({});
+  const [saving, setSaving] = useState(false);
+  const activeBenefits = BENEFICIOS_FIELDS.filter(b => Number(data[b.key]) > 0);
+
+
+  const isPJ = String(data.tipo_contrato || '').toUpperCase().startsWith('PJ');
+  const remLiquida = isPJ ? data.salario : data.remuneracao_liquida;
+
+  function startEdit() {
+    const f = {};
+    [...BENEFICIOS_FIELDS, ...DESCONTOS_FIELDS, ...TOTAIS_FIELDS, ...BONUS_FIELDS].forEach(b => {
+      f[b.key] = data[b.key] || '';
+    });
+    f.salario = data.salario || '';
+    setForm(f);
+    setEditing(true);
+  }
+
+  async function handleSave() {
+    setSaving(true);
+    const updates = {};
+    Object.entries(form).forEach(([k, v]) => { updates[k] = v === '' ? 0 : Number(v); });
+    try { await onSave(updates); setEditing(false); } catch { }
+    setSaving(false);
+  }
+
+  return (
+    <div style={{ marginBottom: 16 }}>
+      <button onClick={() => setExpanded(!expanded)}
+        style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', width: '100%', background: 'none', border: 'none', cursor: 'pointer', padding: 0, marginBottom: 8 }}>
+        <span style={{ fontSize: 12, fontWeight: 700, color: C.text2, textTransform: 'uppercase' }}>💰 Benefícios e Remuneração ({activeBenefits.length}) {isPJ && <span style={{ color: C.amber, fontSize: 10 }}>• PJ</span>}</span>
+        <span style={{ fontSize: 12, color: C.text3, transition: 'transform 0.2s', transform: expanded ? 'rotate(180deg)' : '' }}>▼</span>
+      </button>
+      {expanded && (
+        <div style={{ background: 'var(--cbrio-input-bg)', borderRadius: 10, padding: 16 }}>
+          {             }
+          <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 10 }}>
+            {!editing ? (
+              <Button variant="outline" size="xs" className="gap-1.5" onClick={startEdit}>
+                <Pencil className="h-3 w-3" />Editar Benefícios
+              </Button>
+            ) : (
+              <div style={{ display: 'flex', gap: 6 }}>
+                <Button variant="ghost" size="xs" onClick={() => setEditing(false)}>Cancelar</Button>
+                <Button size="xs" onClick={handleSave} disabled={saving}>{saving ? 'Salvando...' : 'Salvar'}</Button>
+              </div>
+            )}
+          </div>
+
+          {isPJ && (
+            <div style={{ padding: '8px 12px', background: '#f59e0b18', borderRadius: 8, marginBottom: 12, fontSize: 12, color: C.amber, border: '1px solid #f59e0b30' }}>
+              Vínculo PJ — sem descontos de FGTS, IR e INSS. Remuneração líquida = salário base.
+            </div>
+          )}
+
+          {                    }
+          {editing ? (
+            <>
+              <div style={{ fontSize: 11, fontWeight: 600, color: C.text2, marginBottom: 6, textTransform: 'uppercase' }}>Salário Base</div>
+              <input type="number" step="0.01" value={form.salario} onChange={e => setForm(f => ({ ...f, salario: e.target.value }))}
+                className="flex h-9 w-full rounded-lg border border-input bg-background px-3 py-2 text-sm shadow-sm shadow-black/5 placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" style={{ marginBottom: 12, maxWidth: 220 }} placeholder="R$" />
+
+              <div style={{ fontSize: 11, fontWeight: 600, color: C.text2, marginBottom: 6, textTransform: 'uppercase' }}>Benefícios</div>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px 12px', marginBottom: 12 }}>
+                {BENEFICIOS_FIELDS.map(b => (
+                  <div key={b.key} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <label style={{ fontSize: 11, color: C.text2, width: 120, flexShrink: 0 }}>{b.label}</label>
+                    <input type="number" step="0.01" value={form[b.key]} onChange={e => setForm(f => ({ ...f, [b.key]: e.target.value }))}
+                      className="flex h-7 w-full rounded-lg border border-input bg-background px-2 py-1 text-xs shadow-sm shadow-black/5 placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" placeholder="0" />
+                  </div>
+                ))}
+              </div>
+
+              {!isPJ && (<>
+                <div style={{ fontSize: 11, fontWeight: 600, color: C.text2, marginBottom: 6, textTransform: 'uppercase' }}>Descontos (CLT)</div>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '6px 12px', marginBottom: 12 }}>
+                  {DESCONTOS_FIELDS.map(b => (
+                    <div key={b.key} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                      <label style={{ fontSize: 11, color: C.text2, width: 40, flexShrink: 0 }}>{b.label}</label>
+                      <input type="number" step="0.01" value={form[b.key]} onChange={e => setForm(f => ({ ...f, [b.key]: e.target.value }))}
+                        className="flex h-7 w-full rounded-lg border border-input bg-background px-2 py-1 text-xs shadow-sm shadow-black/5 placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" placeholder="0" />
+                    </div>
+                  ))}
+                </div>
+              </>)}
+
+              <div style={{ fontSize: 11, fontWeight: 600, color: C.text2, marginBottom: 6, textTransform: 'uppercase' }}>Totais</div>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px 12px', marginBottom: 12 }}>
+                {TOTAIS_FIELDS.map(b => (
+                  <div key={b.key} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <label style={{ fontSize: 11, color: C.text2, width: 120, flexShrink: 0 }}>{b.label}</label>
+                    <input type="number" step="0.01" value={form[b.key]} onChange={e => setForm(f => ({ ...f, [b.key]: e.target.value }))}
+                      className="flex h-7 w-full rounded-lg border border-input bg-background px-2 py-1 text-xs shadow-sm shadow-black/5 placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" placeholder="0" />
+                  </div>
+                ))}
+              </div>
+
+              <div style={{ fontSize: 11, fontWeight: 600, color: C.text2, marginBottom: 6, textTransform: 'uppercase' }}>Provisões Anuais</div>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px 12px' }}>
+                {BONUS_FIELDS.map(b => (
+                  <div key={b.key} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <label style={{ fontSize: 11, color: C.text2, width: 120, flexShrink: 0 }}>{b.label}</label>
+                    <input type="number" step="0.01" value={form[b.key]} onChange={e => setForm(f => ({ ...f, [b.key]: e.target.value }))}
+                      className="flex h-7 w-full rounded-lg border border-input bg-background px-2 py-1 text-xs shadow-sm shadow-black/5 placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" placeholder="0" />
+                  </div>
+                ))}
+              </div>
+            </>
+          ) : (
+            <>
+              {                       }
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))', gap: 10, marginBottom: 12 }}>
+                {[
+                  { label: 'Salário Base', value: data.salario, color: C.primary },
+                  ...(!isPJ ? [{ label: 'Rem. Bruta', value: data.remuneracao_bruta, color: C.blue }] : []),
+                  { label: 'Rem. Líquida', value: remLiquida, color: C.green },
+                  { label: 'Custo Total', value: isPJ ? data.salario : data.custo_total_mensal, color: C.amber },
+                ].map(item => (
+                  <div key={item.label} style={{ padding: '10px 12px', borderRadius: 8, border: `1px solid ${C.border}`, borderLeft: `3px solid ${item.color}` }}>
+                    <div style={{ fontSize: 10, color: C.text3, textTransform: 'uppercase', fontWeight: 600 }}>{item.label}</div>
+                    <div style={{ fontSize: 15, fontWeight: 700, color: C.text }}>{fmtMoney(item.value)}</div>
+                  </div>
+                ))}
+              </div>
+
+              {activeBenefits.length > 0 && (
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '4px 16px' }}>
+                  {activeBenefits.map(b => (
+                    <div key={b.key} style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0', borderBottom: `1px solid ${C.border}` }}>
+                      <span style={{ fontSize: 12, color: C.text2 }}>{b.label}</span>
+                      <span style={{ fontSize: 12, fontWeight: 600, color: C.text }}>{fmtMoney(data[b.key])}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {!isPJ && (Number(data.fgts) > 0 || Number(data.ir) > 0 || Number(data.inss) > 0) && (
+                <div style={{ marginTop: 10, paddingTop: 8, borderTop: `1px solid ${C.border}` }}>
+                  <div style={{ fontSize: 11, fontWeight: 600, color: C.text2, marginBottom: 4 }}>Descontos</div>
+                  <div style={{ display: 'flex', gap: 16 }}>
+                    {Number(data.fgts) > 0 && <span style={{ fontSize: 12, color: C.red }}>FGTS: {fmtMoney(data.fgts)}</span>}
+                    {Number(data.ir) > 0 && <span style={{ fontSize: 12, color: C.red }}>IR: {fmtMoney(data.ir)}</span>}
+                    {Number(data.inss) > 0 && <span style={{ fontSize: 12, color: C.red }}>INSS: {fmtMoney(data.inss)}</span>}
+                  </div>
+                </div>
+              )}
+
+              {(Number(data.bonus_anual_50) > 0 || Number(data.bonus_anual_integral) > 0 || Number(data.ferias_integral) > 0) && (
+                <div style={{ marginTop: 10, paddingTop: 8, borderTop: `1px solid ${C.border}` }}>
+                  <div style={{ fontSize: 11, fontWeight: 600, color: C.text2, marginBottom: 4 }}>Provisões Anuais</div>
+                  <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap' }}>
+                    {Number(data.bonus_anual_50) > 0 && <span style={{ fontSize: 12, color: C.text }}>Bônus 50%: {fmtMoney(data.bonus_anual_50)}</span>}
+                    {Number(data.bonus_anual_integral) > 0 && <span style={{ fontSize: 12, color: C.text }}>Bônus Integral: {fmtMoney(data.bonus_anual_integral)}</span>}
+                    {Number(data.ferias_integral) > 0 && <span style={{ fontSize: 12, color: C.text }}>Férias: {fmtMoney(data.ferias_integral)}</span>}
+                  </div>
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+
+
+const DOCS_OBRIGATORIOS = {
+  CLT: [
+    ...DOCS_CLT,
+  ],
+  PJ: [
+    ...DOCS_PJ,
+  ],
+};
+
+const docKeyDe = (t) => String(t || '').toUpperCase().startsWith('PJ') ? 'PJ' : 'CLT';
+
+function DocumentosSection({ data, onNewDoc, onDeleteDoc }) {
+  const [uploading, setUploading] = useState(false);
+  const [docError, setDocError] = useState('');
+
+
+
+
+
+  const tipoEscolhidoRef = useRef(null);
+  const fileRef = useRef(null);
+
+  const conjunto = DOCS_OBRIGATORIOS[docKeyDe(data.tipo_contrato)] || [];
+  const docsFaltando = faltandoDocs(data.documentos, data.tipo_contrato);
+  const semTipoValido = foraDoCatalogoDocs(data.documentos, data.tipo_contrato);
+  const today = new Date().toISOString().slice(0, 10);
+  const docsVencidos = (data.documentos || []).filter(d => d.data_expiracao && d.data_expiracao < today);
+
+  function pedirArquivo(tipo) {
+    tipoEscolhidoRef.current = tipo;
+    fileRef.current?.click();
+  }
+
+  async function handleUploadDoc(file) {
+    if (!file) return;
+    if (file.size > 10 * 1024 * 1024) { setDocError('Arquivo deve ter no máximo 10MB'); return; }
+
+
+
+    const tipo = tipoEscolhidoRef.current;
+    if (!tipo) { setDocError('Escolha o tipo do documento antes de enviar.'); return; }
+    setUploading(true);
+    try {
+      const fd = new FormData();
+      fd.append('arquivo', file);
+      fd.append('nome', file.name);
+      fd.append('tipo', tipo);
+      await rh.documentos.upload(data.id, fd);
+      setDocError('');
+    } catch (e) {
+      console.error(e);
+      setDocError('Erro ao enviar documento: ' + e.message);
+    } finally {
+      setUploading(false);
+      tipoEscolhidoRef.current = null;
+    }
+  }
+
+  return (
+    <div style={{ marginBottom: 16 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+        <span style={{ fontSize: 12, fontWeight: 700, color: C.text2, textTransform: 'uppercase' }}>📄 Documentos ({(data.documentos || []).length})</span>
+        <div style={{ display: 'flex', gap: 6 }}>
+          <input ref={fileRef} type="file" accept=".pdf,.doc,.docx,.jpg,.jpeg,.png,.xls,.xlsx" style={{ display: 'none' }}
+            onChange={e => { handleUploadDoc(e.target.files?.[0]); e.target.value = ''; }} />
+          {
+                                               }
+          <select
+            value=""
+            disabled={uploading}
+            onChange={(e) => { if (e.target.value) pedirArquivo(e.target.value); e.target.value = ''; }}
+            style={{ fontSize: 12, padding: '6px 8px', borderRadius: 6, border: `1px solid ${C.border}`, background: C.inputBg, color: C.text }}
+          >
+            <option value="">{uploading ? '⏳ Enviando…' : '📎 Enviar documento…'}</option>
+            {conjunto.map((d) => <option key={d.tipo} value={d.tipo}>{d.label}</option>)}
+            <option value="outro">Outro documento</option>
+          </select>
+          <Button variant="ghost" size="sm" onClick={() => onNewDoc(data.id)}>+ Manual</Button>
+        </div>
+      </div>
+      {                           }
+      {docsFaltando.length > 0 && (
+        <div style={{ padding: '10px 14px', background: '#f59e0b12', border: '1px solid #f59e0b30', borderRadius: 8, marginBottom: 10 }}>
+          <div style={{ fontSize: 11, fontWeight: 700, color: C.amber, marginBottom: 4 }}>Documentos obrigatórios faltando ({docsFaltando.length})</div>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+            {
+
+                                                             }
+            {docsFaltando.map(d => (
+              <button
+                key={d.tipo}
+                type="button"
+                title={d.dica ? `${d.dica} — clique para enviar` : 'Clique para enviar'}
+                disabled={uploading}
+                onClick={() => pedirArquivo(d.tipo)}
+                style={{ fontSize: 11, padding: '3px 9px', borderRadius: 4, background: '#f59e0b20', color: C.amber, fontWeight: 500, border: `1px solid ${C.amber}40`, cursor: uploading ? 'default' : 'pointer' }}
+              >
+                📎 {d.label}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+      {
+
+
+                                                         }
+      {semTipoValido.length > 0 && (
+        <div style={{ padding: '10px 14px', background: '#64748b12', border: `1px solid ${C.border}`, borderRadius: 8, marginBottom: 10 }}>
+          <div style={{ fontSize: 11, fontWeight: 700, color: C.text2, marginBottom: 4 }}>
+            Sem tipo identificado ({semTipoValido.length})
+          </div>
+          <div style={{ fontSize: 11, color: C.text3, marginBottom: 6 }}>
+            Estes arquivos estão guardados, mas não contam no checklist. Reenvie pelo tipo certo
+            (o botão acima) ou apague se for duplicado.
+          </div>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+            {semTipoValido.map(d => (
+              <span key={d.id} style={{ fontSize: 11, padding: '2px 8px', borderRadius: 4, background: C.inputBg, color: C.text3 }}>
+                {d.nome}{tipoEhExtensaoDoc(d.tipo) ? ' • tipo veio do arquivo' : ` • ${d.tipo}`}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+      {docsVencidos.length > 0 && (
+        <div style={{ padding: '10px 14px', background: '#ef444412', border: '1px solid #ef444430', borderRadius: 8, marginBottom: 10 }}>
+          <div style={{ fontSize: 11, fontWeight: 700, color: C.red, marginBottom: 4 }}>Documentos VENCIDOS ({docsVencidos.length})</div>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+            {docsVencidos.map(d => (
+              <span key={d.id} style={{ fontSize: 11, padding: '2px 8px', borderRadius: 4, background: '#ef444420', color: C.red, fontWeight: 500 }}>{d.nome} (exp: {fmtDate(d.data_expiracao)})</span>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {(data.documentos || []).map(d => (
+        <div key={d.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '6px 0', borderBottom: `1px solid ${C.border}` }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <span style={{ fontSize: 16 }}>{d.storage_path ? '📄' : '📋'}</span>
+            <div>
+              <div style={{ fontSize: 13, fontWeight: 500, color: C.text }}>{d.nome}</div>
+              <div style={{ fontSize: 11, color: C.text3 }}>{d.tipo}{d.data_expiracao ? ` • exp: ${fmtDate(d.data_expiracao)}` : ''}</div>
+            </div>
+          </div>
+          <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+            {d.storage_path && <a href={d.storage_path} target="_blank" rel="noopener noreferrer" style={{ color: C.primary, textDecoration: 'none' }} className="inline-flex items-center justify-center rounded-md text-sm font-medium h-9 px-3">⬇ Baixar</a>}
+            <Button variant="ghost" size="sm" onClick={() => onDeleteDoc(d.id, data.id)}>🗑</Button>
+          </div>
+        </div>
+      ))}
+      {(data.documentos || []).length === 0 && <div style={{ fontSize: 13, color: C.text3, padding: '8px 0' }}>Nenhum documento — use o botão Upload para enviar</div>}
+    </div>
+  );
+}
+
+function NotasColaborador({ funcId, initialValue }) {
+  const [notas, setNotas] = useState(initialValue);
+  const [saved, setSaved] = useState(true);
+  const timerRef = useRef(null);
+
+  function handleChange(e) {
+    setNotas(e.target.value);
+    setSaved(false);
+    if (timerRef.current) clearTimeout(timerRef.current);
+    timerRef.current = setTimeout(() => saveNotas(e.target.value), 1500);
+  }
+
+  async function saveNotas(value) {
+    try {
+      await rh.funcionarios.update(funcId, { observacoes: value });
+      setSaved(true);
+    } catch (e) { console.error(e); }
+  }
+
+  return (
+    <div style={{ marginBottom: 16 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+        <span style={{ fontSize: 12, fontWeight: 700, color: C.text2, textTransform: 'uppercase' }}>📝 Anotações</span>
+        <span style={{ fontSize: 11, color: saved ? C.green : C.amber }}>{saved ? '✓ Salvo' : '⏳ Salvando...'}</span>
+      </div>
+      <textarea
+        className="flex w-full rounded-lg border border-input bg-background px-3 py-2 text-sm shadow-sm shadow-black/5 placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        style={{ minHeight: 80, resize: 'vertical' }}
+        value={notas}
+        onChange={handleChange}
+        placeholder="Escreva anotações sobre este colaborador..."
+      />
+    </div>
+  );
+}
+
+const NIVEL_LABELS = { 1: 'Sem acesso', 2: 'Pessoal', 3: 'Área', 4: 'Setor', 5: 'Admin' };
+const NIVEL_COLORS = { 1: C.red, 2: C.amber, 3: C.blue, 4: C.green, 5: '#8b5cf6' };
+
+
+function descendentesDe(id, funcs) {
+  const out = new Set();
+  let fronteira = funcs.filter(f => f.gestor_id === id).map(f => f.id);
+  let guard = 0;
+  while (fronteira.length && guard < 5000) {
+    const proximos = [];
+    for (const fid of fronteira) {
+      if (out.has(fid)) continue;
+      out.add(fid);
+      for (const f of funcs) if (f.gestor_id === fid) proximos.push(f.id);
+    }
+    fronteira = proximos;
+    guard += 1;
+  }
+  return out;
+}
+
+function ancestraisDe(id, funcs) {
+  const out = new Set();
+  const byId = new Map(funcs.map(f => [f.id, f]));
+  let cur = byId.get(id)?.gestor_id || null;
+  let guard = 0;
+  while (cur && !out.has(cur) && guard < 5000) { out.add(cur); cur = byId.get(cur)?.gestor_id || null; guard += 1; }
+  return out;
+}
+
+
+
+function HierarquiaSection({ data, funcs = [], onChanged }) {
+  const [saving, setSaving] = useState(false);
+  const [addSel, setAddSel] = useState('');
+
+
+
+
+  const [roster, setRoster] = useState(funcs);
+  useEffect(() => {
+    let vivo = true;
+    rh.funcionarios.list({}).then((all) => { if (vivo && Array.isArray(all) && all.length) setRoster(all); }).catch(() => {});
+    return () => { vivo = false; };
+  }, [data.id]);
+  const base = roster.length >= funcs.length ? roster : funcs;
+
+
+  const ativos = base.filter(f => f.status !== 'inativo');
+  const gestor = data.gestor_id ? base.find(f => f.id === data.gestor_id) : null;
+  const subordinados = ativos.filter(f => f.gestor_id === data.id).sort((a, b) => a.nome.localeCompare(b.nome));
+  const desc = descendentesDe(data.id, base);
+  const anc = ancestraisDe(data.id, base);
+  const opcoesGestor = ativos.filter(f => f.id !== data.id && !desc.has(f.id)).sort((a, b) => a.nome.localeCompare(b.nome));
+  const opcoesAdd = ativos.filter(f => f.id !== data.id && f.gestor_id !== data.id && !anc.has(f.id)).sort((a, b) => a.nome.localeCompare(b.nome));
+
+  async function aplicar(fn, msg) {
+    setSaving(true);
+    try { await fn(); sonnerToast.success(msg); await onChanged?.(); }
+    catch (e) { sonnerToast.error(e.message || 'Erro ao salvar'); }
+    finally { setSaving(false); }
+  }
+  const mudarGestor = (novoId) => aplicar(() => rh.funcionarios.setGestor(data.id, novoId || null), novoId ? 'Gestor direto atualizado' : 'Gestor removido');
+  const addSubordinado = (id) => { if (id) aplicar(() => rh.funcionarios.setGestor(id, data.id), 'Subordinado adicionado').then(() => setAddSel('')); };
+  const removerSubordinado = (id) => aplicar(() => rh.funcionarios.setGestor(id, null), 'Removido dos subordinados');
+
+  const Avatarzinho = ({ f, size = 28 }) => (
+    f.foto_url
+      ? <img data-foto-avatar="" src={f.foto_url} alt="" style={{ width: size, height: size, borderRadius: '50%', objectFit: 'cover', flexShrink: 0 }} />
+      : <div style={{ width: size, height: size, borderRadius: '50%', background: C.primaryBg, color: C.primary, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: size * 0.42, fontWeight: 700, flexShrink: 0 }}>{(f.nome || '?')[0].toUpperCase()}</div>
+  );
+
+  return (
+    <div style={{ marginBottom: 20, background: 'var(--cbrio-input-bg)', borderRadius: 10, padding: 16 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
+        <Network className="h-4 w-4 text-primary" />
+        <span style={{ fontSize: 12, fontWeight: 700, color: C.text2, textTransform: 'uppercase', letterSpacing: 0.5 }}>Hierarquia</span>
+        {saving && <span style={{ fontSize: 11, color: C.text3 }}>salvando...</span>}
+      </div>
+
+      {                   }
+      <div style={{ marginBottom: 16 }}>
+        <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-1 block">Gestor direto (a quem reporta)</label>
+        <ShadSelect value={data.gestor_id || '__none__'} onValueChange={v => mudarGestor(v === '__none__' ? null : v)} disabled={saving}>
+          <SelectTrigger className="w-full"><SelectValue placeholder="Selecione..." /></SelectTrigger>
+          <SelectContent className="z-[1100]">
+            <SelectItem value="__none__">— Sem gestor (topo)</SelectItem>
+            {opcoesGestor.map(f => <SelectItem key={f.id} value={f.id}>{f.nome}{f.cargo ? ` · ${f.cargo}` : ''}</SelectItem>)}
+          </SelectContent>
+        </ShadSelect>
+        {gestor && <div style={{ fontSize: 11, color: C.text3, marginTop: 4 }}>Atual: {gestor.nome}</div>}
+      </div>
+
+      {                  }
+      <div>
+        <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-1 block">Subordinados diretos ({subordinados.length})</label>
+        {subordinados.length === 0 && <div style={{ fontSize: 13, color: C.text3, marginBottom: 8 }}>Ninguém reporta a este colaborador ainda.</div>}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 10 }}>
+          {subordinados.map(s => (
+            <div key={s.id} style={{ display: 'flex', alignItems: 'center', gap: 10, background: 'var(--cbrio-card)', border: `1px solid ${C.border}`, borderRadius: 8, padding: '6px 10px' }}>
+              <Avatarzinho f={s} />
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 13, fontWeight: 600, color: C.text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{s.nome}</div>
+                <div style={{ fontSize: 11, color: C.text2 }}>{s.cargo || '—'}</div>
+              </div>
+              <Button variant="ghost" size="icon" className="h-7 w-7 text-muted-foreground hover:text-destructive" title="Remover dos subordinados" disabled={saving} onClick={() => removerSubordinado(s.id)}>
+                <X className="h-3.5 w-3.5" />
+              </Button>
+            </div>
+          ))}
+        </div>
+        <ShadSelect value={addSel} onValueChange={(v) => addSubordinado(v)} disabled={saving}>
+          <SelectTrigger className="w-full"><SelectValue placeholder="+ Adicionar subordinado..." /></SelectTrigger>
+          <SelectContent className="z-[1100]">
+            {opcoesAdd.length === 0 && <div style={{ padding: '8px 12px', fontSize: 12, color: C.text3 }}>Ninguém disponível</div>}
+            {opcoesAdd.map(f => (
+              <SelectItem key={f.id} value={f.id}>
+                {f.nome}{f.cargo ? ` · ${f.cargo}` : ''}{f.gestor_id ? ' (tem gestor)' : ''}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </ShadSelect>
+        <div style={{ fontSize: 11, color: C.text3, marginTop: 4 }}>Adicionar move a pessoa pra reportar a {data.nome?.split(' ')[0] || 'este colaborador'} (troca o gestor anterior, se houver).</div>
+      </div>
+    </div>
+  );
+}
+
+
+
+function OnboardingLinkButton({ funcId }) {
+  const [url, setUrl] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [copiado, setCopiado] = useState(false);
+  async function gerar() {
+    setLoading(true);
+    try { const r = await rh.funcionarios.onboardingLink(funcId); setUrl(r.url); }
+    catch (e) { alert(e.message || 'Erro ao gerar o link'); }
+    finally { setLoading(false); }
+  }
+  function copiar() {
+    if (!url) return;
+    navigator.clipboard?.writeText(url)
+      .then(() => { setCopiado(true); setTimeout(() => setCopiado(false), 1500); })
+      .catch(() => {});
+  }
+  const wa = url ? `https://wa.me/?text=${encodeURIComponent('Oi! Preenche teus dados pra completar o cadastro no RH da CBRio: ' + url)}` : null;
+  return (
+    <div style={{ marginTop: 12 }}>
+      {!url ? (
+        <Button variant="outline" size="sm" onClick={gerar} disabled={loading}>
+          {loading ? 'Gerando…' : '📋 Gerar link do formulário (enviar ao colaborador)'}
+        </Button>
+      ) : (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+          <div style={{ fontSize: 12, color: C.text2, wordBreak: 'break-all', background: 'var(--cbrio-card)', border: `1px solid ${C.border}`, borderRadius: 8, padding: '6px 10px' }}>{url}</div>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            <Button size="sm" variant="outline" onClick={copiar}>{copiado ? 'Copiado!' : 'Copiar link'}</Button>
+            {wa && <a href={wa} target="_blank" rel="noopener noreferrer"><Button size="sm">Enviar no WhatsApp</Button></a>}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+
+function tempoDeCasa(dateStr) {
+  if (!dateStr) return null;
+  const ini = new Date(dateStr);
+  if (isNaN(ini.getTime())) return null;
+  const now = new Date();
+  let meses = (now.getFullYear() - ini.getFullYear()) * 12 + (now.getMonth() - ini.getMonth());
+  if (now.getDate() < ini.getDate()) meses -= 1;
+  if (meses < 0) meses = 0;
+  const anos = Math.floor(meses / 12);
+  const m = meses % 12;
+  if (anos === 0) return `${m} ${m === 1 ? 'mês' : 'meses'}`;
+  if (m === 0) return `${anos} ${anos === 1 ? 'ano' : 'anos'}`;
+  return `${anos}a ${m}m`;
+}
+
+
+function HeroStat({ icon: Icon, label, value }) {
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 8, background: 'var(--cbrio-card)', border: `1px solid ${C.border}`, borderRadius: 10, padding: '8px 12px', minWidth: 0 }}>
+      <Icon style={{ width: 16, height: 16, color: C.primary, flexShrink: 0 }} />
+      <div style={{ minWidth: 0 }}>
+        <div style={{ fontSize: 10, color: C.text3, textTransform: 'uppercase', letterSpacing: 0.4, fontWeight: 700 }}>{label}</div>
+        <div style={{ fontSize: 13, fontWeight: 700, color: C.text, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{value || '—'}</div>
+      </div>
+    </div>
+  );
+}
+
+
+function SecaoHeader({ icon: Icon, title, count, extra }) {
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
+      <div style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+        <Icon style={{ width: 15, height: 15, color: C.primary }} />
+        <span style={{ fontSize: 13, fontWeight: 700, color: C.text }}>{title}</span>
+        {count != null && <span style={{ fontSize: 11, fontWeight: 700, color: C.text3, background: 'var(--cbrio-input-bg)', borderRadius: 999, padding: '1px 8px' }}>{count}</span>}
+      </div>
+      {extra}
+    </div>
+  );
+}
+
+
+
+function PagamentosSection({ funcId }) {
+  const [dados, setDados] = useState(null);
+  const [estado, setEstado] = useState('loading');
+  useEffect(() => {
+    let vivo = true;
+    setEstado('loading');
+    rh.funcionarios.pagamentos(funcId)
+      .then(d => { if (vivo) { setDados(d); setEstado('pronto'); } })
+      .catch(() => { if (vivo) setEstado('erro'); });
+    return () => { vivo = false; };
+  }, [funcId]);
+
+  const MESES = ['Jan', 'Fev', 'Mar', 'Abr', 'Mai', 'Jun', 'Jul', 'Ago', 'Set', 'Out', 'Nov', 'Dez'];
+  const mesLabel = (m) => {
+    if (!m || m === 'sem-data') return 'Sem competência';
+    const [y, mm] = m.split('-');
+    return `${MESES[parseInt(mm, 10) - 1] || mm}/${y}`;
+  };
+  const statusInfo = (s) => {
+    if (['conciliado', 'pago', 'quitado'].includes(s)) return { label: 'Pago', c: C.green, bg: `${C.green}20` };
+    if (['pendente', 'a_pagar', 'previsto', 'agendado'].includes(s)) return { label: 'Pendente', c: C.amber, bg: `${C.amber}20` };
+    return { label: s || '—', c: C.text2, bg: 'var(--cbrio-input-bg)' };
+  };
+
+  return (
+    <div>
+      <SecaoHeader icon={Wallet} title="Folha / Pagamentos" count={estado === 'pronto' ? dados.meses.length : undefined} />
+      {estado === 'pronto' && dados.nao_pago_mes_corrente && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, background: `${C.amber}18`, border: `1px solid ${C.amber}55`, borderRadius: 10, padding: '10px 14px', marginBottom: 10 }}>
+          <span style={{ fontSize: 15 }}>⚠️</span>
+          <span style={{ fontSize: 12.5, color: C.text, fontWeight: 600 }}>
+            Ainda não recebeu em {mesLabel(dados.mes_corrente)} — nenhum pagamento atribuído no financeiro neste mês.
+          </span>
+        </div>
+      )}
+      {estado === 'pronto' && dados.salario_previsto > 0 && (
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: C.primaryBg, borderRadius: 10, padding: '10px 14px', marginBottom: 10 }}>
+          <span style={{ fontSize: 12, color: C.text2, fontWeight: 600 }}>Salário previsto (mensal)</span>
+          <span style={{ fontSize: 15, fontWeight: 800, color: C.primary }}>{fmtMoney(dados.salario_previsto)}</span>
+        </div>
+      )}
+      <div style={{ fontSize: 11, color: C.text3, marginBottom: 12, lineHeight: 1.5, background: 'var(--cbrio-input-bg)', borderRadius: 8, padding: '8px 12px' }}>
+        Confirmados = lançamentos vinculados a este colaborador no financeiro. <b>Sugeridos</b> = casaram por nome, CPF, CNPJ ou razão social mas ainda não confirmados (vincule na aba Folha → Conciliação). Pagamentos via cartão/PJ+ sem nenhum identificador só aparecem após vínculo manual.
+      </div>
+      {estado === 'loading' && <div style={{ fontSize: 13, color: C.text2 }}>Carregando pagamentos…</div>}
+      {estado === 'erro' && <div style={{ fontSize: 13, color: C.red }}>Erro ao carregar pagamentos.</div>}
+      {estado === 'pronto' && dados.meses.length === 0 && (
+        <div style={{ fontSize: 13, color: C.text2, background: 'var(--cbrio-input-bg)', borderRadius: 10, padding: 16 }}>
+          Nenhum pagamento encontrado no financeiro com o nome deste colaborador.
+        </div>
+      )}
+      {estado === 'pronto' && dados.meses.map(mes => (
+        <div key={mes.mes} style={{ marginBottom: 10, border: `1px solid ${C.border}`, borderRadius: 10, overflow: 'hidden' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 14px', background: 'var(--cbrio-input-bg)' }}>
+            <span style={{ fontSize: 13, fontWeight: 700, color: C.text }}>{mesLabel(mes.mes)}</span>
+            <span style={{ fontSize: 14, fontWeight: 800, color: C.text }}>{fmtMoney(mes.total)}</span>
+          </div>
+          <div>
+            {mes.itens.map(it => {
+              const si = statusInfo(it.status);
+              return (
+                <div key={it.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, padding: '8px 14px', borderTop: `1px solid ${C.border}` }}>
+                  <div style={{ minWidth: 0 }}>
+                    <div style={{ fontSize: 12, color: C.text, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{it.descricao || it.plano_nome || '—'}</div>
+                    <div style={{ fontSize: 11, color: C.text3 }}>{fmtDate(it.data_pagamento || it.data_competencia)}{it.plano_codigo ? ` · ${it.plano_codigo}` : ''}</div>
+                  </div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
+                    {!it.confirmado && <span style={{ fontSize: 10, fontWeight: 700, color: C.amber, background: `${C.amber}20`, borderRadius: 999, padding: '2px 8px' }}>sugerido</span>}
+                    <span style={{ fontSize: 10, fontWeight: 700, color: si.c, background: si.bg, borderRadius: 999, padding: '2px 8px' }}>{si.label}</span>
+                    <span style={{ fontSize: 13, fontWeight: 700, color: C.text }}>{fmtMoney(it.valor)}</span>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function FuncionarioDetailPanel({ open, data, onClose, funcs = [], podeRemun = true, onEdit, onDelete, onReativar, onEditAdmissao, onContratoAdmissao, onConcluirAdmissao, onNewDoc, onDeleteDoc, onSaveInline, onChanged, onPhotoUpdated }) {
+  const [showPerms, setShowPerms] = useState(false);
+  const [permData, setPermData] = useState(null);
+  const [estrutura, setEstrutura] = useState(null);
+  const [saving, setSaving] = useState(false);
+  const [salvo, setSalvo] = useState(false);
+  const [permError, setPermError] = useState('');
+  const [permSuccess, setPermSuccess] = useState('');
+  const [editMode, setEditMode] = useState(false);
+  const [editForm, setEditForm] = useState({});
+  const [savingInline, setSavingInline] = useState(false);
+  const [aba, setAba] = useState('geral');
+  const [uploadingFoto, setUploadingFoto] = useState(false);
+  const fotoInputRef = useRef(null);
+
+  async function handleFotoChange(e) {
+    const file = e.target.files?.[0];
+    if (!file || !data?.id) return;
+    if (!file.type.startsWith('image/')) { alert('Selecione uma imagem'); return; }
+    if (file.size > 10 * 1024 * 1024) { alert('Imagem precisa ter no máximo 10 MB'); return; }
+    setUploadingFoto(true);
+    try {
+      const result = await rh.funcionarios.uploadFoto(data.id, file);
+      onPhotoUpdated?.(result.foto_url);
+    } catch (err) {
+      alert(err.message || 'Erro ao enviar foto');
+    } finally {
+      setUploadingFoto(false);
+      if (fotoInputRef.current) fotoInputRef.current.value = '';
+    }
+  }
+
+
+  const [localCargo, setLocalCargo] = useState(null);
+  const [localAreas, setLocalAreas] = useState([]);
+  const [localModulos, setLocalModulos] = useState({});
+  const [permDirty, setPermDirty] = useState(false);
+
+  useEffect(() => { if (data && open) { setShowPerms(false); setPermData(null); setPermDirty(false); setPermError(''); setPermSuccess(''); setAba('geral'); setEditMode(false); } }, [data, open]);
+
+  function initLocalPerms(perms, estru) {
+    setLocalCargo(perms.usuario?.cargo_id ?? 2);
+    setLocalAreas((perms.areas || []).map(a => a.area_id));
+    const mods = {};
+    (estru.modulos || []).forEach(mod => {
+      const override = (perms.overrides || []).find(o => o.modulo_id === mod.id);
+      const cargoDefault = perms.usuario?.cargos || {};
+      mods[mod.id] = {
+        leitura: override?.nivel_leitura ?? cargoDefault.nivel_padrao_leitura ?? 1,
+        escrita: override?.nivel_escrita ?? cargoDefault.nivel_padrao_escrita ?? 1,
+      };
+    });
+    setLocalModulos(mods);
+    setPermDirty(false);
+  }
+
+  async function loadPermissions() {
+    let estru = estrutura;
+    if (!estru) {
+      try { estru = await permissoes.estrutura(); setEstrutura(estru); } catch (e) { console.error(e); return; }
+    }
+
+
+
+
+    if (!data.email) {
+      setPermError('Este colaborador não tem e-mail cadastrado. O acesso ao sistema (login, permissões e aprovações) é vinculado ao e-mail — cadastre um e-mail em “Editar colaborador” antes de configurar permissões.');
+      setPermSuccess('');
+      setShowPerms(false);
+      return;
+    }
+    setPermError('');
+    try {
+      let permUser = await permissoes.usuarioPorEmail(data.email);
+      if (!permUser) {
+        const result = await permissoes.criarUsuario({ nome: data.nome, email: data.email, cargo_id: 2 });
+        permUser = { id: result.id };
+      }
+      const perms = await permissoes.usuario(permUser.id);
+      setPermData(perms);
+      initLocalPerms(perms, estru);
+      setShowPerms(true);
+    } catch (e) { console.error(e); setPermError(e.message || 'Falha ao carregar as permissões.'); }
+  }
+
+  function handleCargoChange(cargoId) {
+    setLocalCargo(cargoId);
+    setPermDirty(true);
+  }
+
+  function handleAreaToggle(areaId) {
+    setLocalAreas(prev => prev.includes(areaId) ? prev.filter(id => id !== areaId) : [...prev, areaId]);
+    setPermDirty(true);
+  }
+
+  function handleModuloChange(moduloId, tipo, nivel) {
+    setLocalModulos(prev => ({
+      ...prev,
+      [moduloId]: { ...prev[moduloId], [tipo]: nivel },
+    }));
+    setPermDirty(true);
+  }
+
+  async function savePermissions() {
+    if (!permData?.usuario) {
+      setPermError('Permissões ainda não carregadas. Feche e abra o painel novamente.');
+      return;
+    }
+    setSaving(true);
+    setPermError('');
+    setPermSuccess('');
+    try {
+
+      if (localCargo !== permData.usuario.cargo_id) {
+        await permissoes.setCargo(permData.usuario.id, localCargo);
+      }
+
+      const currentAreaIds = (permData.areas || []).map(a => a.area_id).sort().join(',');
+      const newAreaIds = [...localAreas].sort().join(',');
+      if (currentAreaIds !== newAreaIds) {
+        await permissoes.setAreas(permData.usuario.id, localAreas);
+      }
+
+
+      const cargoDefault = permData.usuario.cargos || {};
+      const mudancas = Object.entries(localModulos).filter(([modId, levels]) => {
+        const existing = (permData.overrides || []).find(o => o.modulo_id === parseInt(modId));
+        const prevLeitura = existing?.nivel_leitura ?? cargoDefault.nivel_padrao_leitura ?? 1;
+        const prevEscrita = existing?.nivel_escrita ?? cargoDefault.nivel_padrao_escrita ?? 1;
+        return levels.leitura !== prevLeitura || levels.escrita !== prevEscrita;
+      });
+      await Promise.all(mudancas.map(([modId, levels]) => permissoes.setModulo(permData.usuario.id, {
+        modulo_id: parseInt(modId),
+        nivel_leitura: levels.leitura,
+        nivel_escrita: levels.escrita,
+      })));
+
+
+
+      setSaving(false);
+      setSalvo(true);
+      setTimeout(() => setSalvo(false), 2500);
+      setPermSuccess('Permissões salvas com sucesso!');
+      setTimeout(() => setPermSuccess(''), 3000);
+      sonnerToast.success('Permissões salvas ✓');
+
+
+
+      permissoes.usuario(permData.usuario.id)
+        .then((perms) => { setPermData(perms); initLocalPerms(perms, estrutura); })
+        .catch(() => {                                                       });
+      onChanged?.();
+    } catch (e) {
+      setPermError(e.message || 'Não foi possível salvar as permissões.');
+      sonnerToast.error('Não foi possível salvar as permissões.');
+      setSaving(false);
+    }
+  }
+
+  if (!data || !open) return null;
+
+
+
+
+
+
+  const fichaPj = data.ficha_estado || { aplicavel: false, preenchida: false, completa: false, aceita: false, faltando: [] };
+  const fc = data.ficha_contratada || {};
+  return (
+    <div style={{ position: 'fixed', inset: 0, zIndex: 1000, display: 'flex' }}>
+      {             }
+      <div style={{ flex: 1, background: 'rgba(0,0,0,0.5)' }} onClick={onClose} />
+      {           }
+      <div style={{ width: '55%', minWidth: 500, maxWidth: 800, background: 'var(--cbrio-modal-bg)', overflowY: 'auto', boxShadow: '-8px 0 30px rgba(0,0,0,0.3)', animation: 'slideInRight 0.25s ease-out' }}>
+        {            }
+        <div style={{ position: 'sticky', top: 0, zIndex: 10, background: 'var(--cbrio-modal-bg)', padding: '20px 28px 16px', borderBottom: `1px solid ${C.border}`, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <div style={{ fontSize: 12, fontWeight: 700, color: C.text3, textTransform: 'uppercase', letterSpacing: 0.6 }}>{editMode ? 'Editando colaborador' : 'Perfil do colaborador'}</div>
+          <div style={{ display: 'flex', gap: 8 }}>
+            {editMode ? (
+              <>
+                <Button variant="ghost" size="sm" onClick={() => setEditMode(false)}>Cancelar</Button>
+                <Button size="sm" className="gap-1.5" disabled={savingInline} onClick={async () => {
+                  setSavingInline(true);
+                  try {
+                    await onSaveInline(editForm);
+                    setEditMode(false);
+                  } catch {}
+                  setSavingInline(false);
+                }}>
+                  <Save className="h-3.5 w-3.5" />{savingInline ? 'Salvando...' : 'Salvar Alterações'}
+                </Button>
+              </>
+            ) : (
+              <Button variant="outline" size="sm" className="gap-1.5" onClick={() => {
+                setEditForm({ nome: data.nome, cargo: data.cargo, cargo_visivel: data.cargo_visivel || '', matricula: data.matricula || '', area: data.area || '', email: data.email || '', telefone: data.telefone || '', cpf: data.cpf || '', tipo_contrato: data.tipo_contrato, status: data.status, data_admissao: data.data_admissao || '', data_nascimento: data.data_nascimento || '', salario: data.salario || '', gestor_id: data.gestor_id || '', cep: data.cep || '', endereco: data.endereco || '', numero: data.numero || '', complemento: data.complemento || '', bairro: data.bairro || '', cidade: data.cidade || '', uf: data.uf || '' });
+                setAba('geral');
+                setEditMode(true);
+              }}><Pencil className="h-3.5 w-3.5" />Editar</Button>
+            )}
+            <Button variant="ghost" size="icon" onClick={onClose}><X className="h-4 w-4" /></Button>
+          </div>
+        </div>
+        <div style={{ padding: '24px 28px' }}>
+      {
+
+
+
+
+
+
+                            }
+      {!editMode && fichaPj.aplicavel && (
+        <div style={{ marginBottom: 20, padding: 16, borderRadius: 12, border: `1px solid ${fichaPj.completa ? C.primary + '40' : C.amber + '40'}`, background: (fichaPj.completa ? C.primary : C.amber) + '0d' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+            <div style={{ fontSize: 13, fontWeight: 700, color: fichaPj.completa ? C.primary : C.amber, textTransform: 'uppercase', letterSpacing: 0.5 }}>
+              🏢 Ficha da contratada
+            </div>
+            {
+                                                                                }
+            <span style={{ fontSize: 11, fontWeight: 600, color: fichaPj.completa ? C.primary : C.amber }}>
+              {!fichaPj.preenchida ? 'não enviada' : (fichaPj.completa ? (fichaPj.aceita ? 'completa e assinada' : 'completa') : 'incompleta')}
+            </span>
+          </div>
+
+          {!fichaPj.preenchida && (
+            <div style={{ fontSize: 12, color: C.text2, marginTop: 6 }}>
+              O prestador ainda não enviou os dados da empresa. Sem eles, o pagamento não deve ser liberado.
+            </div>
+          )}
+
+          {fichaPj.preenchida && (
+            <div style={{ fontSize: 12, color: C.text2, marginTop: 10, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 4 }}>
+              {fc.razao_social && <div style={{ gridColumn: '1 / -1' }}>Razão social: <b style={{ color: C.text }}>{fc.razao_social}</b></div>}
+              {fc.cnpj && <div>CNPJ: <b style={{ color: C.text }}>{fc.cnpj}</b></div>}
+              {fc.regime_tributario && <div>Regime: <b style={{ color: C.text }}>{fc.regime_tributario}</b></div>}
+              {fc.endereco_sede && <div style={{ gridColumn: '1 / -1' }}>Sede: <b style={{ color: C.text }}>{fc.endereco_sede}</b></div>}
+              {fc.rep_nome && <div style={{ gridColumn: '1 / -1' }}>Representante: <b style={{ color: C.text }}>{fc.rep_nome}</b></div>}
+              {fc.email_contratual && <div style={{ gridColumn: '1 / -1' }}>E-mail contratual: <b style={{ color: C.text }}>{fc.email_contratual}</b></div>}
+              {
+
+                                                   }
+              {fc.pix_chave && <div style={{ gridColumn: '1 / -1' }}>PIX ({fc.pix_tipo}): <b style={{ color: C.text }}>{fc.pix_chave}</b></div>}
+              {fc.banco && <div>Banco: <b style={{ color: C.text }}>{fc.banco}</b>{fc.agencia ? ` · Ag ${fc.agencia}` : ''}{fc.conta ? ` · CC ${fc.conta}` : ''}</div>}
+              {fc.conta_titular && <div style={{ gridColumn: '1 / -1' }}>Titular: <b style={{ color: C.text }}>{fc.conta_titular}</b>{fc.titular_confere === false ? ' ⚠️ diferente da contratada' : ''}</div>}
+              {
+                                                                              }
+              {fc.titular_confere === false && fc.titular_motivo && (
+                <div style={{ gridColumn: '1 / -1', color: C.amber }}>Motivo: {fc.titular_motivo}</div>
+              )}
+            </div>
+          )}
+
+          {fichaPj.preenchida && !fichaPj.completa && (
+            <div style={{ fontSize: 12, color: C.amber, marginTop: 8 }}>
+              Falta preencher: {fichaPj.faltando.join(', ')}.
+            </div>
+          )}
+
+          {fichaPj.aceita && fc.aceite_em && (
+            <div style={{ fontSize: 11, color: C.text3, marginTop: 8 }}>
+              Declaração aceita em {fmtDate(String(fc.aceite_em).slice(0, 10))}
+              {fc.aceite_nome_digitado ? ` por ${fc.aceite_nome_digitado}` : ''}.
+            </div>
+          )}
+        </div>
+      )}
+
+      {                                                                               }
+      {data.status === 'em_admissao' && !editMode && (
+        <div style={{ marginBottom: 20, padding: 16, borderRadius: 12, border: '1px solid #8b5cf640', background: '#8b5cf60d' }}>
+          <div style={{ fontSize: 13, fontWeight: 700, color: '#8b5cf6', textTransform: 'uppercase', letterSpacing: 0.5 }}>📋 Em admissão</div>
+          <div style={{ fontSize: 12, color: C.text2, marginTop: 2 }}>Onboarding em andamento · conclua o processo para ativar o colaborador.</div>
+          {data.admissao_dados && (data.admissao_dados.rg || data.admissao_dados.pj_cnpj || data.admissao_dados.pj_razao_social || data.admissao_dados.endereco) && (
+            <div style={{ fontSize: 12, color: C.text2, marginTop: 10, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 4 }}>
+              {data.admissao_dados.rg && <div>RG: <b style={{ color: C.text }}>{data.admissao_dados.rg}</b></div>}
+              {data.admissao_dados.pj_cnpj && <div>CNPJ: <b style={{ color: C.text }}>{data.admissao_dados.pj_cnpj}</b></div>}
+              {data.admissao_dados.pj_razao_social && <div style={{ gridColumn: '1 / -1' }}>Razão social: <b style={{ color: C.text }}>{data.admissao_dados.pj_razao_social}</b></div>}
+              {data.admissao_dados.endereco && <div style={{ gridColumn: '1 / -1' }}>Endereço: <b style={{ color: C.text }}>{data.admissao_dados.endereco}</b></div>}
+            </div>
+          )}
+          <div style={{ display: 'flex', gap: 8, marginTop: 12, flexWrap: 'wrap' }}>
+            {onEditAdmissao && <Button variant="outline" size="sm" onClick={() => onEditAdmissao(data)}><Pencil className="h-3.5 w-3.5" /> Editar dados</Button>}
+            {
+
+
+
+
+
+
+                                                                                                      }
+            {podeRemun && onContratoAdmissao && <Button variant="outline" size="sm" onClick={() => onContratoAdmissao(data)}>{data.admissao_dados?.contrato_editado ? 'Ver/editar contrato' : 'Gerar contrato'}</Button>}
+            {podeRemun && onConcluirAdmissao && <Button size="sm" onClick={() => onConcluirAdmissao(data.id)}>✓ Concluir admissão</Button>}
+          </div>
+        </div>
+      )}
+      {                                }
+      <div style={{ display: 'flex', alignItems: 'center', gap: 16, padding: 16, borderRadius: 14, border: `1px solid ${C.border}`, background: `linear-gradient(135deg, ${C.primaryBg} 0%, transparent 70%)`, marginBottom: 14 }}>
+        <div style={{ position: 'relative', flexShrink: 0 }}>
+          {data.foto_url ? (
+            <img data-foto-avatar="" src={data.foto_url} alt="" style={{ width: 80, height: 80, borderRadius: '50%', objectFit: 'cover', border: `3px solid ${C.primary}` }} />
+          ) : (
+            <div style={{ width: 80, height: 80, borderRadius: '50%', background: C.primaryBg, color: C.primary, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 30, fontWeight: 700 }}>
+              {(data.nome || '?')[0].toUpperCase()}
+            </div>
+          )}
+          <button
+            type="button"
+            onClick={() => fotoInputRef.current?.click()}
+            disabled={uploadingFoto}
+            title="Trocar foto"
+            style={{ position: 'absolute', bottom: -2, right: -2, width: 28, height: 28, borderRadius: '50%', background: C.primary, color: '#fff', border: '2px solid var(--cbrio-card)', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: uploadingFoto ? 'wait' : 'pointer', opacity: uploadingFoto ? 0.6 : 1 }}
+          >
+            <Camera className="h-3.5 w-3.5" />
+          </button>
+          <input ref={fotoInputRef} type="file" accept="image/*" onChange={handleFotoChange} style={{ display: 'none' }} />
+        </div>
+        <div style={{ minWidth: 0, flex: 1 }}>
+          <div style={{ fontSize: 20, fontWeight: 800, color: C.text, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{data.nome}</div>
+          <div style={{ fontSize: 14, color: C.text2, marginTop: 2, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{data.cargo_visivel || data.cargo}{data.area ? ` · ${data.area}` : ''}</div>
+          {data.matricula ? <div style={{ fontSize: 11, color: C.text3, marginTop: 2 }}>Matrícula: {data.matricula}</div> : null}
+          <div style={{ marginTop: 8 }}><Badge status={data.status} map={STATUS_COLORS} /></div>
+          {uploadingFoto ? <div style={{ fontSize: 11, color: C.text2, marginTop: 4 }}>Enviando foto...</div> : null}
+        </div>
+      </div>
+
+      {                           }
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 8, marginBottom: 20 }}>
+        <HeroStat icon={Clock} label="Tempo de casa" value={tempoDeCasa(data.data_admissao)} />
+        <HeroStat icon={Briefcase} label="Contrato" value={TIPO_CONTRATO[data.tipo_contrato]} />
+        <HeroStat icon={CalendarDays} label="Admissão" value={fmtDate(data.data_admissao)} />
+        <HeroStat icon={Users} label="Gestor" value={funcs.find(f => f.id === data.gestor_id)?.nome || 'Sem gestor'} />
+      </div>
+
+      {          }
+      <Tabs value={aba} onValueChange={setAba}>
+        <TabsList className="w-full justify-start flex-wrap h-auto gap-1">
+          <TabsTrigger value="geral">Geral</TabsTrigger>
+          <TabsTrigger value="docs">Documentos</TabsTrigger>
+          <TabsTrigger value="dev">Férias &amp; treinos</TabsTrigger>
+          {podeRemun && <TabsTrigger value="pag">Pagamentos</TabsTrigger>}
+          <TabsTrigger value="perm">Permissões</TabsTrigger>
+        </TabsList>
+
+        <TabsContent value="geral" className="mt-4">
+      {editMode ? (
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px 16px', marginBottom: 20, background: 'var(--cbrio-input-bg)', borderRadius: 10, padding: 16 }}>
+          {[
+            { key: 'nome', label: 'Nome *', full: true },
+            { key: 'cargo', label: 'Cargo *' },
+            { key: 'cargo_visivel', label: 'Cargo visível (como é chamado no dia a dia)' },
+            { key: 'matricula', label: 'Matrícula' },
+            { key: 'area', label: 'Área' },
+            { key: 'email', label: 'Email', type: 'email' },
+            { key: 'telefone', label: 'Telefone' },
+            { key: 'cpf', label: 'CPF' },
+            { key: 'data_admissao', label: 'Admissão', type: 'date' },
+            { key: 'data_nascimento', label: 'Nascimento', type: 'date' },
+            { key: 'salario', label: 'Salário (R$)', type: 'number' },
+          ].filter(f => podeRemun || !['cpf', 'salario'].includes(f.key)).map(f => (
+            <div key={f.key} style={f.full ? { gridColumn: '1 / -1' } : undefined}>
+              <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-1 block">{f.label}</label>
+              <input className="flex h-9 w-full rounded-lg border border-input bg-background px-3 py-2 text-sm shadow-sm shadow-black/5 placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" type={f.type || 'text'} value={editForm[f.key] || ''} onChange={e => setEditForm(p => ({ ...p, [f.key]: e.target.value }))} />
+            </div>
+          ))}
+          <div>
+            <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-1 block">Contrato</label>
+            <ShadSelect value={editForm.tipo_contrato || 'CLT'} onValueChange={v => setEditForm(p => ({ ...p, tipo_contrato: v }))}>
+              <SelectTrigger className="w-full">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent className="z-[1100]">
+                {OPCOES_CONTRATO.map(k => <SelectItem key={k} value={k}>{TIPO_CONTRATO[k] || k}</SelectItem>)}
+              </SelectContent>
+            </ShadSelect>
+          </div>
+          <div>
+            <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-1 block">Status</label>
+            <ShadSelect value={editForm.status || 'ativo'} onValueChange={v => setEditForm(p => ({ ...p, status: v }))}>
+              <SelectTrigger className="w-full">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent className="z-[1100]">
+                {Object.entries(STATUS_COLORS).map(([k, v]) => <SelectItem key={k} value={k}>{v.label}</SelectItem>)}
+              </SelectContent>
+            </ShadSelect>
+          </div>
+          <div style={{ gridColumn: '1 / -1', marginTop: 8 }}>
+            <span className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">Endereço</span>
+          </div>
+          <div>
+            <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-1 block">CEP</label>
+            <input
+              className="flex h-9 w-full rounded-lg border border-input bg-background px-3 py-2 text-sm shadow-sm shadow-black/5 placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              value={editForm.cep || ''}
+              onChange={async (e) => {
+                const masked = mascaraCep(e.target.value);
+                setEditForm(p => ({ ...p, cep: masked }));
+                if (cepCompleto(masked)) {
+                  const dados = await buscarCep(masked);
+                  if (dados) {
+                    setEditForm(p => ({
+                      ...p,
+                      endereco: dados.endereco || p.endereco,
+                      bairro: dados.bairro || p.bairro,
+                      cidade: dados.cidade || p.cidade,
+                      uf: dados.uf || p.uf,
+                    }));
+                  }
+                }
+              }}
+              placeholder="00000-000"
+            />
+          </div>
+          <div>
+            <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-1 block">Número</label>
+            <input className="flex h-9 w-full rounded-lg border border-input bg-background px-3 py-2 text-sm shadow-sm shadow-black/5 placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" value={editForm.numero || ''} onChange={e => setEditForm(p => ({ ...p, numero: e.target.value }))} />
+          </div>
+          <div style={{ gridColumn: '1 / -1' }}>
+            <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-1 block">Logradouro</label>
+            <input className="flex h-9 w-full rounded-lg border border-input bg-background px-3 py-2 text-sm shadow-sm shadow-black/5 placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" value={editForm.endereco || ''} onChange={e => setEditForm(p => ({ ...p, endereco: e.target.value }))} />
+          </div>
+          <div>
+            <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-1 block">Complemento</label>
+            <input className="flex h-9 w-full rounded-lg border border-input bg-background px-3 py-2 text-sm shadow-sm shadow-black/5 placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" value={editForm.complemento || ''} onChange={e => setEditForm(p => ({ ...p, complemento: e.target.value }))} />
+          </div>
+          <div>
+            <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-1 block">Bairro</label>
+            {
+
+
+                                                      }
+            <SeletorBairro
+              value={editForm.bairro || ''}
+              onChange={(v) => setEditForm(p => ({ ...p, bairro: v }))}
+              placeholder="Digite ou escolha"
+              className="flex h-9 w-full rounded-lg border border-input bg-background px-3 py-2 text-sm shadow-sm shadow-black/5 placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            />
+          </div>
+          <div>
+            <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-1 block">Cidade</label>
+            <input className="flex h-9 w-full rounded-lg border border-input bg-background px-3 py-2 text-sm shadow-sm shadow-black/5 placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" value={editForm.cidade || ''} onChange={e => setEditForm(p => ({ ...p, cidade: e.target.value }))} />
+          </div>
+          <div>
+            <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-1 block">UF</label>
+            <input className="flex h-9 w-full rounded-lg border border-input bg-background px-3 py-2 text-sm shadow-sm shadow-black/5 placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" maxLength={2} value={editForm.uf || ''} onChange={e => setEditForm(p => ({ ...p, uf: e.target.value.toUpperCase() }))} />
+          </div>
+        </div>
+      ) : (
+        <div style={{ background: 'var(--cbrio-input-bg)', borderRadius: 12, padding: 16, marginBottom: 20 }}>
+          <SecaoHeader icon={Mail} title="Contato & contratação" />
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px 16px' }}>
+            <div><div style={{ fontSize: 11, color: C.text3, textTransform: 'uppercase', letterSpacing: 0.4, fontWeight: 700 }}>Email</div><div style={{ fontSize: 14, color: C.text, marginTop: 1 }}>{data.email || '—'}</div></div>
+            <div><div style={{ fontSize: 11, color: C.text3, textTransform: 'uppercase', letterSpacing: 0.4, fontWeight: 700 }}>Telefone</div><div style={{ fontSize: 14, color: C.text, marginTop: 1 }}>{data.telefone ? mascaraTelefone(data.telefone) : '—'}</div></div>
+            <div><div style={{ fontSize: 11, color: C.text3, textTransform: 'uppercase', letterSpacing: 0.4, fontWeight: 700 }}>CPF</div><div style={{ fontSize: 14, color: C.text, marginTop: 1 }}>{podeRemun ? (data.cpf || '—') : '•••'}</div></div>
+            <div><div style={{ fontSize: 11, color: C.text3, textTransform: 'uppercase', letterSpacing: 0.4, fontWeight: 700 }}>Salário</div><div style={{ fontSize: 14, color: C.text, marginTop: 1, fontWeight: 600 }}>{podeRemun ? fmtMoney(data.salario) : '•••'}</div></div>
+          </div>
+        </div>
+      )}
+
+      {                                                                                      }
+      <div style={{ marginBottom: 20, background: 'var(--cbrio-input-bg)', borderRadius: 10, padding: 16 }}>
+        <span style={{ fontSize: 12, fontWeight: 700, color: C.text2, textTransform: 'uppercase', letterSpacing: 0.5 }}>Dados pessoais</span>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px 16px', marginTop: 10 }}>
+          <div><span style={{ fontSize: 11, color: C.text2 }}>Nascimento:</span><div style={{ fontSize: 14 }}>{data.data_nascimento ? fmtDate(data.data_nascimento) : '—'}</div></div>
+          <div style={{ gridColumn: '1 / -1' }}>
+            <span style={{ fontSize: 11, color: C.text2 }}>Endereço:</span>
+            <div style={{ fontSize: 14, whiteSpace: 'pre-wrap' }}>
+              {data.endereco
+                ? `${data.endereco}${data.numero ? `, ${data.numero}` : ''}${data.complemento ? ` - ${data.complemento}` : ''}${data.bairro ? ` · ${data.bairro}` : ''}${data.cidade ? ` · ${data.cidade}${data.uf ? `/${data.uf}` : ''}` : ''}${data.cep ? ` · CEP ${data.cep}` : ''}`
+                : '—'}
+            </div>
+          </div>
+          <div style={{ gridColumn: '1 / -1' }}>
+            <span style={{ fontSize: 11, color: C.text2 }}>Filhos:</span>
+            {Array.isArray(data.filhos) && data.filhos.length > 0 ? (
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 4 }}>
+                {data.filhos.map((f, i) => (
+                  <span key={i} style={{ fontSize: 12, background: 'var(--cbrio-card)', border: `1px solid ${C.border}`, borderRadius: 999, padding: '2px 10px' }}>
+                    {f.nome || 'Filho(a)'}{f.idade != null ? ` · ${f.idade} ano${f.idade === 1 ? '' : 's'}` : ''}
+                  </span>
+                ))}
+              </div>
+            ) : <div style={{ fontSize: 14 }}>—</div>}
+          </div>
+        </div>
+        <p style={{ fontSize: 11, color: C.text3, marginTop: 8 }}>O colaborador mantém estes dados pelo app (Meus dados) — atualiza aqui automaticamente.</p>
+        <OnboardingLinkButton funcId={data.id} />
+      </div>
+
+      {                                               }
+      <HierarquiaSection data={data} funcs={funcs} onChanged={onChanged} />
+
+      {                         }
+      <NotasColaborador funcId={data.id} initialValue={data.observacoes || ''} />
+
+      {                                                                 }
+      {podeRemun && <BeneficiosSection data={data} onSave={async (updated) => {
+        try { await rh.funcionarios.update(data.id, updated); onClose(); } catch (e) { console.error(e); }
+      }} />}
+        </TabsContent>
+
+        <TabsContent value="docs" className="mt-4">
+      {                           }
+      <DocumentosSection data={data} onNewDoc={onNewDoc} onDeleteDoc={onDeleteDoc} onRefresh={() => onClose()} />
+        </TabsContent>
+
+        <TabsContent value="dev" className="mt-4">
+      {                  }
+      <div style={{ marginBottom: 16 }}>
+        <SecaoHeader icon={GraduationCap} title="Treinamentos" count={(data.treinamentos || []).length} />
+        {(data.treinamentos || []).map(t => (
+          <div key={t.id} style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0', borderBottom: `1px solid ${C.border}` }}>
+            <span style={{ fontSize: 13 }}>{t.rh_treinamentos?.titulo || '—'}</span>
+            <Badge status={t.status} map={{
+              inscrito: { c: C.blue, bg: C.blueBg, label: 'Inscrito' },
+              concluido: { c: C.green, bg: C.greenBg, label: 'Concluído' },
+              cancelado: { c: C.red, bg: C.redBg, label: 'Cancelado' },
+            }} />
+          </div>
+        ))}
+      </div>
+
+      {            }
+      <div style={{ marginBottom: 16 }}>
+        <SecaoHeader icon={Palmtree} title="Férias / Licenças" count={(data.ferias_licencas || []).length} />
+        {(data.ferias_licencas || []).map(f => (
+          <div key={f.id} style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0', borderBottom: `1px solid ${C.border}` }}>
+            <span style={{ fontSize: 13 }}>{TIPO_FERIAS[f.tipo]} • {fmtDate(f.data_inicio)} → {fmtDate(f.data_fim)}</span>
+            <Badge status={f.status} map={FERIAS_STATUS} />
+          </div>
+        ))}
+      </div>
+
+        </TabsContent>
+
+        {podeRemun && (
+        <TabsContent value="pag" className="mt-4">
+          <PagamentosSection funcId={data.id} />
+        </TabsContent>
+        )}
+
+        <TabsContent value="perm" className="mt-4">
+      {                }
+      <div style={{ marginBottom: 16 }}>
+        <SecaoHeader icon={ShieldCheck} title="Permissões do sistema" extra={!showPerms && <Button variant="outline" size="sm" onClick={loadPermissions}>Configurar</Button>} />
+
+        {permError && <div style={{ color: '#ef4444', background: '#ef444418', border: '1px solid #ef444450', borderRadius: 8, padding: '8px 12px', marginBottom: 10, fontSize: 12 }}>{permError}</div>}
+        {permSuccess && <div style={{ color: '#10b981', background: '#10b98118', border: '1px solid #10b98150', borderRadius: 8, padding: '8px 12px', marginBottom: 10, fontSize: 12 }}>{permSuccess}</div>}
+
+        {showPerms && permData && estrutura && (
+          <div style={{ background: 'var(--cbrio-input-bg)', borderRadius: 10, padding: 16 }}>
+            {                        }
+            <div style={{ marginBottom: 16 }}>
+              <label style={{ fontSize: 11, fontWeight: 600, color: C.text2, textTransform: 'uppercase', marginBottom: 6, display: 'block' }}>Nível de acesso base</label>
+              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                {(estrutura.cargos || []).map(c => (
+                  <button key={c.id} onClick={() => handleCargoChange(c.id)} disabled={saving}
+                    style={{
+                      padding: '6px 14px', borderRadius: 8, fontSize: 12, fontWeight: 600, cursor: 'pointer',
+                      border: `2px solid ${localCargo === c.id ? NIVEL_COLORS[c.nivel_padrao_leitura] : C.border}`,
+                      background: localCargo === c.id ? `${NIVEL_COLORS[c.nivel_padrao_leitura]}18` : 'transparent',
+                      color: localCargo === c.id ? NIVEL_COLORS[c.nivel_padrao_leitura] : C.text2,
+                    }}>
+                    {c.nome}
+                  </button>
+                ))}
+              </div>
+              {(() => {
+                const sug = sugerirCargoPermissao(data.cargo, estrutura.cargos || []);
+                if (!sug) return null;
+                const jaIgual = localCargo === sug.id;
+                return (
+                  <div style={{ marginTop: 8, fontSize: 11, color: C.text2 }}>
+                    Cargo no RH: <b style={{ color: C.text }}>{data.cargo || '—'}</b>{' · '}
+                    {jaIgual
+                      ? <span style={{ color: C.green }}>já corresponde a “{sug.nome_completo || sug.nome}”</span>
+                      : <>sugestão de cargo: <b style={{ color: C.text }}>{sug.nome_completo || sug.nome}</b>
+                          <button onClick={() => handleCargoChange(sug.id)} disabled={saving}
+                            style={{ marginLeft: 6, padding: '2px 8px', borderRadius: 6, fontSize: 11, fontWeight: 600, border: `1px solid ${C.primary}`, background: 'transparent', color: C.primary, cursor: 'pointer' }}>
+                            Aplicar sugestão
+                          </button>
+                          <span style={{ marginLeft: 6, color: C.text3 }}>(depois clique em “Salvar Permissões”)</span>
+                        </>}
+                  </div>
+                );
+              })()}
+            </div>
+
+            {                      }
+            <div style={{ marginBottom: 16 }}>
+              <label style={{ fontSize: 11, fontWeight: 600, color: C.text2, textTransform: 'uppercase', marginBottom: 6, display: 'block' }}>Áreas vinculadas</label>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 4 }}>
+                {(estrutura.areas || []).map(a => {
+                  const isLinked = localAreas.includes(a.id);
+                  return (
+                    <label key={a.id} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: C.text, cursor: 'pointer', padding: '3px 0' }}>
+                      <input type="checkbox" checked={isLinked} onChange={() => handleAreaToggle(a.id)} disabled={saving} />
+                      {a.nome} <span style={{ fontSize: 10, color: C.text3 }}>({a.setores?.nome})</span>
+                    </label>
+                  );
+                })}
+              </div>
+            </div>
+
+            {                           }
+            <div>
+              <label style={{ fontSize: 11, fontWeight: 600, color: C.text2, textTransform: 'uppercase', marginBottom: 8, display: 'block' }}>Permissões por módulo</label>
+              <div style={{ overflowX: 'auto' }}>
+                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+                  <thead>
+                    <tr>
+                      <th style={{ textAlign: 'left', padding: '6px 8px', color: C.text2, fontWeight: 600, borderBottom: `1px solid ${C.border}` }}>Módulo</th>
+                      <th style={{ textAlign: 'center', padding: '6px 8px', color: C.text2, fontWeight: 600, borderBottom: `1px solid ${C.border}` }}>Leitura</th>
+                      <th style={{ textAlign: 'center', padding: '6px 8px', color: C.text2, fontWeight: 600, borderBottom: `1px solid ${C.border}` }}>Escrita</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(estrutura.modulos || []).map(mod => {
+                      const levels = localModulos[mod.id] || { leitura: 1, escrita: 1 };
+                      const cargoDefault = permData.usuario?.cargos || {};
+                      const origOverride = (permData.overrides || []).find(o => o.modulo_id === mod.id);
+                      const origLeitura = origOverride?.nivel_leitura ?? cargoDefault.nivel_padrao_leitura ?? 1;
+                      const origEscrita = origOverride?.nivel_escrita ?? cargoDefault.nivel_padrao_escrita ?? 1;
+                      const isChanged = levels.leitura !== origLeitura || levels.escrita !== origEscrita;
+                      return (
+                        <tr key={mod.id} style={isChanged ? { background: '#f59e0b08' } : undefined}>
+                          <td style={{ padding: '6px 8px', borderBottom: `1px solid ${C.border}`, fontWeight: 500, color: C.text }}>
+                            {mod.nome}
+                            {isChanged && <span style={{ fontSize: 9, color: C.amber, marginLeft: 4 }}>alterado</span>}
+                          </td>
+                          <td style={{ padding: '4px 8px', borderBottom: `1px solid ${C.border}`, textAlign: 'center' }}>
+                            <ShadSelect value={String(levels.leitura)} onValueChange={v => handleModuloChange(mod.id, 'leitura', parseInt(v))} disabled={saving}>
+                              <SelectTrigger className="w-full" size="sm">
+                                <SelectValue />
+                              </SelectTrigger>
+                              <SelectContent className="z-[1100]">
+                                {[1, 2, 3, 4, 5].map(n => <SelectItem key={n} value={String(n)}>{n} — {NIVEL_LABELS[n]}</SelectItem>)}
+                              </SelectContent>
+                            </ShadSelect>
+                          </td>
+                          <td style={{ padding: '4px 8px', borderBottom: `1px solid ${C.border}`, textAlign: 'center' }}>
+                            <ShadSelect value={String(levels.escrita)} onValueChange={v => handleModuloChange(mod.id, 'escrita', parseInt(v))} disabled={saving}>
+                              <SelectTrigger className="w-full" size="sm">
+                                <SelectValue />
+                              </SelectTrigger>
+                              <SelectContent className="z-[1100]">
+                                {[1, 2, 3, 4, 5].map(n => <SelectItem key={n} value={String(n)}>{n} — {NIVEL_LABELS[n]}</SelectItem>)}
+                              </SelectContent>
+                            </ShadSelect>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+              <div style={{ fontSize: 10, color: C.text3, marginTop: 8 }}>
+                Níveis: 1=Sem acesso | 2=Pessoal | 3=Área | 4=Setor | 5=Admin
+              </div>
+            </div>
+
+            {                             }
+            <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 16, paddingTop: 12, borderTop: `1px solid ${C.border}` }}>
+              <Button variant="ghost" size="sm" onClick={() => { initLocalPerms(permData, estrutura); setPermError(''); }}>Desfazer</Button>
+              <Button size="sm" className="gap-1.5" disabled={saving || (!permDirty && !salvo)} onClick={savePermissions}
+                style={salvo ? { background: '#10b981', borderColor: '#10b981', color: '#fff' } : undefined}>
+                {salvo ? <Check className="h-3.5 w-3.5" /> : <Save className="h-3.5 w-3.5" />}
+                {saving ? 'Salvando...' : salvo ? 'Salvo ✓' : 'Salvar Permissões'}
+              </Button>
+            </div>
+          </div>
+        )}
+      </div>
+        </TabsContent>
+      </Tabs>
+
+      {             }
+      <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', paddingTop: 16, borderTop: `1px solid ${C.border}`, marginTop: 16 }}>
+        {data.status === 'inativo' ? (
+          <Button variant="outline" size="sm" className="gap-1.5" onClick={() => onReativar(data.id)}><RotateCcw className="h-3.5 w-3.5" />Reativar colaborador</Button>
+        ) : (
+          <Button variant="destructive" size="sm" className="gap-1.5" onClick={() => onDelete(data.id)}><UserMinus className="h-3.5 w-3.5" />Desligar colaborador</Button>
+        )}
+      </div>
+        </div>{                     }
+      </div>{               }
+    </div>
+  );
+}
+
+function DocumentoFormModal({ open, data, onClose, onSave }) {
+  const [f, setF] = useState({ tipo: 'contrato' });
+  useEffect(() => { if (open) setF({ tipo: 'contrato' }); }, [open]);
+  const upd = (k, v) => setF(p => ({ ...p, [k]: v }));
+
+  return (
+    <Modal open={open} onClose={onClose} title="📄 Novo Documento"
+      footer={<Button onClick={() => onSave(data?.funcionario_id, f)}>Salvar</Button>}>
+      <Input label="Nome do Documento *" value={f.nome || ''} onChange={e => upd('nome', e.target.value)} />
+      <FormSelect label="Tipo" value={f.tipo} onChange={e => upd('tipo', e.target.value)}>
+        <SelectItem value="contrato">Contrato</SelectItem>
+        <SelectItem value="ctps">CTPS</SelectItem>
+        <SelectItem value="rg">RG</SelectItem>
+        <SelectItem value="cpf">CPF</SelectItem>
+        <SelectItem value="certificado">Certificado</SelectItem>
+        <SelectItem value="outro">Outro</SelectItem>
+      </FormSelect>
+      <div style={styles.formGroup}>
+        <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-1 block">Data de Expiração</label>
+        <DatePicker value={f.data_expiracao || ''} onChange={v => upd('data_expiracao', v)} />
+      </div>
+    </Modal>
+  );
+}

@@ -1,0 +1,4442 @@
+import { useEffect, useState, useRef, useMemo } from 'react';
+import { createPortal } from 'react-dom';
+import { motion, AnimatePresence, useSpring, useTransform, animate } from 'framer-motion';
+import {
+  ChevronLeft, ChevronRight, TrendingUp, TrendingDown, Users, Banknote,
+  Sparkles, ArrowUp, ArrowDown, Minus, Award, Calendar,
+  BarChart3, Activity, Target, FileText, Loader2, Filter, X, MousePointer2, CalendarDays,
+} from 'lucide-react';
+import { Card, CardContent } from '../../../components/ui/card';
+import { Button } from '../../../components/ui/button';
+import { Badge } from '../../../components/ui/badge';
+import { financeiroV2 } from '../../../api';
+import KpiTaticoOficial from '../../../components/kpi/KpiTaticoOficial';
+import { NIVEIS_ZOOM, ZOOM_PADRAO, lerZoomSalvo, salvarZoom, rotuloZoom } from '@/lib/zoomTela';
+import { calcularMediaMensal, mediaPuxadaPorUmMes, textoBase } from '@/lib/mediaMensal';
+import { useAuth } from '../../../contexts/AuthContext';
+import MetaGauge from '../../../components/dashboard-semanal/MetaGauge';
+import DoadoresListDialog from '../../../components/financeiro/DoadoresListDialog';
+import {
+  ComposedChart, Line, Bar, Area, AreaChart, BarChart, XAxis, YAxis, CartesianGrid,
+  Tooltip, ResponsiveContainer, Legend, PieChart, Pie, Cell,
+} from 'recharts';
+import { ChartGradients, gradFill } from '@/components/charts/ChartGradients';
+
+const C = {
+  primary: '#00B39D',
+  primarySoft: 'rgba(0,179,157,0.12)',
+  green: '#10b981',
+  red: '#ef4444',
+  amber: '#f59e0b',
+  blue: '#3b82f6',
+  purple: '#8b5cf6',
+  pink: '#ec4899',
+};
+
+const fmtMoney = (v) => Number(v || 0).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
+const fmtCompact = (v) => {
+  const n = Math.abs(Number(v || 0));
+  if (n >= 1_000_000) return `R$ ${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1000) return `R$ ${(n / 1000).toFixed(0)}k`;
+  return fmtMoney(v);
+};
+const fmtPct = (v) => v === null || v === undefined ? '—' : `${v >= 0 ? '+' : ''}${v.toFixed(1)}%`;
+const fmtInt = (v) => Number(v || 0).toLocaleString('pt-BR');
+
+const DIAS = ['Dom', 'Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb'];
+
+
+
+const ordemCulto = (day, time) => {
+  const d = day === null || day === undefined ? 99 : ((Number(day) + 6) % 7);
+  const [h, m] = String(time || '0:0').split(':').map(Number);
+  return d * 10000 + (h || 0) * 100 + (m || 0);
+};
+
+
+
+
+const LS_FILTROS = 'fin_dashboard_filtros_v1';
+
+function lerFiltrosGlobais() {
+  try {
+    const raw = localStorage.getItem(LS_FILTROS);
+    return raw ? JSON.parse(raw) : {};
+  } catch { return {}; }
+}
+
+function salvarFiltrosGlobais(f) {
+  try {
+    localStorage.setItem(LS_FILTROS, JSON.stringify(f || {}));
+    window.dispatchEvent(new CustomEvent('fin-filtros-changed', { detail: f }));
+  } catch {}
+}
+
+function useFiltrosGlobais() {
+  const [filtros, setFiltros] = useState(() => lerFiltrosGlobais());
+  useEffect(() => {
+    const handler = (e) => setFiltros(e.detail || {});
+    window.addEventListener('fin-filtros-changed', handler);
+    return () => window.removeEventListener('fin-filtros-changed', handler);
+  }, []);
+  return [filtros, (f) => { salvarFiltrosGlobais(f); setFiltros(f); }];
+}
+
+
+
+
+
+
+
+
+
+
+
+
+function quartaDaSemana(date) {
+  const d = new Date(date);
+  d.setHours(0, 0, 0, 0);
+  const offset = (d.getDay() + 4) % 7;
+  d.setDate(d.getDate() - offset);
+  return d;
+}
+
+
+function numeroSemanaIso(date) {
+  const d = new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()));
+  const dayNum = (d.getUTCDay() + 6) % 7;
+  d.setUTCDate(d.getUTCDate() - dayNum + 3);
+  const primeiraQuinta = new Date(Date.UTC(d.getUTCFullYear(), 0, 4));
+  const fdNum = (primeiraQuinta.getUTCDay() + 6) % 7;
+  primeiraQuinta.setUTCDate(primeiraQuinta.getUTCDate() - fdNum + 3);
+  return 1 + Math.round((d - primeiraQuinta) / (7 * 86400000));
+}
+
+function gerarSemanasIso(qtd = 26) {
+  const quaAtual = quartaDaSemana(new Date());
+
+  const out = [];
+  for (let i = 0; i < qtd; i++) {
+    const inicio = new Date(quaAtual);
+    inicio.setDate(quaAtual.getDate() - i * 7);
+    const fim = new Date(inicio);
+    fim.setDate(inicio.getDate() + 6);
+    const fmt = (d) => `${String(d.getDate()).padStart(2, '0')}/${String(d.getMonth() + 1).padStart(2, '0')}`;
+    const num = numeroSemanaIso(inicio);
+    const numStr = String(num).padStart(2, '0');
+    out.push({
+      ref: inicio.toISOString().slice(0, 10),
+      inicio: inicio.toISOString().slice(0, 10),
+      fim: fim.toISOString().slice(0, 10),
+      numero: num,
+      ano: inicio.getFullYear(),
+      label: `Semana ${numStr} · ${fmt(inicio)}–${fmt(fim)}${i === 0 ? ' (atual)' : ''}`,
+      labelCurto: `Semana ${numStr}/${inicio.getFullYear()}`,
+    });
+  }
+  return out;
+}
+
+
+
+
+function CountUp({ value, format = fmtMoney, duration = 1.2 }) {
+  const [display, setDisplay] = useState(value);
+  const previous = useRef(value);
+  useEffect(() => {
+    const controls = animate(previous.current, value, {
+      duration,
+      ease: 'easeOut',
+      onUpdate: (v) => setDisplay(v),
+    });
+    previous.current = value;
+    return () => controls.stop();
+  }, [value, duration]);
+  return <>{format(display)}</>;
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+const SLIDES = [
+
+  { key: 'resumo',       label: 'Resumo',         icon: Sparkles,   desc: 'Foto da semana · receita · presença · ticket · decisões' },
+  { key: 'por_culto',    label: 'Por Culto',      icon: Calendar,   desc: 'Quarta · final de semana · durante a semana · acumulada' },
+  { key: 'performance',  label: 'Performance',    icon: Activity,   desc: 'Frequência × arrecadação semanal' },
+
+
+
+
+
+  { key: 'tendencias',   label: 'Mensal',         icon: TrendingUp, desc: 'Média mensal + arrecadação anual mês a mês' },
+  { key: 'saude',        label: 'Saúde',          icon: Activity,   desc: 'Resultado · folha · concentração de doadores' },
+  { key: 'comparativos', label: 'Comparativos',   icon: BarChart3,  desc: 'YTD · YoY · decêndio' },
+  { key: 'dizimo_oferta',label: 'Dízimo×Oferta',  icon: TrendingUp, desc: 'Proporção da base de contribuição' },
+
+
+
+  { key: 'quinta_semana', label: '5ª semana',     icon: CalendarDays, desc: 'Meses com 5 semanas · as 5ªs comparadas entre si' },
+
+  { key: 'controle',     label: 'Saídas',         icon: Target,     desc: 'Despesas detalhadas · drilldown' },
+  { key: 'metas',        label: 'Metas',          icon: Award,      desc: 'Alvos financeiros com filtros' },
+];
+
+
+
+
+
+
+
+export default function DashboardSemanal() {
+  const { user, profile, podeVerSaidas } = useAuth();
+
+
+
+  const [zoom, setZoom] = useState(ZOOM_PADRAO);
+  useEffect(() => { setZoom(lerZoomSalvo()); }, []);
+  useEffect(() => {
+
+
+    document.documentElement.style.setProperty('--dash-zoom', String(zoom));
+    return () => { document.documentElement.style.removeProperty('--dash-zoom'); };
+  }, [zoom]);
+  const trocarZoom = (n) => { setZoom(n); salvarZoom(n); };
+  const emailUser = String(profile?.email || user?.email || '').toLowerCase();
+
+  const slides = useMemo(
+    () => (podeVerSaidas ? SLIDES : SLIDES.filter(s => s.key !== 'controle')),
+    [podeVerSaidas],
+  );
+  const [data, setData] = useState(null);
+  const [completo, setCompleto] = useState(null);
+  const [melhorSemana, setMelhorSemana] = useState(null);
+  const [saidas, setSaidas] = useState(null);
+  const [metas, setMetas] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const semanas = useMemo(() => gerarSemanasIso(26), []);
+  const [refData, setRefData] = useState(semanas[0].ref);
+  const [slide, setSlide] = useState(0);
+
+  const [filtrosGlobais] = useFiltrosGlobais();
+
+
+  useEffect(() => {
+    const handler = (e) => {
+
+      if (e.target?.tagName === 'INPUT' || e.target?.tagName === 'TEXTAREA' || e.target?.tagName === 'SELECT') return;
+      if (e.key === 'ArrowRight') setSlide(i => Math.min(i + 1, slides.length - 1));
+      else if (e.key === 'ArrowLeft') setSlide(i => Math.max(i - 1, 0));
+    };
+    document.addEventListener('keydown', handler);
+    return () => document.removeEventListener('keydown', handler);
+  }, [slides.length]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    const failsafe = (label) => (e) => { console.warn(`[Dashboard FinSemanal] ${label}:`, e.message); return null; };
+    Promise.all([
+      financeiroV2.dashboard.semanaCompleta?.(refData, filtrosGlobais)?.catch(failsafe('semanaCompleta')),
+      financeiroV2.dashboard.financeiroCompleto?.()?.catch(failsafe('financeiroCompleto')),
+      financeiroV2.dashboard.melhorSemana?.()?.catch(failsafe('melhorSemana')),
+      financeiroV2.dashboard.saidasDetalhadas?.()?.catch(failsafe('saidasDetalhadas')),
+      financeiroV2.metas?.list?.({ ativa: 'true' })?.catch(failsafe('metas')),
+    ]).then(([s, c, m, sd, mt]) => {
+      if (cancelled) return;
+      setData(s);
+      setCompleto(c);
+      setMelhorSemana(m);
+      setSaidas(sd);
+      setMetas(mt || []);
+    }).finally(() => {
+      if (!cancelled) setLoading(false);
+    });
+    return () => { cancelled = true; };
+  }, [refData, filtrosGlobais]);
+
+  const reloadMetas = () => {
+    financeiroV2.metas?.list?.({ ativa: 'true' }).then(setMetas).catch(() => {});
+  };
+
+  const navegar = (delta) => {
+    const idx = semanas.findIndex(s => s.ref === refData);
+    const base = idx === -1 ? 0 : idx;
+    const novoIdx = Math.max(0, Math.min(semanas.length - 1, base + delta));
+    setRefData(semanas[novoIdx].ref);
+  };
+
+
+
+  if (!data) return <LoadingPretty />;
+  if (data.erro) return <div className="text-sm text-muted-foreground">Erro: {data.erro}</div>;
+
+  const { semana, kpis, cultos, buckets, historico, top_contribuintes } = data;
+
+  return (
+    <div
+      className={`cbrio-glass-scope space-y-4 transition-opacity ${loading ? 'opacity-60' : 'opacity-100'}`}
+
+
+
+      style={{ zoom }}
+    >
+      {                                                         }
+      <div className="sticky top-0 z-20 pb-2 -mx-1 px-1 bg-gradient-to-b from-background via-background to-transparent backdrop-blur-sm">
+        <Card className="overflow-hidden border-primary/30">
+          <div className="absolute inset-0 bg-gradient-to-r from-primary/5 via-transparent to-primary/5 pointer-events-none" />
+          <CardContent className="pt-4 pb-4 flex items-center justify-between flex-wrap gap-3 relative">
+            <Button variant="outline" size="sm" onClick={() => navegar(1)} disabled={semanas.findIndex(s => s.ref === refData) >= semanas.length - 1 || loading}>
+              <ChevronLeft className="h-4 w-4 mr-1" /> Anterior
+            </Button>
+
+            <div className="flex flex-col items-center flex-1 min-w-[240px]">
+              <div className="text-[10px] text-muted-foreground uppercase tracking-wider mb-1 flex items-center gap-1">
+                Semana (qua–ter)
+                {loading && <Loader2 className="h-3 w-3 animate-spin text-primary" />}
+              </div>
+              <select
+                value={refData}
+                onChange={(e) => setRefData(e.target.value)}
+                disabled={loading}
+                className="text-sm font-bold text-foreground bg-background border border-border rounded-md px-3 py-1.5 hover:border-primary/50 transition-colors cursor-pointer tabular-nums min-w-[240px] text-center disabled:opacity-60"
+              >
+                {semanas.map(s => (
+                  <option key={s.ref} value={s.ref}>{s.label}</option>
+                ))}
+              </select>
+              <div className="text-[10px] text-muted-foreground mt-1 tabular-nums">
+                {(() => {
+                  const s = semanas.find(x => x.ref === refData);
+                  return s ? `${s.labelCurto} · ${semana.inicio} a ${semana.fim}` : `${semana.inicio} a ${semana.fim}`;
+                })()}
+              </div>
+            </div>
+
+            <Button variant="outline" size="sm" onClick={() => navegar(-1)} disabled={semanas.findIndex(s => s.ref === refData) <= 0 || loading}>
+              Próxima <ChevronRight className="h-4 w-4 ml-1" />
+            </Button>
+          </CardContent>
+        </Card>
+
+        {                                                 }
+        <SlideNav slides={slides} current={slide} onChange={setSlide} />
+        <div className="flex items-center justify-between flex-wrap gap-2">
+          <FiltrosFinanceiroBar />
+          {
+
+
+
+
+
+                                     }
+          <div className="inline-flex items-center gap-1 rounded-lg border border-border p-0.5" title="Tamanho da tela · fica salvo neste aparelho">
+            {NIVEIS_ZOOM.map((n) => (
+              <button
+                key={n}
+                onClick={() => trocarZoom(n)}
+                aria-pressed={zoom === n}
+                className={`px-2 py-1 rounded-md transition leading-none ${
+                  zoom === n ? 'bg-primary text-primary-foreground font-semibold' : 'hover:bg-muted text-muted-foreground'
+                }`}
+                style={{ fontSize: 10 + (n - 1) * 12 }}
+              >
+                A
+              </button>
+            ))}
+            <span className="px-1.5 text-[10px] text-muted-foreground tabular-nums">{rotuloZoom(zoom)}</span>
+          </div>
+        </div>
+      </div>
+
+      {                                                        }
+      <AssistenteFinanceiroCard
+        aba={slides[slide].key}
+        abaLabel={slides[slide].label}
+        semana={refData}
+        kpis={kpis}
+        buckets={buckets}
+        onVerDetalhe={() => setSlide(Math.max(0, slides.findIndex(s => s.key === 'resumo')))}
+        onComparar={() => setSlide(Math.max(0, slides.findIndex(s => s.key === 'performance')))}
+      />
+
+      {
+                                                                      }
+      <KpiTaticoOficial fetchFn={financeiroV2.kpisTaticos} />
+
+      {                                                   }
+      <AnimatePresence mode="wait">
+        <motion.div
+          key={slides[slide].key}
+          initial={{ opacity: 0, x: 30 }}
+          animate={{ opacity: 1, x: 0 }}
+          exit={{ opacity: 0, x: -30 }}
+          transition={{ duration: 0.25, ease: 'easeOut' }}
+          className="space-y-6"
+        >
+          {slides[slide].key === 'resumo' && (
+            <Slide0Resumo
+              kpis={kpis} cultos={cultos} top_contribuintes={top_contribuintes}
+              historico={historico}
+            />
+          )}
+          {slides[slide].key === 'saude' && <SlideSaudeFinanceira />}
+          {slides[slide].key === 'por_culto' && (
+            <Slide1PorCulto
+              buckets={buckets}
+              melhorSemana={melhorSemana}
+              semana={semana}
+            />
+          )}
+          {slides[slide].key === 'tendencias' && (
+            <Slide2Tendencias />
+          )}
+          {slides[slide].key === 'comparativos' && (
+            <Slide3Comparativos
+              completo={completo}
+            />
+          )}
+          {slides[slide].key === 'performance' && (
+            <Slide4Performance
+              completo={completo}
+              melhorSemana={melhorSemana}
+            />
+          )}
+          {slides[slide].key === 'dizimo_oferta' && <SlideDizimoOferta />}
+          {slides[slide].key === 'quinta_semana' && <SlideQuintaSemana />}
+          {slides[slide].key === 'controle' && (
+            <Slide5Controle
+              saidas={saidas}
+            />
+          )}
+          {slides[slide].key === 'metas' && (
+            <Slide6Metas
+              metas={metas}
+              onMetasChange={reloadMetas}
+            />
+          )}
+        </motion.div>
+      </AnimatePresence>
+
+      {                                              }
+      <div className="text-center text-[10px] text-muted-foreground flex items-center justify-center gap-2 flex-wrap">
+        {(() => {
+          const bloco = SLIDE_BLOCO[slides[slide].key] || {};
+          return bloco.label ? (
+            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full"
+              style={{ background: `${bloco.color}1f`, color: bloco.color }}>
+              Bloco {bloco.id} · {bloco.label}
+            </span>
+          ) : null;
+        })()}
+        <span>Use ← → no teclado · {slide + 1} de {slides.length}</span>
+      </div>
+    </div>
+  );
+}
+
+
+
+
+
+
+function leituraClienteFallback(aba, kpis, buckets) {
+  const receita = Number(kpis?.receita || 0);
+  if (receita <= 0) return 'Ainda não há lançamentos de arrecadação nesta semana.';
+  const delta = kpis?.receita_delta_wow;
+  const wow = (delta === null || delta === undefined) ? '' : ` (${fmtPct(delta)} vs. a semana anterior)`;
+  if (aba === 'por_culto' && buckets) {
+    const ofertas = (b) => (b?.categorias || []).filter(c => /oferta/i.test(c.categoria)).reduce((s, c) => s + Number(c.valor || 0), 0);
+    let nome = null, mx = 0;
+    for (const k of ['quarta', 'domingo', 'outros']) { const o = ofertas(buckets[k]); if (o > mx) { mx = o; nome = buckets[k]?.nome; } }
+    return `Arrecadação de ${fmtMoney(receita)}${wow}${nome ? `; a ${nome} puxou as ofertas` : ''}.`;
+  }
+  return `Arrecadação de ${fmtMoney(receita)}${wow} nesta semana.`;
+}
+
+function AssistenteFinanceiroCard({ aba, abaLabel, semana, kpis, buckets, onVerDetalhe, onComparar }) {
+  const [filtrosG] = useFiltrosGlobais();
+  const semExtra = !!filtrosG.sem_extra;
+  const [texto, setTexto] = useState('');
+  const [loading, setLoading] = useState(true);
+
+  const [analise, setAnalise] = useState('');
+  const [analisando, setAnalisando] = useState(false);
+  const [analiseErro, setAnaliseErro] = useState('');
+
+  async function gerarAnalise() {
+    if (analisando) return;
+    setAnalisando(true);
+    setAnaliseErro('');
+    try {
+      const r = await financeiroV2.dashboard.analiseProfunda(semana);
+      setAnalise(r?.texto || '');
+      if (!r?.texto) setAnaliseErro('A IA não retornou análise. Tente de novo.');
+    } catch (e) {
+      setAnaliseErro(e?.message || 'Não foi possível gerar a análise agora.');
+    } finally {
+      setAnalisando(false);
+    }
+  }
+
+  useEffect(() => { setAnalise(''); setAnaliseErro(''); }, [semana, semExtra]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    financeiroV2.dashboard.assistente?.(aba, semana)
+      .then(r => { if (!cancelled) setTexto(r?.texto || leituraClienteFallback(aba, kpis, buckets)); })
+      .catch(() => { if (!cancelled) setTexto(leituraClienteFallback(aba, kpis, buckets)); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [aba, semana, semExtra]);
+
+  return (
+    <Card className="relative overflow-hidden border-primary/30">
+      <div
+        className="absolute inset-0 pointer-events-none"
+        style={{ background: 'linear-gradient(135deg, rgba(0,179,157,0.10), transparent 55%)' }}
+      />
+      <CardContent className="pt-5 pb-5 relative">
+        <div className="flex items-center gap-3 mb-3">
+          <div
+            className="h-10 w-10 rounded-xl flex items-center justify-center shrink-0"
+            style={{ background: C.primarySoft, color: C.primary }}
+          >
+            <Sparkles className="h-5 w-5" />
+          </div>
+          <div className="min-w-0">
+            <h3 className="text-sm font-bold leading-tight">Assistente financeiro</h3>
+            <p className="text-xs text-muted-foreground">Leitura automática · {abaLabel || 'semana'}</p>
+          </div>
+          {loading && <Loader2 className="h-3.5 w-3.5 animate-spin text-primary ml-auto shrink-0" />}
+        </div>
+
+        <div className="text-[10px] uppercase tracking-wider font-semibold mb-1.5" style={{ color: C.primary }}>
+          Destaque · {abaLabel || 'Resumo'}
+        </div>
+
+        {!texto && loading ? (
+          <div className="space-y-2">
+            <div className="h-3.5 rounded bg-muted animate-pulse w-[92%]" />
+            <div className="h-3.5 rounded bg-muted animate-pulse w-[70%]" />
+          </div>
+        ) : (
+          <p className={`text-sm text-foreground/90 leading-relaxed transition-opacity ${loading ? 'opacity-50' : 'opacity-100'}`}>
+            {texto}
+          </p>
+        )}
+
+        {                                              }
+        {(analise || analisando || analiseErro) && (
+          <div className="mt-4 rounded-xl border border-primary/25 bg-primary/5 p-3.5">
+            <div className="text-[10px] uppercase tracking-wider font-semibold mb-1.5" style={{ color: C.primary }}>
+              Análise aprofundada
+            </div>
+            {analisando ? (
+              <div className="space-y-2">
+                <div className="h-3.5 rounded bg-muted animate-pulse w-[95%]" />
+                <div className="h-3.5 rounded bg-muted animate-pulse w-[88%]" />
+                <div className="h-3.5 rounded bg-muted animate-pulse w-[60%]" />
+                <p className="text-[11px] text-muted-foreground pt-1">Analisando a série mensal, semanas de contribuição e saúde financeira…</p>
+              </div>
+            ) : analiseErro ? (
+              <p className="text-sm text-red-600">{analiseErro}</p>
+            ) : (
+              <div className="text-sm text-foreground/90 leading-relaxed whitespace-pre-wrap">{analise}</div>
+            )}
+          </div>
+        )}
+
+        <div className="flex items-center gap-2 mt-4 flex-wrap">
+          <Button
+            size="sm"
+            onClick={onVerDetalhe}
+            className="text-white hover:opacity-90"
+            style={{ background: C.primary }}
+          >
+            Ver detalhe
+          </Button>
+          <Button size="sm" variant="outline" onClick={onComparar}>
+            Comparar semanas
+          </Button>
+          <Button size="sm" variant="outline" onClick={gerarAnalise} disabled={analisando} className="border-primary/40" style={{ color: C.primary }}>
+            {analisando ? <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5 mr-1.5" />}
+            {analise ? 'Gerar de novo' : 'Análise aprofundada'}
+          </Button>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+
+
+
+
+const SLIDE_BLOCO = {
+  resumo: { id: 1, label: 'Ministerial', color: '#00B39D' },
+  por_culto: { id: 1, label: 'Ministerial', color: '#00B39D' },
+  performance: { id: 1, label: 'Ministerial', color: '#00B39D' },
+  tendencias: { id: 2, label: 'Ano', color: '#8b5cf6' },
+  saude: { id: 2, label: 'Ano', color: '#8b5cf6' },
+  comparativos: { id: 2, label: 'Ano', color: '#8b5cf6' },
+  dizimo_oferta: { id: 2, label: 'Ano', color: '#8b5cf6' },
+  controle: { id: 3, label: 'Despesa & Metas', color: '#f59e0b' },
+  metas: { id: 3, label: 'Despesa & Metas', color: '#f59e0b' },
+};
+
+function SlideNav({ slides, current, onChange }) {
+  return (
+    <div className="flex items-center gap-2 mt-3 overflow-x-auto pb-1">
+      {slides.map((s, i) => {
+        const active = i === current;
+        const Icon = s.icon;
+        const bloco = SLIDE_BLOCO[s.key] || { id: 0, label: '', color: '#888' };
+        const blocoAnterior = i > 0 ? SLIDE_BLOCO[slides[i - 1].key]?.id : null;
+        const showSep = blocoAnterior != null && blocoAnterior !== bloco.id;
+        return (
+          <span key={s.key} className="contents">
+            {showSep && (
+              <div className="flex flex-col items-center shrink-0 px-0.5">
+                <span className="h-6 w-px bg-border" />
+              </div>
+            )}
+            <motion.button
+              onClick={() => onChange(i)}
+              whileHover={{ y: -1 }}
+              whileTap={{ scale: 0.97 }}
+              className={`flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-medium transition-all shrink-0 relative ${
+                active
+                  ? 'text-primary-foreground shadow-sm'
+                  : 'bg-card border border-border hover:border-primary/50 text-foreground'
+              }`}
+              style={active ? { background: bloco.color } : { borderLeftWidth: '3px', borderLeftColor: bloco.color }}
+              title={`${bloco.label} · ${s.desc}`}
+            >
+              <Icon className="h-3.5 w-3.5" />
+              <span>{s.label}</span>
+            </motion.button>
+          </span>
+        );
+      })}
+    </div>
+  );
+}
+
+
+
+
+
+function Slide0Resumo({ kpis, cultos, top_contribuintes, historico }) {
+  const cultosOrd = [...(cultos || [])].sort(
+    (a, b) => ordemCulto(a.dia_semana, a.hora_culto) - ordemCulto(b.dia_semana, b.hora_culto)
+  );
+  return (
+    <>
+      {                                                   }
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+        <KpiBig
+          custom={0}
+          icon={Banknote}
+          accent={C.green}
+          label="Receita da semana"
+          valor={kpis.receita}
+          delta={kpis.receita_delta_wow}
+          sub="vs semana anterior"
+          mom={kpis.receita_mes_anterior ? { delta: kpis.receita_delta_mom, valor: kpis.receita_mes_anterior } : null}
+          yoy={kpis.receita_yoy ? `YoY: ${fmtCompact(kpis.receita_yoy)} (${fmtPct(kpis.receita_delta_yoy)})` : null}
+        />
+        <KpiBig
+          custom={1}
+          icon={Users}
+          accent={C.blue}
+          label="Presença total"
+          valor={kpis.presencial + kpis.online}
+          format={fmtInt}
+          delta={kpis.presencial_delta_wow}
+          sub={`${fmtInt(kpis.presencial)} presencial · ${fmtInt(kpis.online)} online`}
+        />
+        <KpiBig
+          custom={2}
+          icon={Sparkles}
+          accent={C.purple}
+          label="Ticket médio"
+          valor={kpis.ticket_medio}
+          delta={kpis.ticket_delta_wow}
+          sub="R$ por presente"
+        />
+        <KpiBig
+          custom={3}
+          icon={Award}
+          accent={C.amber}
+          label="Cultos"
+          valor={cultos.filter(c => c.receita_total > 0 || c.total_presencial > 0).length}
+          format={fmtInt}
+          sub={`${cultos.length} cadastrados na semana`}
+        />
+      </div>
+
+      {                   }
+      <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.2, duration: 0.4 }}>
+        <Card>
+          <CardContent className="pt-6">
+            <h3 className="text-base font-semibold mb-1">Cultos da semana</h3>
+            <p className="text-xs text-muted-foreground mb-4">
+              Receita classificada × frequência presencial + online · ticket médio por presente
+            </p>
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b border-border">
+                    <th className="text-left py-2 px-3 text-xs uppercase text-muted-foreground font-medium">Culto</th>
+                    <th className="text-left py-2 px-3 text-xs uppercase text-muted-foreground font-medium">Data</th>
+                    <th className="text-right py-2 px-3 text-xs uppercase text-muted-foreground font-medium">Presencial</th>
+                    <th className="text-right py-2 px-3 text-xs uppercase text-muted-foreground font-medium">Online</th>
+                    <th className="text-right py-2 px-3 text-xs uppercase text-muted-foreground font-medium">Receita</th>
+                    <th className="text-right py-2 px-3 text-xs uppercase text-muted-foreground font-medium">Ticket</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {cultosOrd.map((c, i) => (
+                    <motion.tr
+                      key={c.culto_id}
+                      initial={{ opacity: 0, x: -20 }}
+                      animate={{ opacity: 1, x: 0 }}
+                      transition={{ delay: 0.3 + i * 0.04 }}
+                      className="border-b border-border/50 hover:bg-muted/30 transition-colors"
+                    >
+                      <td className="py-2.5 px-3 font-medium">{c.culto_nome}</td>
+                      <td className="py-2.5 px-3 text-xs text-muted-foreground">
+                        {DIAS[c.dia_semana]} · {c.culto_data?.slice(8, 10)}/{c.culto_data?.slice(5, 7)}
+                      </td>
+                      <td className="py-2.5 px-3 text-right tabular-nums">
+                        {c.total_presencial > 0 ? <strong>{fmtInt(c.total_presencial)}</strong> : '—'}
+                      </td>
+                      <td className="py-2.5 px-3 text-right tabular-nums text-muted-foreground">
+                        {c.online_pico > 0 ? fmtInt(c.online_pico) : '—'}
+                      </td>
+                      <td className="py-2.5 px-3 text-right tabular-nums font-semibold" style={{ color: C.green }}>
+                        {c.receita_total > 0 ? fmtMoney(c.receita_total) : '—'}
+                      </td>
+                      <td className="py-2.5 px-3 text-right tabular-nums">
+                        {c.ticket > 0 ? <span style={{ color: C.purple }}>{fmtMoney(c.ticket)}</span> : '—'}
+                      </td>
+                    </motion.tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </CardContent>
+        </Card>
+      </motion.div>
+
+      {                       }
+      {top_contribuintes && top_contribuintes.length > 0 && (
+        <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.3, duration: 0.4 }}>
+          <Card>
+            <CardContent className="pt-6">
+              <h3 className="text-base font-semibold mb-4 flex items-center gap-2">
+                <Award className="h-4 w-4" style={{ color: C.amber }} />
+                Top contribuintes da semana
+              </h3>
+              <div className="space-y-2">
+                {top_contribuintes.map((t, i) => (
+                  <motion.div
+                    key={t.membro_id || i}
+                    initial={{ opacity: 0, x: 20 }}
+                    animate={{ opacity: 1, x: 0 }}
+                    transition={{ delay: 0.4 + i * 0.05 }}
+                    className="flex items-center justify-between p-3 rounded-lg border border-border hover:bg-muted/30 transition-colors"
+                  >
+                    <div className="flex items-center gap-3">
+                      <div
+                        className="h-8 w-8 rounded-full flex items-center justify-center text-xs font-bold"
+                        style={{
+                          background: i === 0 ? '#fef3c7' : i === 1 ? '#e5e7eb' : i === 2 ? '#fed7aa' : C.primarySoft,
+                          color: i < 3 ? '#000' : C.primary,
+                        }}
+                      >
+                        {i + 1}
+                      </div>
+                      <div>
+                        <div className="text-sm font-medium">{t.membro_nome || 'Anônimo'}</div>
+                        <div className="text-[10px] text-muted-foreground">
+                          {t.qtd_doacoes} {t.qtd_doacoes === 1 ? 'doação' : 'doações'}
+                        </div>
+                      </div>
+                    </div>
+                    <div className="text-base font-bold tabular-nums" style={{ color: C.green }}>
+                      {fmtMoney(t.total_doado)}
+                    </div>
+                  </motion.div>
+                ))}
+              </div>
+            </CardContent>
+          </Card>
+        </motion.div>
+      )}
+    </>
+  );
+}
+
+function Slide1PorCulto({ buckets, melhorSemana, semana }) {
+  return (
+    <>
+      {                               }
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <BucketCard custom={0} bucket={buckets.quarta} color={C.blue} semana={semana} />
+        <BucketCard custom={1} bucket={buckets.domingo} color={C.primary} semana={semana} />
+        <BucketCard custom={2} bucket={buckets.outros} color={C.amber} semana={semana} />
+        <BucketCard custom={3} bucket={buckets.acumulada} color={C.purple} isAcumulado semana={semana} />
+      </div>
+
+      {                   }
+      {melhorSemana && (melhorSemana.melhor_do_mes || melhorSemana.melhor_do_ano) && (
+        <MelhorSemanaCards melhor={melhorSemana} />
+      )}
+    </>
+  );
+}
+
+function Slide2Tendencias() {
+  return (
+    <>
+      <ArrecadacaoAnualChart />
+      <SazonalidadeSemanalChart />
+    </>
+  );
+}
+
+function Slide3Comparativos({ completo }) {
+  if (!completo) {
+    return <div className="text-sm text-muted-foreground text-center py-10">Sem dados de comparativos · aplicar migrations e classificar transações</div>;
+  }
+  return (
+    <>
+      <YtdCard ytd={completo.ytd} />
+      <DecendioCard dados={completo.decendio} mes={completo.mes_atual} comparativo={completo.decendio_comparativo} />
+      {completo.yoy_semanal?.length > 0 && (
+        <YoYSemanalChart dados={completo.yoy_semanal} anoAtual={completo.ano_atual} anoAnterior={completo.ano_anterior} />
+      )}
+    </>
+  );
+}
+
+function Slide4Performance({ completo, melhorSemana }) {
+  return (
+    <>
+      <FreqVsArrecadacaoSemanal />
+      <ReceitaVsSaidaMensal />
+      {melhorSemana && (melhorSemana.melhor_do_mes || melhorSemana.melhor_do_ano) && (
+        <MelhorSemanaCards melhor={melhorSemana} />
+      )}
+    </>
+  );
+}
+
+function Slide5Controle({ saidas }) {
+  return (
+    <>
+      {saidas
+        ? <SaidasDetalhadas saidas={saidas} />
+        : <div className="text-sm text-muted-foreground text-center py-10">Sem dados de despesas ainda</div>}
+    </>
+  );
+}
+
+function Slide6Metas({ metas, onMetasChange }) {
+  return <MetasFinanceirasComFiltros metas={metas} onMetasChange={onMetasChange} />;
+}
+
+
+
+
+function calcularAtualMeta(meta, ctx) {
+  const { completo, receitaSemana } = ctx;
+  if (!meta) return null;
+  const mensal = completo?.mensal || [];
+  const mesAtual = mensal[mensal.length - 1] || {};
+  const ytd = completo?.ytd?.ano_atual || {};
+
+  switch (meta.tipo) {
+    case 'receita_mensal':       return Number(mesAtual.receita || 0);
+    case 'receita_anual':        return Number(ytd.receita || 0);
+    case 'despesa_max_mensal':   return Number(mesAtual.despesa || 0);
+    case 'saldo_minimo':         return Number(ytd.resultado || 0);
+    case 'pct_categoria':        return null;
+    case 'meta_centro_custo':    return null;
+    default:                     return null;
+  }
+}
+
+function labelPeriodoMeta(tipo) {
+  if (tipo?.includes('anual'))   return 'no ano';
+  if (tipo === 'saldo_minimo')   return 'resultado YTD';
+  if (tipo?.includes('semanal')) return 'na semana';
+  if (tipo?.includes('mensal'))  return 'no mês';
+  return '';
+}
+
+function periodicidadeDoTipo(tipo) {
+  if (!tipo) return 'mensal';
+  if (tipo.includes('semanal')) return 'semanal';
+  if (tipo.includes('anual'))   return 'anual';
+  return 'mensal';
+}
+
+
+
+
+
+function YtdCard({ ytd }) {
+  const at = ytd.ano_atual;
+  const an = ytd.ano_anterior;
+  const delta = ytd.delta_pct;
+  const positive = delta !== null && delta > 0;
+  return (
+    <Card className="relative overflow-hidden">
+      <div className="absolute top-0 left-0 right-0 h-1 bg-gradient-to-r from-primary via-blue-500 to-purple-500" />
+      <div className="absolute top-2 right-4 h-24 w-24 rounded-full opacity-10 bg-primary blur-2xl" />
+      <CardContent className="pt-6 pb-6 relative">
+        <div className="flex items-center gap-2 mb-3">
+          <Calendar className="h-4 w-4 text-primary" />
+          <div className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+            Ano acumulado · {at.ano}
+          </div>
+        </div>
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <div>
+            <div className="text-xs text-muted-foreground">Receita YTD</div>
+            <div className="text-2xl font-bold tabular-nums" style={{ color: COL.green }}>
+              <CountUp value={at.receita} />
+            </div>
+            {delta !== null && (
+              <div className={`text-xs flex items-center gap-1 mt-1 ${positive ? 'text-emerald-600' : 'text-rose-600'}`}>
+                {positive ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />}
+                {delta >= 0 ? '+' : ''}{delta.toFixed(1)}% vs {an.ano}
+              </div>
+            )}
+          </div>
+          <div>
+            <div className="text-xs text-muted-foreground">Despesa YTD</div>
+            <div className="text-2xl font-bold tabular-nums" style={{ color: COL.red }}>
+              <CountUp value={at.despesa} />
+            </div>
+            <div className="text-xs text-muted-foreground mt-1">
+              vs {an.ano}: {fmtMoney(an.despesa)}
+            </div>
+          </div>
+          <div>
+            <div className="text-xs text-muted-foreground">Resultado YTD</div>
+            <div className={`text-2xl font-bold tabular-nums ${at.resultado >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>
+              <CountUp value={at.resultado} />
+            </div>
+            <div className="text-xs text-muted-foreground mt-1">
+              vs {an.ano}: {fmtMoney(an.resultado)}
+            </div>
+          </div>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+function ArrecadacaoMensalChart({ dados }) {
+  const formatado = dados.map(d => ({
+    label: monthShort(d.mes),
+    Receita: d.receita,
+    Despesa: d.despesa,
+    Resultado: d.resultado,
+  }));
+  return (
+    <Card>
+      <CardContent className="pt-6">
+        <h3 className="text-base font-semibold mb-1">Arrecadação Mensal · últimos 12 meses</h3>
+        <p className="text-xs text-muted-foreground mb-4">Linha de receita, despesa e resultado</p>
+        <div style={{ width: '100%', height: 280 }}>
+          <ResponsiveContainer>
+            <ComposedChart data={formatado}>
+              <defs>
+                <linearGradient id="gradReceitaMes" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0%" stopColor={COL.green} stopOpacity={0.4} />
+                  <stop offset="100%" stopColor={COL.green} stopOpacity={0.05} />
+                </linearGradient>
+              </defs>
+              <CartesianGrid strokeDasharray="3 3" opacity={0.2} />
+              <XAxis dataKey="label" tick={{ fontSize: 10 }} />
+              <YAxis tick={{ fontSize: 10 }} tickFormatter={(v) => fmtKbrl(v)} />
+              <Tooltip
+                formatter={(v) => fmtMoney(v)}
+                contentStyle={{ borderRadius: 8, fontSize: 12 }}
+              />
+              <Legend wrapperStyle={{ fontSize: 11 }} />
+              <Area type="monotone" dataKey="Receita" stroke={COL.green} fill="url(#gradReceitaMes)" strokeWidth={2.5} animationDuration={1200} />
+              <Line type="monotone" dataKey="Despesa" stroke={COL.red} strokeWidth={2} dot={{ r: 3 }} animationDuration={1400} />
+              <Line type="monotone" dataKey="Resultado" stroke={COL.purple} strokeWidth={2} strokeDasharray="5 5" dot={{ r: 3 }} animationDuration={1600} />
+            </ComposedChart>
+          </ResponsiveContainer>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+function SazonalidadeSemanalChart() {
+  const [dados, setDados] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [erro, setErro] = useState(null);
+  const [semanaSel, setSemanaSel] = useState(null);
+  const [filtrosG] = useFiltrosGlobais();
+  const semExtra = !!filtrosG.sem_extra;
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    financeiroV2.sazonalidadeSemanal()
+      .then(r => {
+        if (!cancelled) {
+          setDados(r);
+          setErro(null);
+
+          const anoAtual = new Date().getFullYear();
+          const corrente = String(anoAtual);
+          const ultimaComDado = [...(r.semanas || [])].reverse().find(s => Number(s[corrente]) > 0);
+          if (ultimaComDado) setSemanaSel(ultimaComDado.num_semana);
+        }
+      })
+      .catch(e => { if (!cancelled) setErro(e?.message || 'Erro ao carregar sazonalidade'); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [semExtra]);
+
+  const anos = dados?.anos || [];
+  const semanas = dados?.semanas || [];
+  const anoAtual = new Date().getFullYear();
+  const anoCorrenteStr = String(anoAtual);
+
+  const corPorAno = (ano, idx) => {
+    if (String(ano) === anoCorrenteStr) return COL.primary;
+    const paleta = [COL.purple, COL.amber, COL.blue, COL.red, COL.green];
+    return paleta[idx % paleta.length];
+  };
+
+  const semanaCorrente = useMemo(() => {
+    const tmp = new Date();
+    const date = new Date(Date.UTC(tmp.getFullYear(), tmp.getMonth(), tmp.getDate()));
+    const dayNum = date.getUTCDay() || 7;
+    date.setUTCDate(date.getUTCDate() + 4 - dayNum);
+    const yearStart = new Date(Date.UTC(date.getUTCFullYear(), 0, 1));
+    return Math.ceil((((date - yearStart) / 86400000) + 1) / 7);
+  }, []);
+
+  const totaisPorAno = useMemo(() => {
+    const out = {};
+    anos.forEach(a => {
+      const key = String(a);
+      out[key] = semanas.reduce((s, m) => s + Number(m[key] || 0), 0);
+    });
+    return out;
+  }, [anos, semanas]);
+
+  const onClickBar = (e) => {
+    const payload = e?.activePayload?.[0]?.payload;
+    if (payload?.num_semana) setSemanaSel(payload.num_semana);
+  };
+
+  const slotSel = semanaSel ? semanas.find(s => s.num_semana === semanaSel) : null;
+
+  return (
+    <Card>
+      <CardContent className="pt-6">
+        <div className="flex items-start justify-between flex-wrap gap-2 mb-3">
+          <div>
+            <h3 className="text-base font-semibold flex items-center gap-2">
+              Sazonalidade Semanal
+              <Badge variant="outline" className="text-[10px] font-normal">
+                <MousePointer2 className="h-2.5 w-2.5 mr-1" />
+                clique numa semana
+              </Badge>
+            </h3>
+            <p className="text-xs text-muted-foreground">
+              Compara a mesma semana ISO ao longo dos anos · empréstimos excluídos
+            </p>
+          </div>
+        </div>
+
+        {loading && (
+          <div className="flex items-center justify-center py-12 text-muted-foreground text-sm">
+            <Loader2 className="h-4 w-4 mr-2 animate-spin" /> Carregando sazonalidade…
+          </div>
+        )}
+        {erro && !loading && (
+          <div className="text-sm text-red-500 py-6 text-center">{erro}</div>
+        )}
+
+        {!loading && !erro && semanas.length > 0 && (
+          <>
+            <div style={{ width: '100%', height: 280 }}>
+              <ResponsiveContainer>
+                <BarChart data={semanas} onClick={onClickBar} barGap={1} barCategoryGap="16%">
+                  <ChartGradients colors={[COL.primary, COL.purple, COL.amber, COL.blue, COL.red, COL.green]} />
+                  <CartesianGrid strokeDasharray="3 3" opacity={0.2} />
+                  <XAxis
+                    dataKey="num_semana"
+                    tick={{ fontSize: 9 }}
+                    interval={3}
+                    tickFormatter={(v) => `S${v}`}
+                  />
+                  <YAxis tick={{ fontSize: 10 }} tickFormatter={(v) => fmtKbrl(v)} />
+                  <Tooltip
+                    cursor={{ fill: 'rgba(0,179,157,0.08)' }}
+                    formatter={(v, name) => [fmtMoney(v), name]}
+                    labelFormatter={(label) => `Semana ${label}`}
+                    contentStyle={{ borderRadius: 8, fontSize: 12 }}
+                  />
+                  <Legend wrapperStyle={{ fontSize: 11 }} />
+                  {anos.map((ano, idx) => (
+                    <Bar
+                      key={ano}
+                      dataKey={String(ano)}
+                      name={String(ano)}
+                      fill={corPorAno(ano, idx)}
+                      radius={[3, 3, 0, 0]}
+                      cursor="pointer"
+                      animationDuration={1000}
+                    >
+                      {semanas.map((s, i) => {
+                        const ehSel = s.num_semana === semanaSel;
+                        const ehAtual = String(ano) === anoCorrenteStr;
+                        const dim = ehAtual && s.num_semana > semanaCorrente;
+                        return (
+                          <Cell
+                            key={`c-${ano}-${i}`}
+                            fill={gradFill(corPorAno(ano, idx))}
+                            fillOpacity={dim ? 0.18 : 1}
+                            stroke={ehSel ? COL.amber : 'transparent'}
+                            strokeWidth={ehSel ? 2 : 0}
+                          />
+                        );
+                      })}
+                    </Bar>
+                  ))}
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+
+            {                           }
+            <div className="mt-4 pt-4 border-t border-border">
+              <div className="text-[11px] uppercase tracking-wide text-muted-foreground mb-2 font-medium">
+                Acumulado anual
+              </div>
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                {anos.map((ano, idx) => {
+                  const total = totaisPorAno[String(ano)] || 0;
+                  const anoAnt = anos[idx - 1];
+                  const totalAnt = anoAnt ? (totaisPorAno[String(anoAnt)] || 0) : 0;
+                  const delta = anoAnt && totalAnt > 0 ? ((total - totalAnt) / totalAnt) * 100 : null;
+                  const ehAtual = String(ano) === anoCorrenteStr;
+                  return (
+                    <div
+                      key={ano}
+                      className="rounded-lg border p-2.5"
+                      style={{ borderLeft: `3px solid ${corPorAno(ano, idx)}` }}
+                    >
+                      <div className="text-[10px] text-muted-foreground uppercase tracking-wide flex items-center gap-1">
+                        {ano}
+                        {ehAtual && <span className="text-[9px] px-1 rounded bg-primary/10 text-primary">em curso</span>}
+                      </div>
+                      <div className="text-sm font-semibold tabular-nums" style={{ color: corPorAno(ano, idx) }}>
+                        {fmtCompact(total)}
+                      </div>
+                      {delta !== null && (
+                        <div className={`text-[10px] mt-0.5 ${delta >= 0 ? 'text-emerald-600' : 'text-red-500'}`}>
+                          {fmtPct(delta)} vs {anoAnt}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+            {                                                         }
+            <AnimatePresence mode="wait">
+              {slotSel && (
+                <motion.div
+                  key={`sem-${semanaSel}`}
+                  initial={{ opacity: 0, y: 8 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -4 }}
+                  transition={{ duration: 0.25 }}
+                  className="mt-4 pt-4 border-t border-border"
+                >
+                  <div className="flex items-center justify-between mb-2 flex-wrap gap-2">
+                    <div className="text-[11px] uppercase tracking-wide text-muted-foreground font-medium">
+                      Semana selecionada
+                    </div>
+                    <span className="text-xs font-semibold px-2 py-0.5 rounded bg-amber-100 dark:bg-amber-500/20 text-amber-700 dark:text-amber-300">
+                      Semana {slotSel.num_semana}
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
+                    {anos.map((ano, idx) => {
+                      const valor = Number(slotSel[String(ano)] || 0);
+                      const label = slotSel[`${ano}_label`];
+                      const anoAnt = anos[idx - 1];
+                      const valorAnt = anoAnt ? Number(slotSel[String(anoAnt)] || 0) : 0;
+                      const delta = anoAnt && valorAnt > 0 ? ((valor - valorAnt) / valorAnt) * 100 : null;
+                      const ehAtual = String(ano) === anoCorrenteStr;
+                      const ehFuturo = ehAtual && slotSel.num_semana > semanaCorrente;
+                      return (
+                        <div
+                          key={ano}
+                          className="rounded-lg border p-3"
+                          style={{ borderLeft: `3px solid ${corPorAno(ano, idx)}` }}
+                        >
+                          <div className="text-[10px] uppercase tracking-wide text-muted-foreground flex items-center justify-between">
+                            <span>{ano}</span>
+                            {label && <span className="text-[9px] normal-case tracking-normal">{label}</span>}
+                          </div>
+                          <div className="text-lg font-bold tabular-nums mt-0.5" style={{ color: corPorAno(ano, idx) }}>
+                            {ehFuturo ? <span className="text-muted-foreground text-sm">— aguardando</span> : fmtMoney(valor)}
+                          </div>
+                          {delta !== null && !ehFuturo && (
+                            <div className={`text-[11px] ${delta >= 0 ? 'text-emerald-600' : 'text-red-500'}`}>
+                              {fmtPct(delta)} vs {anoAnt}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
+          </>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+
+const MOTIVO_TXT = {
+  periodo_em_aberto: 'período ainda em aberto',
+  base_zero: 'mês anterior sem receita neste decêndio',
+  sem_mes_anterior: 'não há mês anterior na série',
+};
+
+
+function VariacaoDecendio({ cmp }) {
+  if (!cmp) return null;
+  if (cmp.percentual === null || cmp.percentual === undefined) {
+    return (
+      <span className="text-sm text-muted-foreground" title={MOTIVO_TXT[cmp.motivo_sem_percentual] || ''}>
+        {cmp.situacao === 'em_andamento' ? 'em andamento' : '—'}
+        {cmp.base_mes ? ` · ${monthShort(cmp.base_mes)}: ${fmtKbrl(cmp.base_receita)}` : ''}
+      </span>
+    );
+  }
+  const sobe = cmp.percentual >= 0;
+  return (
+    <span
+      className="text-sm tabular-nums font-semibold"
+      style={{ color: sobe ? COL.green : COL.red }}
+      title={`${monthShort(cmp.base_mes)}: ${fmtMoney(cmp.base_receita)}`}
+    >
+      {fmtPct(cmp.percentual)} vs {monthShort(cmp.base_mes)}
+    </span>
+  );
+}
+
+
+
+
+
+
+
+
+
+
+
+
+function GradeDecendios({ comparativo, mesAtual }) {
+  const meses = (comparativo || []).slice(-6);
+  if (meses.length < 2) return null;
+  const LABEL = { 1: '1-10', 2: '11-20', 3: '21-fim' };
+
+  return (
+    <div className="mt-6 pt-5 border-t border-border">
+      <h4 className="text-base font-semibold mb-3">Mesmo decêndio, mês a mês</h4>
+      {
+                                                              }
+      <div className="overflow-x-auto -mx-1 px-1">
+        {
+
+
+
+                                             }
+        <table className="w-full text-base border-collapse">
+          <thead>
+            <tr className="text-muted-foreground">
+              <th className="text-left text-xs uppercase tracking-wider font-medium pb-2 pr-3 whitespace-nowrap">Dias</th>
+              {meses.map(m => (
+                <th
+                  key={m.mes}
+                  className={`text-right text-xs uppercase tracking-wider pb-2 px-3 whitespace-nowrap ${
+                    m.mes === mesAtual ? 'text-foreground font-bold' : 'font-medium'
+                  }`}
+                >
+                  {monthShort(m.mes)}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {[1, 2, 3].map(d => (
+              <tr key={d} className="border-t border-border/60">
+                <td className="py-3 pr-3 font-semibold whitespace-nowrap">{LABEL[d]}</td>
+                {meses.map(m => {
+                  const c = m.decendios?.find(x => x && x.decendio === d);
+                  const valor = Number(c?.receita || 0);
+                  const pct = c?.percentual;
+                  const ehAtual = m.mes === mesAtual;
+                  return (
+                    <td
+                      key={m.mes}
+                      className={`py-3 px-3 text-right tabular-nums whitespace-nowrap ${ehAtual ? 'bg-muted/40 rounded' : ''}`}
+                    >
+                      <div className={ehAtual ? 'font-bold' : 'font-medium'}>{fmtKbrl(valor)}</div>
+                      {pct === null || pct === undefined ? (
+                        <div className="text-sm text-muted-foreground mt-0.5">
+                          {c?.situacao === 'em_andamento' ? 'parcial' : c?.situacao === 'futuro' ? '—' : ''}
+                        </div>
+                      ) : (
+                        <div
+                          className="text-sm font-semibold mt-0.5"
+                          style={{ color: pct >= 0 ? COL.green : COL.red }}
+                        >
+                          {fmtPct(pct)}
+                        </div>
+                      )}
+                    </td>
+                  );
+                })}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <p className="text-xs text-muted-foreground mt-3">
+        Cada percentual compara com o mesmo decêndio do mês anterior. Últimos {meses.length} meses ·
+        decêndio em curso aparece como <span className="font-medium">parcial</span>, sem percentual.
+      </p>
+    </div>
+  );
+}
+
+function DecendioCard({ dados, mes, comparativo }) {
+  const total = dados.reduce((s, d) => s + Number(d.receita), 0);
+  const doMes = (comparativo || []).find(m => m.mes === mes);
+  const cmpDe = (d) => doMes?.decendios?.find(x => x && x.decendio === d) || null;
+  return (
+    <Card>
+      <CardContent className="pt-6">
+        <h3 className="text-base font-semibold mb-1">Decêndio · {monthShort(mes)}</h3>
+        <p className="text-xs text-muted-foreground mb-4">10 em 10 dias do mês</p>
+        <div className="space-y-3">
+          {[1, 2, 3].map((d, i) => {
+            const item = dados.find(x => x.decendio === d) || { receita: 0, despesa: 0, decendio_label: ['1-10', '11-20', '21-fim'][i] };
+            const pct = total > 0 ? (Number(item.receita) / total) * 100 : 0;
+            return (
+              <motion.div
+                key={d}
+                initial={{ opacity: 0, x: -10 }}
+                animate={{ opacity: 1, x: 0 }}
+                transition={{ delay: 0.8 + i * 0.1 }}
+              >
+                <div className="flex items-center justify-between text-sm mb-1">
+                  <span className="font-medium">Dias {item.decendio_label}</span>
+                  <span className="tabular-nums" style={{ color: COL.green }}>
+                    {fmtMoney(item.receita)}
+                  </span>
+                </div>
+                <div className="h-2 bg-muted rounded-full overflow-hidden">
+                  <motion.div
+                    className="h-full rounded-full cbrio-bar"
+                    style={{ background: COL.green }}
+                    initial={{ width: 0 }}
+                    animate={{ width: `${pct}%` }}
+                    transition={{ delay: 0.9 + i * 0.1, duration: 0.8 }}
+                  />
+                </div>
+                <div className="flex items-center justify-between gap-2 mt-0.5">
+                  <span className="text-sm text-muted-foreground tabular-nums">
+                    {pct.toFixed(1)}% do mês
+                  </span>
+                  <VariacaoDecendio cmp={cmpDe(d)} />
+                </div>
+              </motion.div>
+            );
+          })}
+        </div>
+        <GradeDecendios comparativo={comparativo} mesAtual={mes} />
+        <div className="mt-4 pt-3 border-t border-border flex items-center justify-between text-sm">
+          <span className="text-muted-foreground">Total do mês</span>
+          <span className="font-bold tabular-nums">{fmtMoney(total)}</span>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+function YoYSemanalChart({ dados, anoAtual, anoAnterior }) {
+  const formatado = dados.map(d => ({
+    label: d.semana_label,
+    [`${anoAtual}`]: d.receita_atual,
+    [`${anoAnterior}`]: d.receita_ano_anterior,
+  }));
+  return (
+    <Card>
+      <CardContent className="pt-6">
+        <h3 className="text-base font-semibold mb-1">Comparativo Ano a Ano · Semanal</h3>
+        <p className="text-xs text-muted-foreground mb-4">
+          Mesma semana (qua–ter) de {anoAtual} vs {anoAnterior}
+        </p>
+        <div style={{ width: '100%', height: 280 }}>
+          <ResponsiveContainer>
+            <ComposedChart data={formatado}>
+              <ChartGradients colors={[COL.primary]} />
+              <CartesianGrid strokeDasharray="3 3" opacity={0.2} />
+              <XAxis dataKey="label" tick={{ fontSize: 9 }} interval={Math.floor(formatado.length / 12)} />
+              <YAxis tick={{ fontSize: 10 }} tickFormatter={(v) => fmtKbrl(v)} />
+              <Tooltip formatter={(v) => fmtMoney(v)} contentStyle={{ borderRadius: 8, fontSize: 12 }} />
+              <Legend wrapperStyle={{ fontSize: 11 }} />
+              <Bar dataKey={`${anoAtual}`} fill={gradFill(COL.primary)} radius={[3, 3, 0, 0]} animationDuration={1000} />
+              <Line type="monotone" dataKey={`${anoAnterior}`} stroke={COL.amber} strokeWidth={2} strokeDasharray="5 5" dot={{ r: 3 }} animationDuration={1400} />
+            </ComposedChart>
+          </ResponsiveContainer>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+function FreqVsReceitaChart({ dados }) {
+  const formatado = dados.map(d => ({
+    label: monthShort(d.mes),
+    Frequência: Number(d.presencial),
+    Receita: Number(d.receita),
+    'Δ Freq %': d.delta_freq_pct,
+    'Δ Receita %': d.delta_receita_pct,
+    Elasticidade: d.elasticidade,
+  }));
+
+  const ult = dados[dados.length - 1] || {};
+  const elasticidadeMedia = dados
+    .filter(d => d.elasticidade !== null && Number.isFinite(d.elasticidade))
+    .reduce((s, d, _, arr) => s + d.elasticidade / arr.length, 0);
+
+  return (
+    <Card>
+      <CardContent className="pt-6">
+        <h3 className="text-base font-semibold mb-1">Frequência vs Arrecadação</h3>
+        <p className="text-xs text-muted-foreground mb-4">
+          Crescimento % mês a mês · elasticidade média {elasticidadeMedia.toFixed(2)}
+          {elasticidadeMedia > 1.1 && ' · receita cresce mais que frequência ✓'}
+          {elasticidadeMedia < 0.9 && elasticidadeMedia > 0 && ' · receita cresce menos que frequência ⚠'}
+        </p>
+        <div style={{ width: '100%', height: 280 }}>
+          <ResponsiveContainer>
+            <ComposedChart data={formatado}>
+              <CartesianGrid strokeDasharray="3 3" opacity={0.2} />
+              <XAxis dataKey="label" tick={{ fontSize: 10 }} />
+              <YAxis yAxisId="left" tick={{ fontSize: 10 }} tickFormatter={(v) => fmtKbrl(v)} />
+              <YAxis yAxisId="right" orientation="right" tick={{ fontSize: 10 }} tickFormatter={(v) => `${(v || 0).toFixed(0)}%`} />
+              <Tooltip
+                formatter={(v, name) => {
+                  if (name === 'Receita') return [fmtMoney(v), name];
+                  if (name === 'Frequência') return [v?.toLocaleString('pt-BR'), name];
+                  if (typeof v === 'number') return [`${v.toFixed(1)}%`, name];
+                  return [v, name];
+                }}
+                contentStyle={{ borderRadius: 8, fontSize: 12 }}
+              />
+              <Legend wrapperStyle={{ fontSize: 11 }} />
+              <Bar yAxisId="left" dataKey="Receita" fill={COL.green} fillOpacity={0.7} radius={[3, 3, 0, 0]} animationDuration={1200} />
+              <Line yAxisId="right" type="monotone" dataKey="Δ Freq %" stroke={COL.blue} strokeWidth={2} dot={{ r: 3 }} animationDuration={1400} />
+              <Line yAxisId="right" type="monotone" dataKey="Δ Receita %" stroke={COL.purple} strokeWidth={2} dot={{ r: 3 }} animationDuration={1600} />
+            </ComposedChart>
+          </ResponsiveContainer>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+
+const COL = {
+  primary: '#00B39D',
+  green: '#10b981',
+  red: '#ef4444',
+  amber: '#f59e0b',
+  blue: '#3b82f6',
+  purple: '#8b5cf6',
+};
+
+function monthShort(yyyymm) {
+  if (!yyyymm) return '';
+  const meses = ['jan', 'fev', 'mar', 'abr', 'mai', 'jun', 'jul', 'ago', 'set', 'out', 'nov', 'dez'];
+  const [y, m] = yyyymm.split('-');
+  return `${meses[parseInt(m, 10) - 1]}/${y.slice(2)}`;
+}
+
+function fmtKbrl(v) {
+  const n = Math.abs(Number(v || 0));
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1000) return `${(n / 1000).toFixed(0)}k`;
+  return String(n);
+}
+
+
+
+
+function KpiBig({ custom, icon: Icon, accent, label, valor, format = fmtMoney, delta, sub, yoy, mom }) {
+  let DeltaIcon = Minus;
+  let deltaColor = 'text-muted-foreground';
+  if (delta !== null && delta !== undefined) {
+    if (Math.abs(delta) < 1) { DeltaIcon = Minus; deltaColor = 'text-muted-foreground'; }
+    else if (delta > 0) { DeltaIcon = ArrowUp; deltaColor = 'text-emerald-600'; }
+    else { DeltaIcon = ArrowDown; deltaColor = 'text-rose-600'; }
+  }
+
+  return (
+    <motion.div
+      custom={custom}
+      variants={{
+        hidden: { opacity: 0, y: 24 },
+        visible: (i) => ({
+          opacity: 1, y: 0,
+          transition: { delay: i * 0.1, duration: 0.5, ease: 'easeOut' },
+        }),
+      }}
+      whileHover={{ y: -3, transition: { duration: 0.2 } }}
+    >
+      <Card className="relative overflow-hidden border-border hover:shadow-lg transition-shadow">
+        <div className="absolute top-0 left-0 right-0 h-1" style={{ background: accent }} />
+        <div className="absolute top-2 right-2 h-20 w-20 rounded-full opacity-10" style={{ background: accent, filter: 'blur(30px)' }} />
+        <CardContent className="pt-5 pb-5 relative">
+          <div className="flex items-center justify-between mb-3">
+            <div className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+              {label}
+            </div>
+            <div className="h-9 w-9 rounded-lg flex items-center justify-center" style={{ background: accent + '20', color: accent }}>
+              <Icon className="h-4 w-4" />
+            </div>
+          </div>
+          <div className="text-2xl font-bold tabular-nums" style={{ color: accent }}>
+            <CountUp value={valor || 0} format={format} />
+          </div>
+          <div className="flex items-center gap-2 mt-2">
+            {delta !== null && delta !== undefined && (
+              <div className={`flex items-center gap-1 text-xs font-medium ${deltaColor}`}>
+                <DeltaIcon className="h-3 w-3" />
+                {fmtPct(delta)}
+              </div>
+            )}
+            {sub && <div className="text-xs text-muted-foreground">{sub}</div>}
+          </div>
+          {(mom || yoy) && (
+            <div className="mt-2 pt-2 border-t border-border/50 space-y-1">
+              {mom && (() => {
+                const d = mom.delta;
+                const up = d != null && d >= 0;
+                const MI = (d == null || Math.abs(d) < 1) ? Minus : (up ? ArrowUp : ArrowDown);
+                const cor = (d == null || Math.abs(d) < 1) ? 'text-muted-foreground' : (up ? 'text-emerald-600' : 'text-rose-600');
+                return (
+                  <div className="flex items-center gap-1.5 text-xs">
+                    <MI className={`h-3.5 w-3.5 ${cor}`} />
+                    <span className={`font-semibold ${cor}`}>{fmtPct(d)}</span>
+                    <span className="text-muted-foreground">vs. mesma semana do mês passado</span>
+                    {mom.valor ? <span className="text-muted-foreground/70">· {fmtCompact(mom.valor)}</span> : null}
+                  </div>
+                );
+              })()}
+              {yoy && <div className="text-[10px] text-muted-foreground">{yoy}</div>}
+            </div>
+          )}
+        </CardContent>
+      </Card>
+    </motion.div>
+  );
+}
+
+function BucketCard({ custom, bucket, color, isAcumulado, semana }) {
+  const [drilldown, setDrilldown] = useState(null);
+  if (!bucket) return null;
+
+  return (
+    <motion.div
+      variants={{
+        hidden: { opacity: 0, y: 20 },
+        visible: { opacity: 1, y: 0, transition: { delay: 0.2 + custom * 0.08, duration: 0.5 } },
+      }}
+      whileHover={{ y: -2 }}
+    >
+      <Card className={`relative overflow-hidden ${isAcumulado ? 'border-primary/40 bg-primary/5' : ''}`}>
+        <div className="absolute top-0 left-0 bottom-0 w-1" style={{ background: color }} />
+        <CardContent className="pt-5 pb-5 pl-6">
+          <div className="flex items-center justify-between mb-3">
+            <div>
+              <h4 className="text-base font-bold" style={{ color }}>{bucket.nome}</h4>
+              <div className="text-[10px] text-muted-foreground uppercase tracking-wider flex items-center gap-1">
+                {isAcumulado ? 'Soma da semana' : 'Categorias'}
+                {bucket.categorias.length > 0 && (
+                  <span className="text-[9px] opacity-60">· clique pra detalhar</span>
+                )}
+              </div>
+            </div>
+            <div className="text-xl font-bold tabular-nums">
+              <CountUp value={bucket.total} duration={1} />
+            </div>
+          </div>
+          {bucket.categorias.length === 0 ? (
+            <div className="text-xs text-muted-foreground py-3 text-center">
+              Sem receita classificada
+            </div>
+          ) : (
+            <div className="space-y-2 mt-2">
+              {bucket.categorias.map((c, i) => (
+                <motion.button
+                  key={c.categoria}
+                  initial={{ opacity: 0, x: -10 }}
+                  animate={{ opacity: 1, x: 0 }}
+                  transition={{ delay: 0.4 + custom * 0.08 + i * 0.04 }}
+                  onClick={() => setDrilldown({ categoria: c.categoria, color, valor: c.valor })}
+                  className="w-full text-left space-y-1 rounded-md p-1 -mx-1 hover:bg-muted/60 transition cursor-pointer focus:outline-none focus:ring-2 focus:ring-primary/30"
+                >
+                  <div className="flex items-center justify-between text-xs">
+                    <span className="font-medium truncate">{c.categoria}</span>
+                    <div className="flex items-center gap-2 tabular-nums shrink-0">
+                      <span className="text-muted-foreground">{c.pct.toFixed(1)}%</span>
+                      <span className="font-semibold" style={{ color }}>{fmtMoney(c.valor)}</span>
+                    </div>
+                  </div>
+                  <div className="h-1.5 bg-muted rounded-full overflow-hidden">
+                    <motion.div
+                      className="h-full rounded-full cbrio-bar"
+                      style={{ background: color }}
+                      initial={{ width: 0 }}
+                      animate={{ width: `${Math.min(100, c.pct)}%` }}
+                      transition={{ delay: 0.5 + custom * 0.08 + i * 0.04, duration: 0.7 }}
+                    />
+                  </div>
+                </motion.button>
+              ))}
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      {drilldown && semana && (
+        <TransacoesDrilldownDialog
+          open={!!drilldown}
+          onClose={() => setDrilldown(null)}
+          titulo={drilldown.categoria}
+          subtitulo={`Receitas · ${bucket.nome} · ${semana.inicio} a ${semana.fim}`}
+          color={drilldown.color}
+          totalEsperado={drilldown.valor}
+          fetcher={() => financeiroV2.categoriaTransacoes({
+            categoria: drilldown.categoria,
+            inicio: semana.inicio,
+            fim: semana.fim,
+          })}
+        />
+      )}
+    </motion.div>
+  );
+}
+
+function LoadingPretty() {
+  return (
+    <div className="flex flex-col items-center justify-center py-20 gap-3">
+      <motion.div
+        className="h-10 w-10 rounded-full border-2 border-primary border-t-transparent"
+        animate={{ rotate: 360 }}
+        transition={{ duration: 1, repeat: Infinity, ease: 'linear' }}
+      />
+      <div className="text-sm text-muted-foreground">Montando dashboard semanal...</div>
+    </div>
+  );
+}
+
+
+
+
+
+function MelhorSemanaCards({ melhor }) {
+  return (
+    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+      <DestaqueCard
+        titulo="🏆 Melhor semana do mês"
+        semana={melhor.melhor_do_mes}
+        gradient="from-amber-500 to-orange-500"
+        bgClass="bg-amber-500/10"
+      />
+      <DestaqueCard
+        titulo="👑 Melhor semana do ano"
+        semana={melhor.melhor_do_ano}
+        gradient="from-purple-500 to-pink-500"
+        bgClass="bg-purple-500/10"
+      />
+    </div>
+  );
+}
+
+function DestaqueCard({ titulo, semana, gradient, bgClass }) {
+  if (!semana) {
+    return (
+      <Card>
+        <CardContent className="pt-6 pb-6 text-center">
+          <div className="text-xs text-muted-foreground uppercase tracking-wide mb-2">{titulo}</div>
+          <div className="text-sm text-muted-foreground">Sem dados ainda</div>
+        </CardContent>
+      </Card>
+    );
+  }
+  return (
+    <Card className="relative overflow-hidden">
+      <div className={`absolute top-0 left-0 right-0 h-1 bg-gradient-to-r ${gradient}`} />
+      <div className={`absolute -top-8 -right-8 h-32 w-32 rounded-full opacity-20 ${bgClass} blur-2xl`} />
+      <CardContent className="pt-6 pb-6 relative">
+        <div className="text-xs font-medium uppercase tracking-wide text-muted-foreground mb-2">
+          {titulo}
+        </div>
+        <div className="text-2xl font-bold tabular-nums mb-1" style={{ color: COL.green }}>
+          <CountUp value={semana.receita} />
+        </div>
+        <div className="text-sm font-semibold">{semana.semana_label}</div>
+        <div className="text-xs text-muted-foreground mt-1">
+          {semana.semana_inicio} a {semana.semana_fim}
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+function SaidasDetalhadas({ saidas: saidasInicial }) {
+  const hoje = new Date();
+  const anoAtual = hoje.getFullYear();
+  const anos = [2022, 2023, 2024, 2025, 2026, 2027].filter(a => a <= anoAtual + 1);
+  const MESES = ['Jan','Fev','Mar','Abr','Mai','Jun','Jul','Ago','Set','Out','Nov','Dez'];
+
+
+  const mesInicial = saidasInicial?.mes || hoje.toISOString().slice(0, 7);
+  const [ano, setAno] = useState(Number(mesInicial.split('-')[0]));
+  const [mes, setMes] = useState(Number(mesInicial.split('-')[1]));
+  const [view, setView] = useState('categoria');
+  const [drilldown, setDrilldown] = useState(null);
+  const [saidas, setSaidas] = useState(saidasInicial);
+  const [loading, setLoading] = useState(false);
+
+  const mesLabel = `${ano}-${String(mes).padStart(2, '0')}`;
+
+
+  useEffect(() => {
+    if (saidasInicial?.mes === mesLabel) { setSaidas(saidasInicial); return; }
+    let cancelled = false;
+    setLoading(true);
+    financeiroV2.dashboard.saidasDetalhadas?.(mesLabel)
+      .then(r => { if (!cancelled) setSaidas(r); })
+      .catch(e => console.warn('[Saidas]:', e?.message))
+      .finally(() => !cancelled && setLoading(false));
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mesLabel]);
+
+  const dados = saidas?.[view];
+
+  const periodo = useMemo(() => {
+    const last = new Date(ano, mes, 0).getDate();
+    return {
+      label: mesLabel,
+      inicio: `${mesLabel}-01`,
+      fim: `${mesLabel}-${String(last).padStart(2, '0')}`,
+    };
+  }, [ano, mes, mesLabel]);
+
+  const COLORS_VIEW = {
+    categoria: ['#ef4444', '#f97316', '#f59e0b', '#eab308', '#84cc16', '#10b981', '#06b6d4', '#3b82f6', '#8b5cf6', '#ec4899', '#f43f5e', '#a855f7'],
+    plano: ['#3b82f6', '#06b6d4', '#10b981', '#84cc16', '#eab308', '#f59e0b'],
+    centro: ['#8b5cf6', '#ec4899', '#f43f5e', '#a855f7'],
+  };
+  const palette = COLORS_VIEW[view];
+
+  const onClickLinha = (linha) => {
+    const params = { inicio: periodo.inicio, fim: periodo.fim };
+    let titulo = '';
+    if (view === 'categoria') {
+      params.categoria_codigo = linha.categoria_codigo;
+      titulo = linha.categoria_nome;
+    } else if (view === 'plano') {
+      params.plano_codigo = linha.plano_codigo;
+      titulo = `${linha.plano_codigo} · ${linha.plano_nome}`;
+    } else {
+      params.centro_codigo = linha.centro_codigo;
+      titulo = `${linha.centro_codigo} · ${linha.centro_nome}`;
+    }
+    setDrilldown({ titulo, params, valor: Number(linha.total) });
+  };
+
+  return (
+    <Card className="relative overflow-hidden">
+      <div className="absolute top-0 left-0 right-0 h-1 bg-gradient-to-r from-rose-500 via-amber-500 to-emerald-500" />
+      <CardContent className="pt-6">
+        <div className="flex items-start justify-between mb-4 flex-wrap gap-3">
+          <div>
+            <h3 className="text-base font-semibold flex items-center gap-2">
+              <TrendingDown className="h-4 w-4 text-rose-500" />
+              Saídas detalhadas · {MESES[mes - 1]}/{ano}
+              {loading && <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />}
+            </h3>
+            <p className="text-xs text-muted-foreground">
+              Total: <strong className="text-rose-600 dark:text-rose-400">{fmtMoney(dados?.total || 0)}</strong>
+              {dados?.linhas?.length > 0 && (
+                <span className="ml-2 opacity-70">· clique numa linha pra ver lançamentos</span>
+              )}
+            </p>
+          </div>
+          <div className="flex flex-col items-end gap-2">
+            {                      }
+            <div className="flex gap-1.5">
+              <select
+                value={mes}
+                onChange={(e) => setMes(Number(e.target.value))}
+                className="px-2 py-1.5 text-xs rounded-md border border-border bg-background"
+              >
+                {MESES.map((m, i) => <option key={i + 1} value={i + 1}>{m}</option>)}
+              </select>
+              <select
+                value={ano}
+                onChange={(e) => setAno(Number(e.target.value))}
+                className="px-2 py-1.5 text-xs rounded-md border border-border bg-background tabular-nums"
+              >
+                {anos.map(a => <option key={a} value={a}>{a}</option>)}
+              </select>
+            </div>
+            {                     }
+            <div className="flex gap-1 bg-muted/40 p-1 rounded-lg">
+              {[
+                { key: 'categoria', label: 'Por categoria' },
+                { key: 'plano', label: 'Por plano' },
+                { key: 'centro', label: 'Por centro' },
+              ].map(t => (
+                <button
+                  key={t.key}
+                  onClick={() => setView(t.key)}
+                  className={`px-3 py-1.5 text-xs font-medium rounded-md transition ${
+                    view === t.key
+                      ? 'bg-primary text-primary-foreground shadow-sm'
+                      : 'text-muted-foreground hover:text-foreground'
+                  }`}
+                >
+                  {t.label}
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        {!dados?.linhas?.length ? (
+          <div className="py-12 text-center text-sm text-muted-foreground">
+            {loading ? 'Carregando...' : 'Sem despesas classificadas neste mês'}
+          </div>
+        ) : view === 'categoria' ? (
+          <div className="flex flex-col lg:flex-row gap-6">
+            <div className="shrink-0 w-full lg:w-[300px] h-[300px]">
+              <ResponsiveContainer width="100%" height="100%">
+                <PieChartLite linhas={dados.linhas} colors={palette} />
+              </ResponsiveContainer>
+            </div>
+            <div className="flex-1 min-w-0">
+              <SaidasListModerna
+                linhas={dados.linhas}
+                labelKey="categoria_nome"
+                extraKey="categoria_codigo"
+                colors={palette}
+                onClick={onClickLinha}
+              />
+            </div>
+          </div>
+        ) : (
+          <SaidasListModerna
+            linhas={dados.linhas}
+            labelKey={view === 'plano' ? 'plano_nome' : 'centro_nome'}
+            extraKey={view === 'plano' ? 'plano_codigo' : 'centro_codigo'}
+            colors={palette}
+            onClick={onClickLinha}
+          />
+        )}
+      </CardContent>
+
+      {drilldown && (
+        <TransacoesDrilldownDialog
+          open={!!drilldown}
+          onClose={() => setDrilldown(null)}
+          titulo={drilldown.titulo}
+          subtitulo={`Despesas · ${periodo.inicio} a ${periodo.fim}`}
+          color={C.red}
+          totalEsperado={drilldown.valor}
+          fetcher={() => financeiroV2.despesaTransacoes(drilldown.params)}
+        />
+      )}
+    </Card>
+  );
+}
+
+
+
+
+function SaidasListModerna({ linhas, labelKey, extraKey, colors, onClick }) {
+  const max = Math.max(...linhas.map(l => Number(l.total)), 1);
+  const total = linhas.reduce((s, l) => s + Number(l.total), 0);
+  return (
+    <div className="space-y-1.5">
+      {linhas.slice(0, 15).map((l, i) => {
+        const cor = colors[i % colors.length];
+        const valor = Number(l.total);
+        const pct = (valor / total) * 100;
+        const barPct = (valor / max) * 100;
+        return (
+          <motion.button
+            key={i}
+            type="button"
+            initial={{ opacity: 0, x: -10 }}
+            animate={{ opacity: 1, x: 0 }}
+            transition={{ delay: i * 0.03 }}
+            onClick={() => onClick?.(l)}
+            className="w-full text-left rounded-lg p-2.5 hover:bg-muted/60 transition cursor-pointer focus:outline-none focus:ring-2 focus:ring-primary/30 group"
+          >
+            <div className="flex items-baseline justify-between gap-3 mb-1.5">
+              <div className="flex items-center gap-2 min-w-0">
+                <span className="h-2.5 w-2.5 rounded-full shrink-0" style={{ background: cor }} />
+                <span className="text-sm font-medium truncate group-hover:text-foreground">{l[labelKey] || '(sem nome)'}</span>
+                {extraKey && l[extraKey] && (
+                  <span className="text-[10px] text-muted-foreground tabular-nums shrink-0 font-mono">{l[extraKey]}</span>
+                )}
+              </div>
+              <div className="flex items-center gap-3 tabular-nums shrink-0">
+                <span className="text-[11px] text-muted-foreground w-12 text-right">{pct.toFixed(1)}%</span>
+                <span className="text-sm font-semibold" style={{ color: cor }}>{fmtMoney(valor)}</span>
+              </div>
+            </div>
+            <div className="h-1.5 bg-muted rounded-full overflow-hidden">
+              <motion.div
+                className="h-full rounded-full cbrio-bar"
+                style={{ background: cor }}
+                initial={{ width: 0 }}
+                animate={{ width: `${barPct}%` }}
+                transition={{ duration: 0.7, delay: i * 0.03 }}
+              />
+            </div>
+          </motion.button>
+        );
+      })}
+      {linhas.length > 15 && (
+        <div className="text-[10px] text-muted-foreground text-center pt-2">
+          + {linhas.length - 15} categorias menores agrupadas
+        </div>
+      )}
+    </div>
+  );
+}
+
+
+function PieChartLite({ linhas, colors }) {
+  const COLORS_PIE = colors || ['#00B39D', '#3b82f6', '#f59e0b', '#8b5cf6', '#ec4899', '#10b981', '#ef4444', '#06b6d4'];
+  const data = linhas.slice(0, 8).map((l, i) => ({
+    name: l.categoria_nome || l.plano_nome || l.centro_nome,
+    value: Number(l.total),
+    color: COLORS_PIE[i % COLORS_PIE.length],
+  }));
+  return (
+    <PieChart>
+      <Pie data={data} cx="50%" cy="50%" outerRadius={95} innerRadius={55} dataKey="value" paddingAngle={3} animationDuration={1200}>
+        {data.map((d, i) => <Cell key={i} fill={d.color} />)}
+      </Pie>
+      <Tooltip formatter={(v) => fmtMoney(v)} contentStyle={{ borderRadius: 10, fontSize: 12, border: '1px solid var(--cbrio-border)' }} />
+    </PieChart>
+  );
+}
+
+function SaidasList({ linhas, labelKey, extraKey }) {
+  const max = Math.max(...linhas.map(l => Number(l.total)), 1);
+  return (
+    <div className="space-y-2">
+      {linhas.slice(0, 12).map((l, i) => (
+        <motion.div
+          key={i}
+          initial={{ opacity: 0, x: -10 }}
+          animate={{ opacity: 1, x: 0 }}
+          transition={{ delay: i * 0.03 }}
+        >
+          <div className="flex items-center justify-between text-sm mb-1">
+            <span className="truncate" title={l[labelKey]}>
+              {extraKey && <span className="font-mono opacity-50 text-xs mr-2">{l[extraKey]}</span>}
+              {l[labelKey]}
+            </span>
+            <div className="flex items-center gap-2 tabular-nums shrink-0">
+              <span className="text-xs text-muted-foreground">{l.pct?.toFixed(1)}%</span>
+              <span className="font-semibold" style={{ color: COL.red }}>{fmtMoney(l.total)}</span>
+            </div>
+          </div>
+          <div className="h-1.5 bg-muted rounded-full overflow-hidden">
+            <motion.div
+              className="h-full rounded-full cbrio-bar"
+              style={{ background: COL.red }}
+              initial={{ width: 0 }}
+              animate={{ width: `${(Number(l.total) / max) * 100}%` }}
+              transition={{ duration: 0.7, delay: i * 0.03 }}
+            />
+          </div>
+        </motion.div>
+      ))}
+    </div>
+  );
+}
+
+const TIPO_META_LABEL = {
+  receita_semanal: 'Receita semanal',
+  receita_mensal: 'Receita mensal',
+  receita_anual: 'Receita anual',
+  despesa_max_semanal: 'Teto despesa semanal',
+  despesa_max_mensal: 'Teto despesa mensal',
+  despesa_max_anual: 'Teto despesa anual',
+  saldo_minimo: 'Saldo mínimo',
+  pct_categoria: '% por categoria',
+  meta_centro_custo: 'Meta centro de custo',
+};
+
+function MetasFinanceiras({ metas, onChange, completo, receitaSemana }) {
+  const [editing, setEditing] = useState(null);
+  const [showForm, setShowForm] = useState(false);
+
+  const salvar = async (payload) => {
+    try {
+      if (payload.id) await financeiroV2.metas.update(payload.id, payload);
+      else await financeiroV2.metas.create(payload);
+      setEditing(null);
+      setShowForm(false);
+      onChange?.();
+    } catch (e) {
+      alert(`Erro: ${e.message}`);
+    }
+  };
+
+  const remover = async (id) => {
+    if (!confirm('Remover esta meta?')) return;
+    await financeiroV2.metas.remove(id);
+    onChange?.();
+  };
+
+  return (
+    <Card>
+      <CardContent className="pt-6">
+        <div className="flex items-center justify-between mb-4">
+          <div>
+            <h3 className="text-base font-semibold">Metas Financeiras</h3>
+            <p className="text-xs text-muted-foreground">{metas.length} metas ativas · gauge ou barra de progresso</p>
+          </div>
+          <Button size="sm" onClick={() => { setEditing(null); setShowForm(true); }}>
+            + Nova meta
+          </Button>
+        </div>
+
+        {metas.length === 0 ? (
+          <div className="py-12 text-center">
+            <Target className="h-12 w-12 mx-auto text-muted-foreground mb-3" />
+            <p className="text-sm text-muted-foreground">Nenhuma meta cadastrada</p>
+            <Button size="sm" className="mt-3" onClick={() => { setEditing(null); setShowForm(true); }}>
+              + Criar primeira meta
+            </Button>
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+            {metas.map((m, i) => (
+              <MetaCardFin
+                key={m.id}
+                meta={m}
+                idx={i}
+                ctx={{ completo, receitaSemana }}
+                onEdit={() => { setEditing(m); setShowForm(true); }}
+                onDelete={() => remover(m.id)}
+              />
+            ))}
+          </div>
+        )}
+
+        {showForm && (
+          <MetaForm
+            inicial={editing || {}}
+            onCancel={() => { setEditing(null); setShowForm(false); }}
+            onSave={salvar}
+          />
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function MetaCardFin({ meta, idx, ctx, onEdit, onDelete }) {
+  const atualBruto = calcularAtualMeta(meta, ctx);
+  const atual = atualBruto === null ? 0 : Math.max(0, Number(atualBruto));
+  const metaValor = Number(meta.valor) || 1;
+  const semDado = atualBruto === null;
+
+
+  const isInverso = meta.tipo === 'despesa_max_mensal';
+  const pct = isInverso
+    ? Math.min(200, Math.round((atual / metaValor) * 100))
+    : Math.min(200, Math.round((atual / metaValor) * 100));
+  const cor = isInverso
+    ? (pct <= 80 ? '#10b981' : pct <= 100 ? '#f59e0b' : '#ef4444')
+    : (pct >= 100 ? '#10b981' : pct >= 70 ? '#f59e0b' : '#ef4444');
+
+  const tipoGrafico = meta.tipo_grafico || 'gauge';
+  const tipoLabel = TIPO_META_LABEL[meta.tipo] || meta.tipo;
+  const periodoTxt = labelPeriodoMeta(meta.tipo);
+
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 12 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.4, delay: idx * 0.05, ease: 'easeOut' }}
+    >
+      <Card className={`relative overflow-hidden ${!meta.ativa ? 'opacity-60' : ''}`}>
+        <div className="absolute top-0 left-0 right-0 h-1" style={{ background: cor }} />
+        <CardContent className="pt-5 pb-4">
+          <div className="flex items-start justify-between gap-2 mb-3">
+            <div className="min-w-0 flex-1">
+              <Badge variant="outline" className="text-[10px] mb-1">{tipoLabel}</Badge>
+              <h4 className="text-sm font-semibold leading-tight truncate" title={meta.descricao || tipoLabel}>
+                {meta.descricao || tipoLabel}
+              </h4>
+              {(meta.plano || meta.centro) && (
+                <div className="text-[10px] text-muted-foreground mt-1 truncate">
+                  {meta.plano && `${meta.plano.codigo} ${meta.plano.nome}`}
+                  {meta.centro && ` · ${meta.centro.codigo} ${meta.centro.nome}`}
+                </div>
+              )}
+            </div>
+            <div className="flex gap-0.5 shrink-0">
+              <button
+                onClick={onEdit}
+                className="p-1.5 rounded hover:bg-muted text-muted-foreground hover:text-foreground transition-colors"
+                title="Editar"
+              >
+                <FileText className="h-3.5 w-3.5" />
+              </button>
+              <button
+                onClick={onDelete}
+                className="p-1.5 rounded hover:bg-red-500/10 text-muted-foreground hover:text-red-500 transition-colors"
+                title="Remover"
+              >
+                <span className="text-sm leading-none">×</span>
+              </button>
+            </div>
+          </div>
+
+          {semDado ? (
+            <div className="py-8 text-center text-xs text-muted-foreground">
+              Cálculo automático ainda não disponível para este tipo
+            </div>
+          ) : tipoGrafico === 'gauge' ? (
+            <div className="-mt-2">
+              <MetaGauge
+                atual={atual}
+                meta={metaValor}
+                anim={`${meta.id}-${atual}`}
+                size={200}
+                label={`${pct}% ${isInverso ? 'consumido' : 'atingido'}`}
+                showLabels={false}
+              />
+              <div className="text-center text-[11px] text-muted-foreground -mt-2">
+                <span className="tabular-nums font-medium" style={{ color: cor }}>{fmtCompact(atual)}</span>
+                <span className="mx-1">de</span>
+                <span className="tabular-nums">{fmtCompact(metaValor)}</span>
+                {periodoTxt && <span className="ml-1">· {periodoTxt}</span>}
+              </div>
+            </div>
+          ) : (
+            <div className="space-y-2">
+              <div className="flex items-baseline justify-between">
+                <motion.div
+                  key={`val-${meta.id}-${atual}`}
+                  initial={{ scale: 0.85, opacity: 0 }}
+                  animate={{ scale: 1, opacity: 1 }}
+                  transition={{ duration: 0.4 }}
+                  className="text-2xl font-bold tabular-nums"
+                  style={{ color: cor }}
+                >
+                  <CountUp value={atual} format={fmtCompact} />
+                </motion.div>
+                <div className="text-xs text-muted-foreground tabular-nums">
+                  / {fmtCompact(metaValor)}
+                </div>
+              </div>
+              <div className="h-3 rounded-full bg-muted overflow-hidden">
+                <motion.div
+                  key={`bar-${meta.id}-${pct}`}
+                  className="h-full rounded-full cbrio-bar"
+                  style={{ background: cor }}
+                  initial={{ width: 0 }}
+                  animate={{ width: `${Math.min(100, pct)}%` }}
+                  transition={{ duration: 1.0, ease: 'easeOut' }}
+                />
+              </div>
+              <div className="flex items-baseline justify-between text-[11px]">
+                <span className="font-semibold tabular-nums" style={{ color: cor }}>{pct}%</span>
+                <span className="text-muted-foreground">{periodoTxt}</span>
+              </div>
+            </div>
+          )}
+        </CardContent>
+      </Card>
+    </motion.div>
+  );
+}
+
+function MetaForm({ inicial, onCancel, onSave }) {
+  const [form, setForm] = useState({
+    tipo: inicial.tipo || 'receita_mensal',
+    descricao: inicial.descricao || '',
+    valor: inicial.valor || '',
+    ano: inicial.ano || new Date().getFullYear(),
+    mes_inicio: inicial.mes_inicio || 1,
+    mes_fim: inicial.mes_fim || 12,
+    observacao: inicial.observacao || '',
+    tipo_grafico: inicial.tipo_grafico || 'gauge',
+    ativa: inicial.ativa !== false,
+    id: inicial.id,
+  });
+  const tipos = [
+    { v: 'receita_semanal', l: 'Receita semanal' },
+    { v: 'receita_mensal', l: 'Receita mensal' },
+    { v: 'receita_anual', l: 'Receita anual' },
+    { v: 'despesa_max_semanal', l: 'Teto despesa semanal' },
+    { v: 'despesa_max_mensal', l: 'Teto despesa mensal' },
+    { v: 'despesa_max_anual', l: 'Teto despesa anual' },
+    { v: 'saldo_minimo', l: 'Saldo mínimo' },
+    { v: 'pct_categoria', l: '% por categoria' },
+    { v: 'meta_centro_custo', l: 'Meta centro de custo' },
+  ];
+  return (
+    <motion.div
+      initial={{ opacity: 0, height: 0 }}
+      animate={{ opacity: 1, height: 'auto' }}
+      className="mt-4 p-4 border border-border rounded-lg bg-muted/30"
+    >
+      <h4 className="text-sm font-semibold mb-3">{form.id ? 'Editar' : 'Nova'} meta</h4>
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+        <div>
+          <label className="text-xs font-medium text-muted-foreground block mb-1">Tipo</label>
+          <select
+            value={form.tipo}
+            onChange={(e) => setForm({ ...form, tipo: e.target.value })}
+            className="w-full px-3 py-2 text-sm rounded-md border border-border bg-background"
+          >
+            {tipos.map(t => <option key={t.v} value={t.v}>{t.l}</option>)}
+          </select>
+        </div>
+        <div>
+          <label className="text-xs font-medium text-muted-foreground block mb-1">Valor (R$)</label>
+          <input
+            type="number"
+            step="0.01"
+            value={form.valor}
+            onChange={(e) => setForm({ ...form, valor: e.target.value })}
+            className="w-full px-3 py-2 text-sm rounded-md border border-border bg-background tabular-nums"
+            placeholder="0.00"
+          />
+        </div>
+        <div>
+          <label className="text-xs font-medium text-muted-foreground block mb-1">Descrição</label>
+          <input
+            type="text"
+            value={form.descricao}
+            onChange={(e) => setForm({ ...form, descricao: e.target.value })}
+            className="w-full px-3 py-2 text-sm rounded-md border border-border bg-background"
+            placeholder="Ex: Receita mínima de janeiro"
+          />
+        </div>
+        <div>
+          <label className="text-xs font-medium text-muted-foreground block mb-1">Ano</label>
+          <input
+            type="number"
+            value={form.ano}
+            onChange={(e) => setForm({ ...form, ano: parseInt(e.target.value) || 2026 })}
+            className="w-full px-3 py-2 text-sm rounded-md border border-border bg-background tabular-nums"
+          />
+        </div>
+        <div className="md:col-span-2">
+          <label className="text-xs font-medium text-muted-foreground block mb-1">Visualização</label>
+          <div className="grid grid-cols-2 gap-2">
+            {[
+              { v: 'gauge', l: 'Gauge (meia-lua)', icon: Activity },
+              { v: 'barra', l: 'Barra de progresso', icon: BarChart3 },
+            ].map(t => {
+              const ativo = form.tipo_grafico === t.v;
+              const Icone = t.icon;
+              return (
+                <button
+                  key={t.v}
+                  type="button"
+                  onClick={() => setForm({ ...form, tipo_grafico: t.v })}
+                  className={`p-2 rounded-lg border text-xs font-medium transition-all flex items-center gap-2 ${
+                    ativo
+                      ? 'bg-primary/10 border-primary text-primary'
+                      : 'border-border text-muted-foreground hover:border-foreground/30'
+                  }`}
+                >
+                  <Icone className="h-4 w-4" />
+                  {t.l}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+        <div className="md:col-span-2">
+          <label className="text-xs font-medium text-muted-foreground block mb-1">Observação</label>
+          <input
+            type="text"
+            value={form.observacao}
+            onChange={(e) => setForm({ ...form, observacao: e.target.value })}
+            className="w-full px-3 py-2 text-sm rounded-md border border-border bg-background"
+          />
+        </div>
+      </div>
+      <div className="flex justify-end gap-2 mt-4">
+        <Button size="sm" variant="outline" onClick={onCancel}>Cancelar</Button>
+        <Button size="sm" onClick={() => onSave({ ...form, valor: Number(form.valor), periodicidade: periodicidadeDoTipo(form.tipo) })}>
+          {form.id ? 'Salvar' : 'Criar meta'}
+        </Button>
+      </div>
+    </motion.div>
+  );
+}
+
+
+
+
+function FreqVsArrecadacaoSemanal() {
+  const [dados, setDados] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [selectedIdx, setSelectedIdx] = useState(null);
+  const [semanasJanela, setSemanasJanela] = useState(20);
+  const [filtrosG] = useFiltrosGlobais();
+  const semExtra = !!filtrosG.sem_extra;
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    financeiroV2.freqArrecadacaoSemanal(semanasJanela)
+      .then((r) => {
+        if (cancelled) return;
+        setDados(r);
+
+        const arr = r?.semanas || [];
+        setSelectedIdx(arr.length > 0 ? arr.length - 1 : null);
+      })
+      .catch((e) => console.warn('[FreqArrec] erro:', e?.message))
+      .finally(() => !cancelled && setLoading(false));
+    return () => { cancelled = true; };
+  }, [semanasJanela, semExtra]);
+
+  const semanas = dados?.semanas || [];
+  const formatado = useMemo(() => semanas.map((s, i) => ({
+    idx: i,
+    label: s.semana_label || s.semana_inicio?.slice(5) || `S${i}`,
+    semana_inicio: s.semana_inicio,
+    Receita: Number(s.receita || 0),
+    Presença: Number(s.presencial || 0),
+    'Ticket médio': Number(s.ticket_medio_presencial || 0),
+    Decisões: Number(s.decisoes || 0),
+    receita: Number(s.receita || 0),
+    presencial: Number(s.presencial || 0),
+    online: Number(s.online || 0),
+    ticket: Number(s.ticket_medio_presencial || 0),
+    decisoes: Number(s.decisoes || 0),
+    qtd_cultos: Number(s.qtd_cultos || 0),
+    resultado: Number(s.resultado || 0),
+    despesa: Number(s.despesa || 0),
+  })), [semanas]);
+
+  const sel = selectedIdx !== null ? formatado[selectedIdx] : null;
+  const semAnterior = selectedIdx !== null && selectedIdx > 0 ? formatado[selectedIdx - 1] : null;
+
+  const dRec = sel && semAnterior && semAnterior.receita > 0
+    ? ((sel.receita - semAnterior.receita) / semAnterior.receita) * 100
+    : null;
+  const dFreq = sel && semAnterior && semAnterior.presencial > 0
+    ? ((sel.presencial - semAnterior.presencial) / semAnterior.presencial) * 100
+    : null;
+  const dTicket = sel && semAnterior && semAnterior.ticket > 0
+    ? ((sel.ticket - semAnterior.ticket) / semAnterior.ticket) * 100
+    : null;
+
+  const onBarClick = (data) => {
+    if (data && data.activePayload?.[0]) {
+      const payload = data.activePayload[0].payload;
+      if (typeof payload.idx === 'number') setSelectedIdx(payload.idx);
+    }
+  };
+
+  const temDados = semanas.some(s => Number(s.receita || 0) > 0 || Number(s.presencial || 0) > 0);
+
+  return (
+    <Card className="overflow-hidden">
+      <CardContent className="pt-6">
+        <div className="flex items-start justify-between gap-3 flex-wrap mb-1">
+          <div>
+            <h3 className="text-base font-semibold flex items-center gap-2">
+              Frequência × Arrecadação semanal
+              <Badge variant="outline" className="text-[10px] font-normal">
+                <MousePointer2 className="h-2.5 w-2.5 mr-1" />
+                clique numa semana
+              </Badge>
+            </h3>
+            <p className="text-xs text-muted-foreground">
+              Semanas qua–ter · empréstimos excluídos · cards abaixo refletem a semana selecionada
+            </p>
+          </div>
+          <div className="flex gap-1">
+            {[12, 20, 52].map(n => (
+              <button
+                key={n}
+                onClick={() => setSemanasJanela(n)}
+                className={`px-2.5 py-1 text-[11px] rounded-md font-medium transition ${
+                  semanasJanela === n
+                    ? 'bg-primary text-primary-foreground'
+                    : 'bg-muted text-muted-foreground hover:bg-muted/80'
+                }`}
+              >
+                {n}sem
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {loading ? (
+          <div className="py-16 flex justify-center"><Loader2 className="h-6 w-6 animate-spin text-primary" /></div>
+        ) : !temDados ? (
+          <div className="py-16 text-center text-sm text-muted-foreground">
+            Sem dados semanais · importe lançamentos pra ver
+          </div>
+        ) : (
+          <>
+            <div style={{ width: '100%', height: 360 }} className="mt-3">
+              <ResponsiveContainer>
+                <ComposedChart data={formatado} onClick={onBarClick} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
+                  <defs>
+                    <linearGradient id="gradReceitaSem" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="0%" stopColor={C.primary} stopOpacity={0.95} />
+                      <stop offset="100%" stopColor={C.primary} stopOpacity={0.45} />
+                    </linearGradient>
+                    <linearGradient id="gradReceitaSel" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="0%" stopColor={C.amber} stopOpacity={1} />
+                      <stop offset="100%" stopColor={C.amber} stopOpacity={0.55} />
+                    </linearGradient>
+                  </defs>
+                  <CartesianGrid strokeDasharray="3 3" opacity={0.18} />
+                  <XAxis dataKey="label" tick={{ fontSize: 10 }} angle={-22} textAnchor="end" height={50} interval="preserveStartEnd" />
+                  <YAxis yAxisId="left" tick={{ fontSize: 10 }} tickFormatter={(v) => fmtCompact(v).replace('R$ ', '')} />
+                  <YAxis yAxisId="right" orientation="right" tick={{ fontSize: 10 }} tickFormatter={(v) => fmtInt(v)} />
+                  <Tooltip
+                    cursor={{ fill: 'rgba(0,179,157,0.08)' }}
+                    contentStyle={{ borderRadius: 10, fontSize: 12, border: '1px solid var(--cbrio-border)' }}
+                    formatter={(v, n) => {
+                      if (n === 'Presença' || n === 'Decisões') return [fmtInt(v), n];
+                      return [fmtMoney(v), n];
+                    }}
+                  />
+                  <Legend wrapperStyle={{ fontSize: 11 }} iconSize={10} />
+                  <Bar
+                    yAxisId="left"
+                    dataKey="Receita"
+                    fill={C.primary}
+                    radius={[6, 6, 0, 0]}
+                    animationDuration={1400}
+                    cursor="pointer"
+                  >
+                    {formatado.map((entry, i) => (
+                      <Cell
+                        key={i}
+                        fill={i === selectedIdx ? 'url(#gradReceitaSel)' : 'url(#gradReceitaSem)'}
+                        stroke={i === selectedIdx ? C.amber : 'transparent'}
+                        strokeWidth={i === selectedIdx ? 2 : 0}
+                      />
+                    ))}
+                  </Bar>
+                  <Line
+                    yAxisId="right"
+                    type="monotone"
+                    dataKey="Presença"
+                    stroke={C.blue}
+                    strokeWidth={2.5}
+                    dot={{ r: 3 }}
+                    activeDot={{ r: 6, stroke: C.blue, strokeWidth: 2, fill: '#fff' }}
+                    animationDuration={1700}
+                  />
+                  <Line
+                    yAxisId="left"
+                    type="monotone"
+                    dataKey="Ticket médio"
+                    stroke={C.purple}
+                    strokeDasharray="5 5"
+                    strokeWidth={2}
+                    dot={false}
+                    animationDuration={2000}
+                  />
+                </ComposedChart>
+              </ResponsiveContainer>
+            </div>
+
+            {                                                       }
+            <AnimatePresence mode="wait">
+              {sel && (
+                <motion.div
+                  key={`sel-${sel.idx}`}
+                  initial={{ opacity: 0, y: 16 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -8 }}
+                  transition={{ duration: 0.4, ease: 'easeOut' }}
+                  className="mt-5 pt-4 border-t border-border"
+                >
+                  <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
+                    <div className="text-xs text-muted-foreground">
+                      Semana selecionada
+                    </div>
+                    <div className="text-sm font-semibold flex items-center gap-2">
+                      <span className="px-2 py-0.5 rounded bg-amber-100 dark:bg-amber-500/20 text-amber-700 dark:text-amber-300 tabular-nums">
+                        {sel.label}
+                      </span>
+                      <span className="text-muted-foreground text-xs tabular-nums">
+                        {sel.semana_inicio}
+                      </span>
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                    <SemanaCard
+                      label="Arrecadação"
+                      icon={Banknote}
+                      accent={C.green}
+                      valor={fmtMoney(sel.receita)}
+                      delta={dRec}
+                      sub={`vs anterior · ${sel.qtd_cultos} culto(s)`}
+                      anim={`r-${sel.idx}`}
+                    />
+                    <SemanaCard
+                      label="Presença total"
+                      icon={Users}
+                      accent={C.blue}
+                      valor={`${fmtInt(sel.presencial + sel.online)}`}
+                      delta={dFreq}
+                      sub={`${fmtInt(sel.presencial)} presencial · ${fmtInt(sel.online)} online`}
+                      anim={`p-${sel.idx}`}
+                    />
+                    <SemanaCard
+                      label="Ticket médio"
+                      icon={Sparkles}
+                      accent={C.purple}
+                      valor={fmtMoney(sel.ticket)}
+                      delta={dTicket}
+                      sub="R$ por presencial"
+                      anim={`t-${sel.idx}`}
+                    />
+                    <SemanaCard
+                      label="Decisões"
+                      icon={Award}
+                      accent={C.pink}
+                      valor={fmtInt(sel.decisoes)}
+                      delta={null}
+                      sub="presencial + online + kids"
+                      anim={`d-${sel.idx}`}
+                    />
+                  </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
+          </>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function SemanaCard({ label, icon: Icon, accent, valor, delta, sub, anim }) {
+  let DeltaIcon = Minus, deltaColor = 'text-muted-foreground';
+  if (delta !== null && delta !== undefined && Number.isFinite(delta)) {
+    if (Math.abs(delta) < 1) { DeltaIcon = Minus; deltaColor = 'text-muted-foreground'; }
+    else if (delta > 0) { DeltaIcon = ArrowUp; deltaColor = 'text-emerald-600'; }
+    else { DeltaIcon = ArrowDown; deltaColor = 'text-rose-600'; }
+  }
+  return (
+    <motion.div
+      key={anim}
+      initial={{ opacity: 0, scale: 0.92, y: 12 }}
+      animate={{ opacity: 1, scale: 1, y: 0 }}
+      transition={{ duration: 0.45, ease: 'easeOut' }}
+      className="relative overflow-hidden rounded-xl border border-border bg-card p-3"
+    >
+      <div className="absolute top-0 left-0 right-0 h-1" style={{ background: accent }} />
+      <div className="flex items-center justify-between mb-2">
+        <span className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium">{label}</span>
+        <div
+          className="h-7 w-7 rounded-lg flex items-center justify-center"
+          style={{ background: `${accent}1f`, color: accent }}
+        >
+          <Icon className="h-3.5 w-3.5" />
+        </div>
+      </div>
+      <div className="text-xl md:text-2xl font-bold tabular-nums leading-tight" style={{ color: accent }}>
+        {valor}
+      </div>
+      <div className="flex items-center justify-between mt-1">
+        {delta !== null && delta !== undefined && Number.isFinite(delta) ? (
+          <div className={`text-[11px] font-semibold flex items-center ${deltaColor} tabular-nums`}>
+            <DeltaIcon className="h-3 w-3 mr-0.5" />
+            {Math.abs(delta).toFixed(1)}%
+          </div>
+        ) : <div />}
+        <div className="text-[10px] text-muted-foreground truncate">{sub}</div>
+      </div>
+    </motion.div>
+  );
+}
+
+
+
+
+function MetasFinanceirasComFiltros({ metas: metasIniciais, onMetasChange }) {
+  const [metas, setMetas] = useState(metasIniciais || []);
+  const [editing, setEditing] = useState(null);
+  const [showForm, setShowForm] = useState(false);
+  const [progresso, setProgresso] = useState({});
+  const [loadingProg, setLoadingProg] = useState(false);
+  const [filtrosG] = useFiltrosGlobais();
+  const semExtra = !!filtrosG.sem_extra;
+
+
+  const hoje = new Date();
+  const anoAtual = hoje.getFullYear();
+  const semanasOpcoes = useMemo(() => gerarSemanasIso(52), []);
+
+  const [filtroAno, setFiltroAno] = useState(anoAtual);
+  const [filtroMes, setFiltroMes] = useState('');
+  const [filtroSemana, setFiltroSemana] = useState('');
+
+  const [perMetaPeriod, setPerMetaPeriod] = useState({});
+  const [filtroTipo, setFiltroTipo] = useState('todos');
+
+  useEffect(() => { setMetas(metasIniciais || []); }, [metasIniciais]);
+
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoadingProg(true);
+
+
+
+
+    const params = {};
+    if (filtroSemana) params.semana_inicio = filtroSemana;
+    else if (filtroMes) { params.ano = filtroAno; params.mes = filtroMes; }
+    else if (filtroAno !== anoAtual) params.ano = filtroAno;
+
+    financeiroV2.metas.progresso(params)
+      .then(r => {
+        if (cancelled) return;
+        setProgresso(prev => {
+          const next = { ...prev };
+          (r?.metas || []).forEach(m => {
+
+            if (!perMetaPeriod[m.meta_id]) next[m.meta_id] = m;
+          });
+          return next;
+        });
+      })
+      .catch(e => console.warn('[Metas progresso]:', e?.message))
+      .finally(() => !cancelled && setLoadingProg(false));
+    return () => { cancelled = true; };
+
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filtroAno, filtroMes, filtroSemana, metas, semExtra]);
+
+
+  const handlePeriodChange = async (metaId, period) => {
+    setPerMetaPeriod(prev => {
+      const next = { ...prev };
+      if (period === null) delete next[metaId];
+      else next[metaId] = period;
+      return next;
+    });
+
+    if (period === null) {
+
+      const params = { meta_id: metaId };
+      if (filtroSemana) params.semana_inicio = filtroSemana;
+      else if (filtroMes) { params.ano = filtroAno; params.mes = filtroMes; }
+      else if (filtroAno !== anoAtual) params.ano = filtroAno;
+      try {
+        const r = await financeiroV2.metas.progresso(params);
+        const item = (r?.metas || []).find(m => m.meta_id === metaId);
+        if (item) setProgresso(prev => ({ ...prev, [metaId]: item }));
+      } catch (e) {              }
+      return;
+    }
+
+    const params = { meta_id: metaId };
+    if (period.semana_inicio) params.semana_inicio = period.semana_inicio;
+    else if (period.ano && period.mes) { params.ano = period.ano; params.mes = period.mes; }
+    else if (period.ano) params.ano = period.ano;
+
+    try {
+      const r = await financeiroV2.metas.progresso(params);
+      const item = (r?.metas || []).find(m => m.meta_id === metaId);
+      if (item) setProgresso(prev => ({ ...prev, [metaId]: item }));
+    } catch (e) {
+      console.warn('[Meta period change]:', e?.message);
+    }
+  };
+
+  const salvar = async (payload) => {
+    try {
+      if (payload.id) await financeiroV2.metas.update(payload.id, payload);
+      else await financeiroV2.metas.create(payload);
+      setEditing(null);
+      setShowForm(false);
+      onMetasChange?.();
+    } catch (e) { alert(`Erro: ${e.message}`); }
+  };
+
+  const remover = async (id) => {
+    if (!confirm('Remover esta meta?')) return;
+    await financeiroV2.metas.remove(id);
+    onMetasChange?.();
+  };
+
+  const metasFiltradas = useMemo(() => {
+    return metas.filter(m => {
+      if (filtroTipo === 'todos') return true;
+      if (filtroTipo === 'receita') return m.tipo?.startsWith('receita_');
+      if (filtroTipo === 'despesa') return m.tipo?.startsWith('despesa_');
+      if (filtroTipo === 'saldo') return m.tipo === 'saldo_minimo';
+      return true;
+    });
+  }, [metas, filtroTipo]);
+
+
+  const totalNoAlvo = metasFiltradas.filter(m => {
+    const p = progresso[m.id];
+    if (!p) return false;
+    const isInverso = m.tipo?.startsWith('despesa_');
+    return isInverso ? p.pct <= 100 : p.pct >= 100;
+  }).length;
+  const totalAtras = metasFiltradas.length - totalNoAlvo;
+
+  return (
+    <>
+      <Card>
+        <CardContent className="pt-6">
+          <div className="flex items-center justify-between mb-4 flex-wrap gap-3">
+            <div>
+              <h3 className="text-base font-semibold flex items-center gap-2">
+                <Award className="h-4 w-4 text-amber-500" />
+                Metas Financeiras
+              </h3>
+              <p className="text-xs text-muted-foreground">
+                {metasFiltradas.length} meta(s) · {totalNoAlvo} no alvo · {totalAtras} fora do alvo
+                {loadingProg && <Loader2 className="inline h-3 w-3 ml-2 animate-spin" />}
+              </p>
+            </div>
+            <Button size="sm" onClick={() => { setEditing(null); setShowForm(true); }}>
+              + Nova meta
+            </Button>
+          </div>
+
+          {             }
+          <div className="bg-muted/40 rounded-xl p-3 mb-4 grid grid-cols-1 md:grid-cols-5 gap-2">
+            <div>
+              <label className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium block mb-1">Ano</label>
+              <select
+                value={filtroAno}
+                onChange={(e) => { setFiltroAno(Number(e.target.value)); setFiltroSemana(''); }}
+                className="w-full px-2 py-1.5 text-sm rounded-md border border-border bg-background"
+              >
+                {[anoAtual, anoAtual - 1, anoAtual - 2, anoAtual - 3, anoAtual - 4].map(a => (
+                  <option key={a} value={a}>{a}</option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium block mb-1">Mês</label>
+              <select
+                value={filtroMes}
+                onChange={(e) => { setFiltroMes(e.target.value); setFiltroSemana(''); }}
+                className="w-full px-2 py-1.5 text-sm rounded-md border border-border bg-background"
+              >
+                <option value="">Todos</option>
+                {['Jan','Fev','Mar','Abr','Mai','Jun','Jul','Ago','Set','Out','Nov','Dez'].map((m,i)=>(
+                  <option key={i+1} value={i+1}>{m}</option>
+                ))}
+              </select>
+            </div>
+            <div className="md:col-span-2">
+              <label className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium block mb-1">Semana (qua–ter)</label>
+              <select
+                value={filtroSemana}
+                onChange={(e) => setFiltroSemana(e.target.value)}
+                className="w-full px-2 py-1.5 text-sm rounded-md border border-border bg-background"
+              >
+                <option value="">Usar ano/mês acima</option>
+                {semanasOpcoes
+                  .filter(s => s.ano === filtroAno || filtroAno === anoAtual)
+                  .slice(0, 30)
+                  .map(s => (
+                    <option key={s.ref} value={s.ref}>{s.labelCurto} · {s.label.replace(' (atual)', '')}</option>
+                  ))}
+              </select>
+            </div>
+            <div>
+              <label className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium block mb-1">Tipo</label>
+              <select
+                value={filtroTipo}
+                onChange={(e) => setFiltroTipo(e.target.value)}
+                className="w-full px-2 py-1.5 text-sm rounded-md border border-border bg-background"
+              >
+                <option value="todos">Todos</option>
+                <option value="receita">Receita</option>
+                <option value="despesa">Despesa</option>
+                <option value="saldo">Saldo</option>
+              </select>
+            </div>
+          </div>
+
+          {(filtroAno !== anoAtual || filtroMes || filtroSemana || filtroTipo !== 'todos') && (
+            <div className="flex items-center gap-2 mb-3 text-[11px]">
+              <Filter className="h-3 w-3 text-muted-foreground" />
+              <span className="text-muted-foreground">Filtros ativos</span>
+              <button
+                onClick={() => { setFiltroAno(anoAtual); setFiltroMes(''); setFiltroSemana(''); setFiltroTipo('todos'); }}
+                className="px-2 py-0.5 rounded bg-muted hover:bg-muted/80 text-foreground flex items-center gap-1"
+              >
+                <X className="h-3 w-3" /> Limpar
+              </button>
+            </div>
+          )}
+
+          {metasFiltradas.length === 0 ? (
+            <div className="py-12 text-center">
+              <Target className="h-12 w-12 mx-auto text-muted-foreground mb-3" />
+              <p className="text-sm text-muted-foreground">Nenhuma meta nesta visão</p>
+              <Button size="sm" className="mt-3" onClick={() => { setEditing(null); setShowForm(true); }}>
+                + Criar nova meta
+              </Button>
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+              {metasFiltradas.map((m, i) => (
+                <MetaCardFiltrado
+                  key={m.id}
+                  meta={m}
+                  idx={i}
+                  prog={progresso[m.id]}
+                  periodOverride={perMetaPeriod[m.id]}
+                  semanasOpcoes={semanasOpcoes}
+                  anoAtual={anoAtual}
+                  onPeriodChange={(p) => handlePeriodChange(m.id, p)}
+                  onEdit={() => { setEditing(m); setShowForm(true); }}
+                  onDelete={() => remover(m.id)}
+                />
+              ))}
+            </div>
+          )}
+
+          {showForm && (
+            <MetaForm
+              inicial={editing || {}}
+              onCancel={() => { setEditing(null); setShowForm(false); }}
+              onSave={salvar}
+            />
+          )}
+        </CardContent>
+      </Card>
+    </>
+  );
+}
+
+
+function MetaPeriodoSeletor({ meta, periodicidade, periodOverride, semanasOpcoes, anoAtual, prog, cor, onPeriodChange }) {
+  const MESES_LBL = ['Jan','Fev','Mar','Abr','Mai','Jun','Jul','Ago','Set','Out','Nov','Dez'];
+  const temOverride = !!periodOverride;
+
+
+  let valorAtual = '';
+  if (periodicidade === 'semanal') {
+    valorAtual = periodOverride?.semana_inicio || prog?.periodo_inicio || '';
+  } else if (periodicidade === 'mensal') {
+    if (periodOverride?.ano && periodOverride?.mes) {
+      valorAtual = `${periodOverride.ano}-${String(periodOverride.mes).padStart(2, '0')}`;
+    } else if (prog?.periodo_inicio) {
+      valorAtual = prog.periodo_inicio.slice(0, 7);
+    }
+  } else if (periodicidade === 'anual') {
+    valorAtual = String(periodOverride?.ano || prog?.periodo_inicio?.slice(0, 4) || anoAtual);
+  }
+
+  const handle = (v) => {
+    if (!v) return onPeriodChange(null);
+    if (periodicidade === 'semanal') {
+      onPeriodChange({ semana_inicio: v });
+    } else if (periodicidade === 'mensal') {
+      const [a, m] = v.split('-');
+      onPeriodChange({ ano: Number(a), mes: Number(m) });
+    } else if (periodicidade === 'anual') {
+      onPeriodChange({ ano: Number(v) });
+    }
+  };
+
+
+  const mesesOpcoes = [];
+  const hoje = new Date();
+  for (let i = 0; i < 12; i++) {
+    const d = new Date(hoje.getFullYear(), hoje.getMonth() - i, 1);
+    const a = d.getFullYear();
+    const m = d.getMonth() + 1;
+    mesesOpcoes.push({
+      value: `${a}-${String(m).padStart(2, '0')}`,
+      label: `${MESES_LBL[m - 1]}/${String(a).slice(2)}${i === 0 ? ' (atual)' : ''}`,
+    });
+  }
+
+  const anosOpcoes = [anoAtual, anoAtual - 1, anoAtual - 2, anoAtual - 3];
+
+  return (
+    <div className="mb-3 -mt-1">
+      <div className="flex items-center gap-1.5">
+        <select
+          value={valorAtual}
+          onChange={(e) => handle(e.target.value)}
+          className="flex-1 px-2 py-1 text-[11px] rounded-md border border-border bg-background hover:border-primary/40 transition"
+          style={temOverride ? { borderColor: cor, color: cor } : {}}
+        >
+          {periodicidade === 'semanal' && (
+            <>
+              {semanasOpcoes.slice(0, 16).map(s => (
+                <option key={s.ref} value={s.ref}>
+                  {s.label}
+                </option>
+              ))}
+            </>
+          )}
+          {periodicidade === 'mensal' && (
+            mesesOpcoes.map(o => <option key={o.value} value={o.value}>{o.label}</option>)
+          )}
+          {periodicidade === 'anual' && (
+            anosOpcoes.map(a => <option key={a} value={a}>{a}{a === anoAtual ? ' (atual)' : ''}</option>)
+          )}
+        </select>
+        {temOverride && (
+          <button
+            onClick={() => onPeriodChange(null)}
+            className="px-1.5 py-1 text-[10px] rounded-md border border-border hover:bg-muted text-muted-foreground transition shrink-0"
+            title="Voltar ao período natural"
+          >
+            <X className="h-3 w-3" />
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function MetaCardFiltrado({ meta, idx, prog, periodOverride, semanasOpcoes, anoAtual, onPeriodChange, onEdit, onDelete }) {
+  const atual = Number(prog?.valor_atual || 0);
+  const valorMeta = Number(meta.valor) || 1;
+  const isInverso = meta.tipo?.startsWith('despesa_');
+  const pct = Math.min(200, Math.round((atual / valorMeta) * 100));
+  const cor = isInverso
+    ? (pct <= 80 ? C.green : pct <= 100 ? C.amber : C.red)
+    : (pct >= 100 ? C.green : pct >= 70 ? C.amber : C.red);
+
+  const tipoLabel = TIPO_META_LABEL[meta.tipo] || meta.tipo;
+  const periodicidade = meta.periodicidade || periodicidadeDoTipo(meta.tipo);
+  const tipoGrafico = meta.tipo_grafico || 'gauge';
+  const semDado = !prog;
+  const temOverride = !!periodOverride;
+
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 14 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.4, delay: idx * 0.04, ease: 'easeOut' }}
+    >
+      <Card className={`relative overflow-hidden ${!meta.ativa ? 'opacity-60' : ''}`}>
+        <div className="absolute top-0 left-0 right-0 h-1" style={{ background: cor }} />
+        <CardContent className="pt-5 pb-4">
+          <div className="flex items-start justify-between gap-2 mb-3">
+            <div className="min-w-0 flex-1">
+              <div className="flex flex-wrap gap-1 mb-1">
+                <Badge variant="outline" className="text-[10px]">{tipoLabel}</Badge>
+                <Badge variant="outline" className="text-[10px] capitalize" style={{ borderColor: cor, color: cor }}>
+                  {periodicidade}
+                </Badge>
+              </div>
+              <h4 className="text-sm font-semibold leading-tight truncate" title={meta.descricao || tipoLabel}>
+                {meta.descricao || tipoLabel}
+              </h4>
+              {(meta.plano || meta.centro) && (
+                <div className="text-[10px] text-muted-foreground mt-1 truncate">
+                  {meta.plano && `${meta.plano.codigo} ${meta.plano.nome}`}
+                  {meta.centro && ` · ${meta.centro.codigo} ${meta.centro.nome}`}
+                </div>
+              )}
+            </div>
+            <div className="flex gap-0.5 shrink-0">
+              <button onClick={onEdit} className="p-1.5 rounded hover:bg-muted text-muted-foreground hover:text-foreground transition" title="Editar">
+                <FileText className="h-3.5 w-3.5" />
+              </button>
+              <button onClick={onDelete} className="p-1.5 rounded hover:bg-red-500/10 text-muted-foreground hover:text-red-500 transition" title="Remover">
+                <X className="h-3.5 w-3.5" />
+              </button>
+            </div>
+          </div>
+
+          {                                                       }
+          <MetaPeriodoSeletor
+            meta={meta}
+            periodicidade={periodicidade}
+            periodOverride={periodOverride}
+            semanasOpcoes={semanasOpcoes}
+            anoAtual={anoAtual}
+            prog={prog}
+            cor={cor}
+            onPeriodChange={onPeriodChange}
+          />
+
+          {semDado ? (
+            <div className="py-8 text-center text-xs text-muted-foreground">
+              {prog === undefined ? 'Calculando...' : 'Sem dado no período'}
+            </div>
+          ) : tipoGrafico === 'gauge' ? (
+            <div className="-mt-2">
+              <MetaGauge
+                atual={atual}
+                meta={valorMeta}
+                anim={`${meta.id}-${atual}-${prog?.periodo_inicio || 'x'}`}
+                size={200}
+                label={`${pct}% ${isInverso ? 'consumido' : 'atingido'}`}
+                showLabels={false}
+              />
+              <div className="text-center text-[11px] text-muted-foreground -mt-2">
+                <span className="tabular-nums font-medium" style={{ color: cor }}>{fmtCompact(atual)}</span>
+                <span className="mx-1">de</span>
+                <span className="tabular-nums">{fmtCompact(valorMeta)}</span>
+              </div>
+            </div>
+          ) : (
+            <div className="space-y-2">
+              <div className="flex items-baseline justify-between">
+                <motion.div
+                  key={`val-${meta.id}-${atual}`}
+                  initial={{ scale: 0.85, opacity: 0 }}
+                  animate={{ scale: 1, opacity: 1 }}
+                  transition={{ duration: 0.4 }}
+                  className="text-2xl font-bold tabular-nums"
+                  style={{ color: cor }}
+                >
+                  <CountUp value={atual} format={fmtCompact} />
+                </motion.div>
+                <div className="text-xs text-muted-foreground tabular-nums">
+                  / {fmtCompact(valorMeta)}
+                </div>
+              </div>
+              <div className="h-3 rounded-full bg-muted overflow-hidden">
+                <motion.div
+                  key={`bar-${meta.id}-${pct}`}
+                  className="h-full rounded-full cbrio-bar"
+                  style={{ background: cor }}
+                  initial={{ width: 0 }}
+                  animate={{ width: `${Math.min(100, pct)}%` }}
+                  transition={{ duration: 1.0, ease: 'easeOut' }}
+                />
+              </div>
+              <div className="flex items-baseline justify-between text-[11px]">
+                <span className="font-semibold tabular-nums" style={{ color: cor }}>{pct}%</span>
+              </div>
+            </div>
+          )}
+
+          {prog?.periodo_inicio && prog?.periodo_fim && (
+            <div className="mt-3 pt-2 border-t border-border/50 text-[10px] text-muted-foreground text-center tabular-nums">
+              {prog.periodo_inicio.slice(5)} → {prog.periodo_fim.slice(5)}
+            </div>
+          )}
+        </CardContent>
+      </Card>
+    </motion.div>
+  );
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+function MediaMensalCards({ anos, dadosPorAno, corDoAno }) {
+  const linhas = anos
+    .map((a, i) => ({ ano: a, cor: corDoAno(i), r: calcularMediaMensal(dadosPorAno[a]?.meses) }))
+    .filter((l) => l.r.media != null);
+  if (linhas.length === 0) return null;
+
+  return (
+    <div className="mb-4 grid gap-2" style={{ gridTemplateColumns: `repeat(auto-fit, minmax(220px, 1fr))` }}>
+      {linhas.map(({ ano, cor, r }) => (
+        <div key={ano} className="rounded-lg border border-border bg-muted/40 px-3.5 py-3">
+          <div className="flex items-baseline justify-between gap-2">
+            <span className="text-[11px] uppercase tracking-wide text-muted-foreground">
+              Média mensal{linhas.length > 1 ? '' : ' de arrecadação'}
+            </span>
+            {linhas.length > 1 && (
+              <span className="text-[11px] font-semibold" style={{ color: cor }}>{ano}</span>
+            )}
+          </div>
+          <div className="text-2xl font-bold tabular-nums mt-0.5">{fmtMoney(r.media)}</div>
+          <div className="text-[11px] text-muted-foreground mt-0.5">{textoBase(r)}</div>
+          {mediaPuxadaPorUmMes(r) && (
+            <div className="text-[11px] mt-1.5 pt-1.5 border-t border-border/60 text-amber-700 dark:text-amber-300">
+              mediana {fmtMoney(r.mediana)} · <strong>{r.maiorMes}</strong> puxa a média
+            </div>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function ArrecadacaoAnualChart() {
+  const anoAtual = new Date().getFullYear();
+
+
+  const [anosSel, setAnosSel] = useState([anoAtual]);
+  const [dadosPorAno, setDadosPorAno] = useState({});
+  const [loading, setLoading] = useState(true);
+  const [selectedIdx, setSelectedIdx] = useState(null);
+  const [filtrosVersion, setFiltrosVersion] = useState(0);
+
+  const anos = [2022, 2023, 2024, 2025, 2026, 2027].filter(a => a <= anoAtual + 1);
+  const ano = anosSel[anosSel.length - 1];
+  const multi = anosSel.length > 1;
+  const CORES_ANO = [C.blue, C.amber, C.purple, C.green];
+  const corDoAno = (i) => (i === anosSel.length - 1 ? C.primary : CORES_ANO[i % CORES_ANO.length]);
+
+  const toggleAno = (a) => setAnosSel(prev => prev.includes(a)
+    ? (prev.length > 1 ? prev.filter(x => x !== a) : prev)
+    : [...prev, a].sort((x, y) => x - y));
+
+  useEffect(() => {
+    const h = () => setFiltrosVersion(v => v + 1);
+    window.addEventListener('fin-filtros-changed', h);
+    return () => window.removeEventListener('fin-filtros-changed', h);
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    Promise.all(anosSel.map(a => financeiroV2.arrecadacaoAnual(a, lerFiltrosGlobais()).then(r => [a, r])))
+      .then((entries) => {
+        if (cancelled) return;
+        const map = Object.fromEntries(entries);
+        setDadosPorAno(map);
+        const mesesBase = map[anosSel[anosSel.length - 1]]?.meses || [];
+        const ultimo = mesesBase.reduceRight((acc, m, i) => acc !== null ? acc : (m.receita > 0 ? i : null), null);
+        setSelectedIdx(ultimo);
+      })
+      .catch((e) => console.warn('[ArrecAnual]:', e?.message))
+      .finally(() => !cancelled && setLoading(false));
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [anosSel.join(','), filtrosVersion]);
+
+  const dados = dadosPorAno[ano] || null;
+  const meses = dados?.meses || [];
+  const total = dados?.total || 0;
+  const sel = selectedIdx !== null ? meses[selectedIdx] : null;
+  const ant = selectedIdx !== null && selectedIdx > 0 ? meses[selectedIdx - 1] : null;
+  const dRec = sel && ant && ant.receita > 0 ? ((sel.receita - ant.receita) / ant.receita) * 100 : null;
+
+  const onBarClick = (e) => {
+    if (e?.activePayload?.[0]?.payload) {
+      const p = e.activePayload[0].payload;
+      if (typeof p.idx === 'number') setSelectedIdx(p.idx);
+    }
+  };
+
+
+
+  const formatado = meses.map((m, i) => ({
+    idx: i,
+    label: m.semanas_qua_ter === 5 ? `${m.mes_label} •5` : m.mes_label,
+    Receita: m.receita,
+    Acumulado: m.acumulado,
+    qtd: m.qtd,
+    semanas: m.semanas_qua_ter,
+  }));
+  const temMes5 = meses.some(m => m.semanas_qua_ter === 5);
+
+
+  const MES_LABELS = ['Jan', 'Fev', 'Mar', 'Abr', 'Mai', 'Jun', 'Jul', 'Ago', 'Set', 'Out', 'Nov', 'Dez'];
+  const formatadoMulti = multi
+    ? MES_LABELS.map((label, i) => {
+        const row = { idx: i, label };
+        for (const a of anosSel) row[String(a)] = Number(dadosPorAno[a]?.meses?.[i]?.receita || 0);
+        return row;
+      })
+    : [];
+  const algumDado = multi ? anosSel.some(a => (dadosPorAno[a]?.total || 0) > 0) : total > 0;
+
+  return (
+    <Card>
+      <CardContent className="pt-6">
+        <div className="flex items-start justify-between flex-wrap gap-3 mb-3">
+          <div>
+            <h3 className="text-base font-semibold flex items-center gap-2">
+              Arrecadação Anual · {multi ? anosSel.join(' vs ') : ano}
+              <Badge variant="outline" className="text-[10px] font-normal">
+                <MousePointer2 className="h-2.5 w-2.5 mr-1" />
+                clique num mês
+              </Badge>
+            </h3>
+            <p className="text-xs text-muted-foreground">
+              {multi
+                ? <>Totais: {anosSel.map((a, i) => <span key={a}>{i > 0 && ' · '}<strong>{a}</strong> {fmtMoney(dadosPorAno[a]?.total || 0)}</span>)} · empréstimos excluídos</>
+                : <>Total no ano: <strong>{fmtMoney(total)}</strong> · barras mensais + acumulado · empréstimos excluídos</>}
+            </p>
+          </div>
+          <div className="flex flex-col items-end gap-1">
+            <div className="flex gap-1 flex-wrap">
+              {anos.map(a => (
+                <button
+                  key={a}
+                  onClick={() => toggleAno(a)}
+                  className={`px-2.5 py-1 text-[11px] rounded-md font-medium transition ${
+                    anosSel.includes(a) ? 'bg-primary text-primary-foreground' : 'bg-muted text-muted-foreground hover:bg-muted/80'
+                  }`}
+                >
+                  {a}
+                </button>
+              ))}
+            </div>
+            <span className="text-[10px] text-muted-foreground">selecione mais de um ano pra comparar</span>
+          </div>
+        </div>
+        {!loading && algumDado && (
+          <MediaMensalCards
+            anos={multi ? anosSel : [ano]}
+            dadosPorAno={dadosPorAno}
+            corDoAno={corDoAno}
+          />
+        )}
+        {loading ? (
+          <div className="py-16 flex justify-center"><Loader2 className="h-6 w-6 animate-spin text-primary" /></div>
+        ) : !algumDado ? (
+          <div className="py-12 text-center text-sm text-muted-foreground">Sem dados de {multi ? anosSel.join('/') : ano} · selecione outro ano</div>
+        ) : multi ? (
+          <>
+            <div style={{ width: '100%', height: 320 }}>
+              <ResponsiveContainer>
+                <ComposedChart data={formatadoMulti} onClick={onBarClick} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
+                  <CartesianGrid strokeDasharray="3 3" opacity={0.2} />
+                  <XAxis dataKey="label" tick={{ fontSize: 11 }} />
+                  <YAxis tick={{ fontSize: 10 }} tickFormatter={(v) => fmtCompact(v).replace('R$ ', '')} />
+                  <Tooltip cursor={{ fill: 'rgba(0,179,157,0.08)' }} formatter={(v) => fmtMoney(v)} contentStyle={{ borderRadius: 10, fontSize: 12, border: '1px solid var(--cbrio-border)' }} />
+                  <Legend wrapperStyle={{ fontSize: 11 }} iconSize={10} />
+                  {anosSel.map((a, i) => (
+                    <Bar key={a} dataKey={String(a)} fill={corDoAno(i)} radius={[5, 5, 0, 0]} animationDuration={900} cursor="pointer" />
+                  ))}
+                </ComposedChart>
+              </ResponsiveContainer>
+            </div>
+            <AnimatePresence mode="wait">
+              {selectedIdx !== null && (
+                <motion.div
+                  key={`anosel-multi-${selectedIdx}`}
+                  initial={{ opacity: 0, y: 12 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -8 }}
+                  transition={{ duration: 0.4 }}
+                  className="mt-4 pt-4 border-t border-border"
+                >
+                  <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
+                    <span className="text-xs text-muted-foreground">Mês selecionado · comparação entre os anos</span>
+                    <span className="text-sm font-semibold px-2 py-0.5 rounded bg-amber-100 dark:bg-amber-500/20 text-amber-700 dark:text-amber-300">
+                      {MES_LABELS[selectedIdx]}
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                    {anosSel.map((a, i) => {
+                      const mA = dadosPorAno[a]?.meses?.[selectedIdx];
+                      const anoAnt = anosSel[i - 1];
+                      const mAnt = anoAnt ? dadosPorAno[anoAnt]?.meses?.[selectedIdx] : null;
+                      const d = mA && mAnt && mAnt.receita > 0 ? ((mA.receita - mAnt.receita) / mAnt.receita) * 100 : null;
+                      const subPartes = [
+                        mA?.semanas_qua_ter === 5 ? '5 semanas' : null,
+                        anoAnt ? `vs ${anoAnt}` : null,
+                      ].filter(Boolean);
+                      return (
+                        <SemanaCard
+                          key={a}
+                          label={`${MES_LABELS[selectedIdx]} ${a}`}
+                          icon={Banknote}
+                          accent={corDoAno(i)}
+                          valor={fmtMoney(mA?.receita || 0)}
+                          delta={d}
+                          sub={subPartes.join(' · ') || 'no mês'}
+                          anim={`my-${a}-${selectedIdx}`}
+                        />
+                      );
+                    })}
+                  </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
+          </>
+        ) : (
+          <>
+            <div style={{ width: '100%', height: 320 }}>
+              <ResponsiveContainer>
+                <ComposedChart data={formatado} onClick={onBarClick} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
+                  <defs>
+                    <linearGradient id="gradArrecAnual" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="0%" stopColor={C.primary} stopOpacity={0.9} />
+                      <stop offset="100%" stopColor={C.primary} stopOpacity={0.4} />
+                    </linearGradient>
+                    <linearGradient id="gradArrecAnualSel" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="0%" stopColor={C.amber} stopOpacity={1} />
+                      <stop offset="100%" stopColor={C.amber} stopOpacity={0.55} />
+                    </linearGradient>
+                  </defs>
+                  <CartesianGrid strokeDasharray="3 3" opacity={0.2} />
+                  <XAxis dataKey="label" tick={{ fontSize: 11 }} />
+                  <YAxis yAxisId="left" tick={{ fontSize: 10 }} tickFormatter={(v) => fmtCompact(v).replace('R$ ', '')} />
+                  <YAxis yAxisId="right" orientation="right" tick={{ fontSize: 10 }} tickFormatter={(v) => fmtCompact(v).replace('R$ ', '')} />
+                  <Tooltip
+                    cursor={{ fill: 'rgba(0,179,157,0.08)' }}
+                    formatter={(v) => fmtMoney(v)}
+                    labelFormatter={(label, payload) => {
+                      const p = payload?.[0]?.payload;
+                      return p?.semanas === 5 ? `${label} · mês com 5 semanas de contribuição` : label;
+                    }}
+                    contentStyle={{ borderRadius: 10, fontSize: 12, border: '1px solid var(--cbrio-border)' }}
+                  />
+                  <Legend wrapperStyle={{ fontSize: 11 }} iconSize={10} />
+                  <Bar yAxisId="left" dataKey="Receita" fill={C.primary} radius={[6, 6, 0, 0]} animationDuration={1200} cursor="pointer">
+                    {formatado.map((entry, i) => (
+                      <Cell key={i} fill={i === selectedIdx ? 'url(#gradArrecAnualSel)' : 'url(#gradArrecAnual)'} stroke={i === selectedIdx ? C.amber : 'transparent'} strokeWidth={i === selectedIdx ? 2 : 0} />
+                    ))}
+                  </Bar>
+                  <Line yAxisId="right" type="monotone" dataKey="Acumulado" stroke={C.purple} strokeWidth={2.5} dot={{ r: 3 }} animationDuration={1500} />
+                </ComposedChart>
+              </ResponsiveContainer>
+            </div>
+            {temMes5 && (
+              <p className="text-[11px] text-muted-foreground mt-1">
+                <b>•5</b> = mês com <b>5 semanas de contribuição</b> (semana da igreja: quarta→terça) — tende a arrecadar mais que meses com 4.
+              </p>
+            )}
+            <AnimatePresence mode="wait">
+              {sel && (
+                <motion.div
+                  key={`anosel-${selectedIdx}`}
+                  initial={{ opacity: 0, y: 12 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -8 }}
+                  transition={{ duration: 0.4 }}
+                  className="mt-4 pt-4 border-t border-border"
+                >
+                  <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
+                    <span className="text-xs text-muted-foreground">Mês selecionado</span>
+                    <span className="flex items-center gap-2">
+                      {sel.semanas_qua_ter ? (
+                        <span className={`text-[11px] font-semibold px-2 py-0.5 rounded border ${sel.semanas_qua_ter === 5 ? 'bg-primary/10 text-primary border-primary/30' : 'bg-muted text-muted-foreground border-border'}`}>
+                          {sel.semanas_qua_ter} semanas de contribuição
+                        </span>
+                      ) : null}
+                      <span className="text-sm font-semibold px-2 py-0.5 rounded bg-amber-100 dark:bg-amber-500/20 text-amber-700 dark:text-amber-300">
+                        {sel.mes_label}/{String(ano).slice(2)}
+                      </span>
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+                    <SemanaCard label="Arrecadação do mês" icon={Banknote} accent={C.green} valor={fmtMoney(sel.receita)} delta={dRec} sub="vs mês anterior" anim={`r-${selectedIdx}`} />
+                    <SemanaCard label="Acumulado no ano" icon={TrendingUp} accent={C.purple} valor={fmtMoney(sel.acumulado)} delta={null} sub={`até ${sel.mes_label}`} anim={`a-${selectedIdx}`} />
+                    <SemanaCard label="Lançamentos" icon={FileText} accent={C.blue} valor={fmtInt(sel.qtd)} delta={null} sub="no mês" anim={`q-${selectedIdx}`} />
+                  </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
+          </>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+
+
+
+function ReceitaVsSaidaMensal() {
+  const anoAtual = new Date().getFullYear();
+  const [ano, setAno] = useState(anoAtual);
+  const [dados, setDados] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [selectedIdx, setSelectedIdx] = useState(null);
+  const [filtrosVersion, setFiltrosVersion] = useState(0);
+
+  const anos = [2022, 2023, 2024, 2025, 2026, 2027].filter(a => a <= anoAtual + 1);
+
+  useEffect(() => {
+    const h = () => setFiltrosVersion(v => v + 1);
+    window.addEventListener('fin-filtros-changed', h);
+    return () => window.removeEventListener('fin-filtros-changed', h);
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    financeiroV2.arrecadacaoAnual(ano, lerFiltrosGlobais())
+      .then((r) => {
+        if (cancelled) return;
+        setDados(r);
+        const meses = r?.meses || [];
+        const ultimo = meses.reduceRight((acc, m, i) => acc !== null ? acc : ((m.receita > 0 || m.despesa > 0) ? i : null), null);
+        setSelectedIdx(ultimo);
+      })
+      .catch((e) => console.warn('[RecVsSai]:', e?.message))
+      .finally(() => !cancelled && setLoading(false));
+    return () => { cancelled = true; };
+  }, [ano, filtrosVersion]);
+
+  const meses = dados?.meses || [];
+  const sel = selectedIdx !== null ? meses[selectedIdx] : null;
+
+  const onBarClick = (e) => {
+    if (e?.activePayload?.[0]?.payload) {
+      const p = e.activePayload[0].payload;
+      if (typeof p.idx === 'number') setSelectedIdx(p.idx);
+    }
+  };
+
+  const formatado = meses.map((m, i) => ({
+    idx: i, label: m.mes_label,
+    Receita: m.receita, Despesa: m.despesa, Resultado: m.resultado,
+  }));
+
+  const totalReceita = meses.reduce((s, m) => s + m.receita, 0);
+  const totalDespesa = meses.reduce((s, m) => s + m.despesa, 0);
+  const resultadoAno = totalReceita - totalDespesa;
+
+  return (
+    <Card>
+      <CardContent className="pt-6">
+        <div className="flex items-start justify-between flex-wrap gap-3 mb-3">
+          <div>
+            <h3 className="text-base font-semibold flex items-center gap-2">
+              Receita × Saída mensal · {ano}
+              <Badge variant="outline" className="text-[10px] font-normal">
+                <MousePointer2 className="h-2.5 w-2.5 mr-1" />
+                clique num mês
+              </Badge>
+            </h3>
+            <p className="text-xs text-muted-foreground">
+              Resultado do ano: <strong className={resultadoAno >= 0 ? 'text-emerald-600' : 'text-rose-600'}>{fmtMoney(resultadoAno)}</strong>
+              · empréstimos e transferências excluídos
+            </p>
+          </div>
+          <div className="flex gap-1 flex-wrap">
+            {anos.map(a => (
+              <button key={a} onClick={() => setAno(a)} className={`px-2.5 py-1 text-[11px] rounded-md font-medium transition ${ano === a ? 'bg-primary text-primary-foreground' : 'bg-muted text-muted-foreground hover:bg-muted/80'}`}>
+                {a}
+              </button>
+            ))}
+          </div>
+        </div>
+        {loading ? (
+          <div className="py-16 flex justify-center"><Loader2 className="h-6 w-6 animate-spin text-primary" /></div>
+        ) : meses.every(m => m.receita === 0 && m.despesa === 0) ? (
+          <div className="py-12 text-center text-sm text-muted-foreground">Sem dados de {ano}</div>
+        ) : (
+          <>
+            <div style={{ width: '100%', height: 340 }}>
+              <ResponsiveContainer>
+                <BarChart data={formatado} onClick={onBarClick} barGap={4} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
+                  <defs>
+                    <linearGradient id="gradMesReceita" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="0%" stopColor={C.green} stopOpacity={0.95} />
+                      <stop offset="100%" stopColor={C.green} stopOpacity={0.5} />
+                    </linearGradient>
+                    <linearGradient id="gradMesDespesa" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="0%" stopColor={C.red} stopOpacity={0.95} />
+                      <stop offset="100%" stopColor={C.red} stopOpacity={0.5} />
+                    </linearGradient>
+                  </defs>
+                  <CartesianGrid strokeDasharray="3 3" opacity={0.2} />
+                  <XAxis dataKey="label" tick={{ fontSize: 11 }} />
+                  <YAxis tick={{ fontSize: 10 }} tickFormatter={(v) => fmtCompact(v).replace('R$ ', '')} />
+                  <Tooltip cursor={{ fill: 'rgba(0,179,157,0.06)' }} formatter={(v) => fmtMoney(v)} contentStyle={{ borderRadius: 10, fontSize: 12, border: '1px solid var(--cbrio-border)' }} />
+                  <Legend wrapperStyle={{ fontSize: 11 }} iconSize={10} />
+                  <Bar dataKey="Receita" fill={C.green} radius={[6, 6, 0, 0]} animationDuration={1200} cursor="pointer">
+                    {formatado.map((entry, i) => (
+                      <Cell key={i} fill="url(#gradMesReceita)" stroke={i === selectedIdx ? C.amber : 'transparent'} strokeWidth={i === selectedIdx ? 2 : 0} />
+                    ))}
+                  </Bar>
+                  <Bar dataKey="Despesa" fill={C.red} radius={[6, 6, 0, 0]} animationDuration={1400} cursor="pointer">
+                    {formatado.map((entry, i) => (
+                      <Cell key={i} fill="url(#gradMesDespesa)" stroke={i === selectedIdx ? C.amber : 'transparent'} strokeWidth={i === selectedIdx ? 2 : 0} />
+                    ))}
+                  </Bar>
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+            <AnimatePresence mode="wait">
+              {sel && (
+                <motion.div
+                  key={`rvs-${selectedIdx}`}
+                  initial={{ opacity: 0, y: 12 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -8 }}
+                  transition={{ duration: 0.4 }}
+                  className="mt-4 pt-4 border-t border-border"
+                >
+                  <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
+                    <span className="text-xs text-muted-foreground">Mês selecionado</span>
+                    <span className="text-sm font-semibold px-2 py-0.5 rounded bg-amber-100 dark:bg-amber-500/20 text-amber-700 dark:text-amber-300">
+                      {sel.mes_label}/{String(ano).slice(2)}
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                    <SemanaCard label="Arrecadação" icon={Banknote} accent={C.green} valor={fmtMoney(sel.receita)} delta={null} sub="no mês" anim={`r-${selectedIdx}`} />
+                    <SemanaCard label="Saídas" icon={TrendingDown} accent={C.red} valor={fmtMoney(sel.despesa)} delta={null} sub="no mês" anim={`d-${selectedIdx}`} />
+                    <SemanaCard label="Resultado" icon={Activity} accent={sel.resultado >= 0 ? C.green : C.red} valor={fmtMoney(sel.resultado)} delta={null} sub="receita − despesa" anim={`res-${selectedIdx}`} />
+                  </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
+          </>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+
+
+
+function TransacoesDrilldownDialog({ open, onClose, titulo, subtitulo, color = C.primary, totalEsperado, fetcher }) {
+  const [dados, setDados] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [busca, setBusca] = useState('');
+  const [ordem, setOrdem] = useState('maior');
+
+
+
+  const [portalEl, setPortalEl] = useState(null);
+
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    setLoading(true);
+    setBusca('');
+    setOrdem('maior');
+    fetcher()
+      .then(r => { if (!cancelled) setDados(r); })
+      .catch(e => console.warn('[Drilldown]:', e?.message))
+      .finally(() => !cancelled && setLoading(false));
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+    const sync = () => setPortalEl(document.fullscreenElement || document.body);
+    sync();
+    document.addEventListener('fullscreenchange', sync);
+    return () => document.removeEventListener('fullscreenchange', sync);
+  }, [open]);
+
+
+  useEffect(() => {
+    if (!open) return;
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => { document.body.style.overflow = prev; };
+  }, [open]);
+
+  if (!open || !portalEl) return null;
+
+  const transacoes = (dados?.transacoes || [])
+    .filter(t => {
+      if (!busca) return true;
+      const q = busca.toLowerCase();
+      return (
+        String(t.referencia || '').toLowerCase().includes(q) ||
+        String(t.descricao || '').toLowerCase().includes(q) ||
+        String(t.plano_contas_nome || '').toLowerCase().includes(q)
+      );
+    })
+    .sort((a, b) => ordem === 'maior'
+      ? Number(b.valor || 0) - Number(a.valor || 0)
+      : Number(a.valor || 0) - Number(b.valor || 0));
+
+  const total = dados?.total || 0;
+
+  return createPortal(
+    <AnimatePresence>
+      {open && (
+        <motion.div
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          exit={{ opacity: 0 }}
+          transition={{ duration: 0.15 }}
+          className="fixed inset-0 z-[1000] bg-black/60 backdrop-blur-sm flex items-center justify-center p-4"
+
+
+
+          style={{ zoom: 'var(--dash-zoom, 1)' }}
+          onClick={onClose}
+        >
+          <motion.div
+            initial={{ scale: 0.97, opacity: 0 }}
+            animate={{ scale: 1, opacity: 1 }}
+            exit={{ scale: 0.97, opacity: 0 }}
+            transition={{ duration: 0.18, ease: 'easeOut' }}
+            onClick={(e) => e.stopPropagation()}
+            className="w-full max-w-4xl h-[85vh] max-h-[85vh] bg-card rounded-2xl shadow-2xl overflow-hidden border border-border flex flex-col"
+          >
+            <div className="relative px-6 py-4 border-b border-border shrink-0" style={{ background: `linear-gradient(135deg, ${color}15, transparent)` }}>
+              <div className="absolute top-0 left-0 right-0 h-1" style={{ background: color }} />
+              <div className="flex items-start justify-between gap-4">
+                <div className="min-w-0">
+                  <h3 className="text-lg font-bold truncate" style={{ color }}>{titulo}</h3>
+                  <p className="text-xs text-muted-foreground mt-0.5">{subtitulo}</p>
+                </div>
+                <button
+                  onClick={onClose}
+                  className="p-1.5 rounded-lg hover:bg-muted text-muted-foreground hover:text-foreground transition shrink-0"
+                  aria-label="Fechar"
+                >
+                  <X className="h-5 w-5" />
+                </button>
+              </div>
+              <div className="grid grid-cols-3 gap-4 mt-4">
+                <div>
+                  <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Total</div>
+                  <div className="text-xl font-bold tabular-nums" style={{ color }}>{fmtMoney(total)}</div>
+                </div>
+                <div>
+                  <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Lançamentos</div>
+                  <div className="text-xl font-bold tabular-nums">{fmtInt(dados?.qtd || 0)}</div>
+                </div>
+                <div>
+                  <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Média</div>
+                  <div className="text-xl font-bold tabular-nums">
+                    {fmtMoney(dados?.qtd ? total / dados.qtd : 0)}
+                  </div>
+                </div>
+              </div>
+              {totalEsperado != null && Math.abs(total - totalEsperado) > 0.5 && !loading && (
+                <div className="mt-2 text-[10px] text-amber-600 dark:text-amber-400">
+                  Total esperado: {fmtMoney(totalEsperado)} · diff {fmtMoney(total - totalEsperado)}
+                </div>
+              )}
+            </div>
+
+            <div className="px-6 py-3 border-b border-border bg-muted/30 flex items-center gap-2 shrink-0">
+              <input
+                type="text"
+                placeholder="Filtrar por nome, descrição, plano de contas..."
+                value={busca}
+                onChange={(e) => setBusca(e.target.value)}
+                className="flex-1 min-w-0 px-3 py-2 text-sm bg-background border border-border rounded-md focus:outline-none focus:ring-2 focus:ring-primary/30"
+              />
+              <div className="flex rounded-md border border-border overflow-hidden shrink-0 text-xs font-medium">
+                <button
+                  type="button"
+                  onClick={() => setOrdem('maior')}
+                  className={`px-2.5 py-2 flex items-center gap-1 transition ${ordem === 'maior' ? 'bg-primary text-primary-foreground' : 'bg-background text-muted-foreground hover:bg-muted'}`}
+                  title="Maior valor primeiro"
+                >
+                  <ArrowDown className="h-3.5 w-3.5" /> Maior
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setOrdem('menor')}
+                  className={`px-2.5 py-2 flex items-center gap-1 transition border-l border-border ${ordem === 'menor' ? 'bg-primary text-primary-foreground' : 'bg-background text-muted-foreground hover:bg-muted'}`}
+                  title="Menor valor primeiro"
+                >
+                  <ArrowUp className="h-3.5 w-3.5" /> Menor
+                </button>
+              </div>
+            </div>
+
+            <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain px-6 py-4">
+              {loading ? (
+                <div className="py-20 flex justify-center">
+                  <Loader2 className="h-7 w-7 animate-spin text-primary" />
+                </div>
+              ) : transacoes.length === 0 ? (
+                <div className="py-12 text-center text-sm text-muted-foreground">
+                  {busca ? 'Nenhum lançamento bate com a busca' : 'Sem lançamentos neste período'}
+                </div>
+              ) : (
+                <div className="space-y-1">
+                  {transacoes.slice(0, 200).map((t, i) => (
+                    <div
+                      key={t.id || i}
+                      className="flex items-center justify-between gap-3 px-3 py-2 rounded-lg hover:bg-muted/50 transition border border-transparent hover:border-border"
+                    >
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="text-sm font-medium truncate">
+                            {t.referencia || t.descricao || '(sem nome)'}
+                          </span>
+                          {t.plano_contas_codigo && (
+                            <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-muted text-muted-foreground tabular-nums">
+                              {t.plano_contas_codigo}
+                            </span>
+                          )}
+                        </div>
+                        <div className="text-[11px] text-muted-foreground truncate">
+                          {t.data_competencia} · {t.plano_contas_nome || t.descricao || '—'}
+                          {t.centro_custo_nome && ` · ${t.centro_custo_nome}`}
+                        </div>
+                      </div>
+                      <div className="text-sm font-semibold tabular-nums shrink-0" style={{ color }}>
+                        {fmtMoney(t.valor)}
+                      </div>
+                    </div>
+                  ))}
+                  {transacoes.length > 200 && (
+                    <div className="text-[10px] text-muted-foreground text-center pt-3">
+                      Mostrando 200 de {fmtInt(transacoes.length)} · refine a busca pra ver mais
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          </motion.div>
+        </motion.div>
+      )}
+    </AnimatePresence>,
+    portalEl
+  );
+}
+
+
+
+
+
+function FiltrosFinanceiroBar() {
+  const [filtros, setFiltros] = useFiltrosGlobais();
+  const [opcoes, setOpcoes] = useState({ planos: [], centros: [] });
+  const [open, setOpen] = useState(false);
+  const [buscaCentro, setBuscaCentro] = useState('');
+  const [buscaPlano, setBuscaPlano] = useState('');
+
+  useEffect(() => {
+    financeiroV2.filtrosDisponiveis()
+      .then(setOpcoes)
+      .catch(() => {});
+  }, []);
+
+  const ativos = (filtros.centro_custo_id ? 1 : 0) + (filtros.plano_contas_id ? 1 : 0);
+  const centroSel = opcoes.centros.find(c => c.id === filtros.centro_custo_id);
+  const planoSel = opcoes.planos.find(p => p.id === filtros.plano_contas_id);
+
+  const setCentro = (id) => setFiltros({ ...filtros, centro_custo_id: id || null });
+  const setPlano = (id) => setFiltros({ ...filtros, plano_contas_id: id || null });
+  const limpar = () => setFiltros({});
+
+  const planosFiltrados = buscaPlano
+    ? opcoes.planos.filter(p =>
+        `${p.codigo} ${p.nome}`.toLowerCase().includes(buscaPlano.toLowerCase()))
+    : opcoes.planos.slice(0, 50);
+  const centrosFiltrados = buscaCentro
+    ? opcoes.centros.filter(c =>
+        `${c.codigo} ${c.nome}`.toLowerCase().includes(buscaCentro.toLowerCase()))
+    : opcoes.centros.slice(0, 50);
+
+  return (
+    <div className="mt-2">
+      <button
+        onClick={() => setOpen(o => !o)}
+        className="inline-flex items-center gap-2 px-3 py-1.5 rounded-lg border border-border text-xs hover:bg-muted transition"
+      >
+        <Filter className="h-3.5 w-3.5" />
+        <span className="font-medium">Filtros globais</span>
+        {ativos > 0 && (
+          <span className="px-1.5 py-0.5 rounded bg-primary text-primary-foreground text-[10px] font-bold tabular-nums">
+            {ativos}
+          </span>
+        )}
+        {ativos === 0 && <span className="text-muted-foreground">· nenhum</span>}
+      </button>
+
+      {                                                                         }
+      <button
+        onClick={() => setFiltros({ ...filtros, sem_extra: !filtros.sem_extra })}
+        title="Remove as receitas extraordinárias (campanhas, doações pontuais) — mostra só a arrecadação ordinária (dízimos/ofertas)."
+        className={`ml-2 inline-flex items-center gap-2 px-3 py-1.5 rounded-lg border text-xs transition ${
+          filtros.sem_extra
+            ? 'border-primary bg-primary text-primary-foreground font-semibold'
+            : 'border-border hover:bg-muted'
+        }`}
+      >
+        <Filter className="h-3.5 w-3.5" />
+        {filtros.sem_extra ? 'Sem extraordinárias ✓' : 'Sem extraordinárias'}
+      </button>
+
+      {(ativos > 0 || open) && (
+        <motion.div
+          initial={{ opacity: 0, y: -4 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="inline-flex items-center gap-2 ml-2 text-[11px]"
+        >
+          {centroSel && (
+            <span className="px-2 py-1 rounded-md bg-purple-100 dark:bg-purple-500/20 text-purple-700 dark:text-purple-300 inline-flex items-center gap-1">
+              <span className="font-mono">{centroSel.codigo}</span>
+              <span className="truncate max-w-[180px]">{centroSel.nome}</span>
+              <button onClick={() => setCentro(null)} className="hover:opacity-70"><X className="h-3 w-3" /></button>
+            </span>
+          )}
+          {planoSel && (
+            <span className="px-2 py-1 rounded-md bg-blue-100 dark:bg-blue-500/20 text-blue-700 dark:text-blue-300 inline-flex items-center gap-1">
+              <span className="font-mono">{planoSel.codigo}</span>
+              <span className="truncate max-w-[180px]">{planoSel.nome}</span>
+              <button onClick={() => setPlano(null)} className="hover:opacity-70"><X className="h-3 w-3" /></button>
+            </span>
+          )}
+          {ativos > 0 && (
+            <button onClick={limpar} className="text-muted-foreground hover:text-foreground">
+              limpar tudo
+            </button>
+          )}
+        </motion.div>
+      )}
+
+      <AnimatePresence>
+        {open && (
+          <motion.div
+            initial={{ opacity: 0, height: 0 }}
+            animate={{ opacity: 1, height: 'auto' }}
+            exit={{ opacity: 0, height: 0 }}
+            className="mt-3 grid grid-cols-1 md:grid-cols-2 gap-3 overflow-hidden"
+          >
+            <Card>
+              <CardContent className="p-3">
+                <div className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium mb-2">
+                  Centro de Custo
+                </div>
+                <input
+                  type="text"
+                  placeholder="Buscar centro..."
+                  value={buscaCentro}
+                  onChange={(e) => setBuscaCentro(e.target.value)}
+                  className="w-full px-2 py-1 text-xs bg-background border border-border rounded-md mb-2"
+                />
+                <div className="max-h-48 overflow-y-auto space-y-0.5">
+                  {centrosFiltrados.map(c => (
+                    <button
+                      key={c.id}
+                      onClick={() => { setCentro(c.id); setOpen(false); setBuscaCentro(''); }}
+                      className={`w-full text-left px-2 py-1 text-xs rounded hover:bg-muted transition ${
+                        filtros.centro_custo_id === c.id ? 'bg-primary/15 text-primary font-semibold' : ''
+                      }`}
+                    >
+                      <span className="font-mono mr-2 text-muted-foreground">{c.codigo}</span>
+                      {c.nome}
+                    </button>
+                  ))}
+                  {centrosFiltrados.length === 0 && (
+                    <div className="text-[11px] text-muted-foreground py-2 text-center">Nada encontrado</div>
+                  )}
+                </div>
+              </CardContent>
+            </Card>
+            <Card>
+              <CardContent className="p-3">
+                <div className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium mb-2">
+                  Plano de Contas
+                </div>
+                <input
+                  type="text"
+                  placeholder="Buscar plano..."
+                  value={buscaPlano}
+                  onChange={(e) => setBuscaPlano(e.target.value)}
+                  className="w-full px-2 py-1 text-xs bg-background border border-border rounded-md mb-2"
+                />
+                <div className="max-h-48 overflow-y-auto space-y-0.5">
+                  {planosFiltrados.map(p => (
+                    <button
+                      key={p.id}
+                      onClick={() => { setPlano(p.id); setOpen(false); setBuscaPlano(''); }}
+                      className={`w-full text-left px-2 py-1 text-xs rounded hover:bg-muted transition ${
+                        filtros.plano_contas_id === p.id ? 'bg-primary/15 text-primary font-semibold' : ''
+                      }`}
+                    >
+                      <span className="font-mono mr-2 text-muted-foreground">{p.codigo}</span>
+                      {p.nome}
+                    </button>
+                  ))}
+                  {planosFiltrados.length === 0 && (
+                    <div className="text-[11px] text-muted-foreground py-2 text-center">Nada encontrado</div>
+                  )}
+                </div>
+              </CardContent>
+            </Card>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  );
+}
+
+
+
+
+function SlideSaudeFinanceira() {
+  const anoAtual = new Date().getFullYear();
+  const [ano, setAno] = useState(anoAtual);
+  const [dados, setDados] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [showDoadores, setShowDoadores] = useState(false);
+  const anos = [2022, 2023, 2024, 2025, 2026, 2027].filter(a => a <= anoAtual + 1);
+  const [filtrosG] = useFiltrosGlobais();
+  const semExtra = !!filtrosG.sem_extra;
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    financeiroV2.saudeFinanceira(ano)
+      .then(r => { if (!cancelled) setDados(r); })
+      .catch(e => console.warn('[Saude]:', e?.message))
+      .finally(() => !cancelled && setLoading(false));
+    return () => { cancelled = true; };
+  }, [ano, semExtra]);
+
+  if (loading && !dados) {
+    return <div className="py-20 flex justify-center"><Loader2 className="h-7 w-7 animate-spin text-primary" /></div>;
+  }
+  if (!dados) return <div className="py-12 text-center text-sm text-muted-foreground">Sem dados</div>;
+
+  const resMes = Number(dados.resultado_mes || 0);
+  const resYtd = Number(dados.resultado_ytd || 0);
+  const res12m = Number(dados.resultado_12m || 0);
+  const pctFolha = Number(dados.pct_folha || 0);
+  const top20 = Number(dados.concentracao_top20pct_pct || 0);
+  const top10 = Number(dados.concentracao_top10_pct || 0);
+  const mesesVermelho = Number(dados.meses_vermelho || 0);
+  const mesesDado = Number(dados.meses_com_dado || 0);
+
+
+  const folhaCor = pctFolha <= 45 ? C.green : pctFolha <= 55 ? C.amber : C.red;
+  const folhaLabel = pctFolha <= 45 ? 'saudável' : pctFolha <= 55 ? 'atenção' : 'crítico';
+
+  const concCor = top20 < 60 ? C.green : top20 < 80 ? C.amber : C.red;
+  const concLabel = top20 < 60 ? 'base diluída' : top20 < 80 ? 'concentração média' : 'concentração alta';
+
+  return (
+    <>
+      <Card className="relative overflow-hidden">
+        <div className="absolute top-0 left-0 right-0 h-1 bg-gradient-to-r from-emerald-500 via-amber-500 to-rose-500" />
+        <CardContent className="pt-6">
+          <div className="flex items-start justify-between flex-wrap gap-3 mb-4">
+            <div>
+              <h3 className="text-base font-semibold flex items-center gap-2">
+                <Activity className="h-4 w-4 text-primary" />
+                Saúde Financeira · {ano}
+              </h3>
+              <p className="text-xs text-muted-foreground">
+                Resultado operacional · comprometimento com folha · risco de concentração ·
+                empréstimos e transferências excluídos
+              </p>
+            </div>
+            <div className="flex gap-1 flex-wrap">
+              {anos.map(a => (
+                <button key={a} onClick={() => setAno(a)}
+                  className={`px-2.5 py-1 text-[11px] rounded-md font-medium transition ${ano === a ? 'bg-primary text-primary-foreground' : 'bg-muted text-muted-foreground hover:bg-muted/80'}`}>
+                  {a}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {                          }
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mb-4">
+            <SaudeResultadoCard label="Resultado do mês" valor={resMes} sub={dados.mes_atual} />
+            <SaudeResultadoCard label="Resultado no ano (YTD)" valor={resYtd} sub={`receita − despesa · ${ano}`} destaque />
+            <SaudeResultadoCard label="Resultado 12 meses" valor={res12m} sub={`${mesesVermelho} de ${mesesDado} meses no vermelho`} />
+          </div>
+
+          {                                    }
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            {           }
+            <div className="rounded-xl border border-border p-4 relative overflow-hidden">
+              <div className="absolute top-0 left-0 right-0 h-1" style={{ background: folhaCor }} />
+              <div className="flex items-center justify-between mb-2">
+                <span className="text-xs uppercase tracking-wider text-muted-foreground font-medium">Comprometimento com folha (RH)</span>
+                <Users className="h-4 w-4" style={{ color: folhaCor }} />
+              </div>
+              <div className="flex items-baseline gap-2">
+                <span className="text-3xl font-bold tabular-nums" style={{ color: folhaCor }}>{pctFolha.toFixed(1)}%</span>
+                <span className="text-xs font-medium px-2 py-0.5 rounded-full" style={{ background: `${folhaCor}1f`, color: folhaCor }}>{folhaLabel}</span>
+              </div>
+              <div className="h-2 bg-muted rounded-full overflow-hidden mt-3">
+                <motion.div className="h-full rounded-full cbrio-bar" style={{ background: folhaCor }}
+                  initial={{ width: 0 }} animate={{ width: `${Math.min(100, pctFolha)}%` }} transition={{ duration: 1 }} />
+              </div>
+              <div className="text-[11px] text-muted-foreground mt-2 tabular-nums">
+                {fmtMoney(dados.folha_ytd)} de {fmtMoney(dados.receita_ytd)} · benchmark saudável ≤ 45%
+              </div>
+            </div>
+
+            {                                                               }
+            <button
+              type="button"
+              onClick={() => setShowDoadores(true)}
+              className="rounded-xl border border-border p-4 relative overflow-hidden text-left transition hover:border-primary/50 hover:shadow-md group"
+            >
+              <div className="absolute top-0 left-0 right-0 h-1" style={{ background: concCor }} />
+              <div className="flex items-center justify-between mb-2">
+                <span className="text-xs uppercase tracking-wider text-muted-foreground font-medium">Concentração de doadores</span>
+                <Award className="h-4 w-4" style={{ color: concCor }} />
+              </div>
+              <div className="flex items-baseline gap-2">
+                <span className="text-3xl font-bold tabular-nums" style={{ color: concCor }}>{top20.toFixed(0)}%</span>
+                <span className="text-xs text-muted-foreground">da arrecadação vem dos top 20% doadores</span>
+              </div>
+              <div className="h-2 bg-muted rounded-full overflow-hidden mt-3">
+                <motion.div className="h-full rounded-full cbrio-bar" style={{ background: concCor }}
+                  initial={{ width: 0 }} animate={{ width: `${Math.min(100, top20)}%` }} transition={{ duration: 1 }} />
+              </div>
+              <div className="text-[11px] text-muted-foreground mt-2 tabular-nums flex items-center justify-between gap-2">
+                <span>{fmtInt(dados.doadores_qtd)} doadores · top 10 pessoas = {top10.toFixed(1)}% · <span style={{ color: concCor }}>{concLabel}</span></span>
+                <span className="text-[10px] text-primary opacity-0 group-hover:opacity-100 transition">ver lista →</span>
+              </div>
+            </button>
+          </div>
+
+          <DoadoresListDialog open={showDoadores} onClose={() => setShowDoadores(false)} ano={ano} />
+
+          {resYtd < 0 && (
+            <div className="mt-4 flex items-start gap-2 p-3 rounded-lg bg-rose-50 dark:bg-rose-500/10 border border-rose-200 dark:border-rose-500/30">
+              <TrendingDown className="h-4 w-4 text-rose-500 shrink-0 mt-0.5" />
+              <div className="text-xs text-rose-700 dark:text-rose-300">
+                <strong>Atenção:</strong> a igreja está operando com déficit de {fmtMoney(Math.abs(resYtd))} no ano —
+                gastando mais do que arrecada (excluindo empréstimos). Recomenda-se revisar despesas ou reforçar arrecadação.
+              </div>
+            </div>
+          )}
+        </CardContent>
+      </Card>
+    </>
+  );
+}
+
+function SaudeResultadoCard({ label, valor, sub, destaque }) {
+  const positivo = valor >= 0;
+  const cor = positivo ? C.green : C.red;
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.4 }}
+      className={`rounded-xl border p-4 relative overflow-hidden ${destaque ? 'border-primary/40 bg-primary/5' : 'border-border'}`}
+    >
+      <div className="absolute top-0 left-0 right-0 h-1" style={{ background: cor }} />
+      <div className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium mb-1">{label}</div>
+      <div className="text-2xl font-bold tabular-nums flex items-center gap-1" style={{ color: cor }}>
+        {positivo ? <ArrowUp className="h-4 w-4" /> : <ArrowDown className="h-4 w-4" />}
+        {fmtMoney(Math.abs(valor))}
+      </div>
+      <div className="text-[11px] text-muted-foreground mt-1">{positivo ? 'superávit' : 'déficit'} · {sub}</div>
+    </motion.div>
+  );
+}
+
+
+
+
+
+
+
+
+
+
+
+
+function TooltipLupa({ active, payload, label }) {
+  if (!active || !Array.isArray(payload) || payload.length === 0) return null;
+  const valor = (chave) => payload.find((p) => p?.dataKey === chave)?.value;
+  const diz = Number(valor('Dízimo') || 0);
+  const of = Number(valor('Oferta') || 0);
+  const pct = valor('pct');
+  const total = diz + of;
+  return (
+    <div
+      style={{
+        background: 'var(--cbrio-card)',
+        border: '2px solid var(--cbrio-border)',
+        borderRadius: 16,
+        padding: '14px 18px',
+        boxShadow: '0 12px 40px rgba(0,0,0,.28)',
+        minWidth: 230,
+      }}
+    >
+      <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 10, letterSpacing: '.02em' }}>{label}</div>
+      <div style={{ display: 'grid', gap: 8 }}>
+        <div>
+          <div style={{ fontSize: 12, color: 'var(--cbrio-text3)' }}>Dízimo</div>
+          <div style={{ fontSize: 20, fontWeight: 700, color: C.primary, lineHeight: 1.15 }}>{fmtMoney(diz)}</div>
+        </div>
+        <div>
+          <div style={{ fontSize: 12, color: 'var(--cbrio-text3)' }}>Oferta</div>
+          <div style={{ fontSize: 20, fontWeight: 700, color: C.blue, lineHeight: 1.15 }}>{fmtMoney(of)}</div>
+        </div>
+        {pct != null && (
+          <div style={{ borderTop: '1px solid var(--cbrio-border)', paddingTop: 8 }}>
+            <div style={{ fontSize: 12, color: 'var(--cbrio-text3)' }}>
+              Total {fmtMoney(total)}
+            </div>
+            <div style={{ fontSize: 17, fontWeight: 700, color: C.purple }}>
+              {Number(pct).toFixed(1)}% dízimo
+            </div>
+          </div>
+        )}
+      </div>
+      <div style={{ fontSize: 11, color: 'var(--cbrio-text3)', marginTop: 10 }}>
+        clique na barra para fixar
+      </div>
+    </div>
+  );
+}
+
+
+
+
+
+
+
+
+
+function SlideQuintaSemana() {
+  const [filtros] = useFiltrosGlobais();
+  const semExtra = !!filtros.sem_extra;
+  const [anos, setAnos] = useState(4);
+  const [dados, setDados] = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let vivo = true;
+    setLoading(true);
+    financeiroV2.quintasSemanas(anos, semExtra)
+      .then(d => { if (vivo) setDados(d); })
+      .catch(() => { if (vivo) setDados({ erro: true }); })
+      .finally(() => { if (vivo) setLoading(false); });
+    return () => { vivo = false; };
+  }, [anos, semExtra]);
+
+  const quintas = dados?.quintas || [];
+  const fechadas = quintas.filter(q => q.fechada);
+
+
+  const serie = fechadas.map(q => ({
+    label: q.rotulo,
+    Receita: Number(q.receita || 0),
+    Extraordinária: Number(q.extraordinaria || 0),
+  }));
+  const media = dados?.media;
+  const melhor = fechadas.reduce((a, b) => (!a || b.receita > a.receita ? b : a), null);
+
+  return (
+    <Card className="relative overflow-hidden">
+      <div className="absolute top-0 left-0 right-0 h-1 bg-gradient-to-r from-amber-500 to-rose-500" />
+      <CardContent className="pt-6">
+        <div className="flex items-start justify-between flex-wrap gap-3 mb-4">
+          <div>
+            <h3 className="text-base font-semibold flex items-center gap-2">
+              <CalendarDays className="h-4 w-4 text-primary" />
+              5ª semana · meses com 5 semanas
+            </h3>
+            <p className="text-sm text-muted-foreground">
+              A semana financeira é <strong>quarta a terça</strong>, então alguns meses têm cinco.
+              Aqui elas são comparadas <strong>entre si</strong>
+              {semExtra ? ' · sem as extraordinárias' : ' · incluindo as extraordinárias'}.
+            </p>
+          </div>
+          <div className="flex gap-1">
+            {[2, 4, 6].map(a => (
+              <button key={a} onClick={() => setAnos(a)}
+                className={`px-2.5 py-1 text-xs rounded-md font-medium transition ${anos === a ? 'bg-primary text-primary-foreground' : 'bg-muted text-muted-foreground hover:bg-muted/80'}`}>
+                {a} anos
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {loading && !dados ? (
+          <div className="py-16 flex justify-center"><Loader2 className="h-6 w-6 animate-spin text-primary" /></div>
+        ) : dados?.erro ? (
+
+          <div className="py-12 text-center text-sm text-amber-600">
+            Não foi possível carregar as quintas semanas.
+          </div>
+        ) : fechadas.length === 0 ? (
+          <div className="py-12 text-center text-sm text-muted-foreground">
+            Nenhuma 5ª semana fechada no período.
+          </div>
+        ) : (
+          <>
+            <div style={{ display: 'grid', gap: 12, gridTemplateColumns: 'repeat(auto-fit, minmax(190px, 1fr))', marginBottom: 18 }}>
+              <div style={{ padding: '16px 18px', borderRadius: 14, border: '1px solid var(--cbrio-border)' }}>
+                <div style={{ fontSize: 12.5, color: 'var(--cbrio-text3)', marginBottom: 6 }}>Média das 5ªs semanas</div>
+                <div style={{ fontSize: 26, fontWeight: 800, lineHeight: 1.1 }}>{media == null ? '—' : fmtMoney(media)}</div>
+                <div style={{ fontSize: 11.5, color: 'var(--cbrio-text3)', marginTop: 4 }}>{fechadas.length} semana(s) fechada(s)</div>
+              </div>
+              {melhor && (
+                <div style={{ padding: '16px 18px', borderRadius: 14, border: '1px solid var(--cbrio-border)' }}>
+                  <div style={{ fontSize: 12.5, color: 'var(--cbrio-text3)', marginBottom: 6 }}>Maior 5ª semana</div>
+                  <div style={{ fontSize: 26, fontWeight: 800, color: C.primary, lineHeight: 1.1 }}>{fmtMoney(melhor.receita)}</div>
+                  <div style={{ fontSize: 11.5, color: 'var(--cbrio-text3)', marginTop: 4 }}>{melhor.rotulo}</div>
+                </div>
+              )}
+              {dados?.abertas > 0 && (
+                <div style={{ padding: '16px 18px', borderRadius: 14, border: '1px solid var(--cbrio-border)' }}>
+                  <div style={{ fontSize: 12.5, color: 'var(--cbrio-text3)', marginBottom: 6 }}>Ainda não fecharam</div>
+                  <div style={{ fontSize: 26, fontWeight: 800, color: 'var(--cbrio-text3)', lineHeight: 1.1 }}>{dados.abertas}</div>
+                  <div style={{ fontSize: 11.5, color: 'var(--cbrio-text3)', marginTop: 4 }}>fora da média, de propósito</div>
+                </div>
+              )}
+            </div>
+
+            <div style={{ width: '100%', height: 300 }}>
+              <ResponsiveContainer>
+                <BarChart data={serie} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
+                  <CartesianGrid strokeDasharray="3 3" opacity={0.2} />
+                  <XAxis dataKey="label" tick={{ fontSize: 13 }} />
+                  <YAxis tick={{ fontSize: 12 }} width={64} tickFormatter={(v) => fmtCompact(v).replace('R$ ', '')} />
+                  <Tooltip
+                    formatter={(v, n) => [fmtMoney(v), n]}
+                    contentStyle={{ borderRadius: 12, fontSize: 13, border: '1px solid var(--cbrio-border)' }}
+                  />
+                  <Legend wrapperStyle={{ fontSize: 13 }} iconSize={12} />
+                  <Bar dataKey="Receita" fill={C.primary} radius={[6, 6, 0, 0]} />
+                  {                                                            }
+                  <Bar dataKey="Extraordinária" fill={C.amber} radius={[6, 6, 0, 0]} />
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+
+            {dados?.abertas > 0 && (
+              <p className="text-xs text-muted-foreground mt-3">
+                ⚠️ {dados.abertas} quinta(s) semana(s) ainda não terminaram e ficam fora do gráfico e da média —
+                mostrá-las como zero diria que não se arrecadou nada.
+              </p>
+            )}
+          </>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function SlideDizimoOferta() {
+  const [filtros] = useFiltrosGlobais();
+
+
+
+  const [mesSel, setMesSel] = useState(null);
+  const semExtra = !!filtros.sem_extra;
+  const anoAtual = new Date().getFullYear();
+  const [ano, setAno] = useState(anoAtual);
+  const [dados, setDados] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const anos = [2022, 2023, 2024, 2025, 2026, 2027].filter(a => a <= anoAtual + 1);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    financeiroV2.dizimoOferta(ano, semExtra)
+      .then(r => { if (!cancelled) setDados(r); })
+      .catch(e => console.warn('[DizOf]:', e?.message))
+      .finally(() => !cancelled && setLoading(false));
+    return () => { cancelled = true; };
+  }, [ano, semExtra]);
+
+  const meses = dados?.meses || [];
+  const MESES = ['Jan','Fev','Mar','Abr','Mai','Jun','Jul','Ago','Set','Out','Nov','Dez'];
+  const formatado = meses.map(m => ({
+    label: MESES[(m.mes_num || 1) - 1],
+    Dízimo: Number(m.dizimo || 0),
+    Oferta: Number(m.oferta || 0),
+    pct: Number(m.pct_dizimo || 0),
+  }));
+
+  const totalDiz = meses.reduce((s, m) => s + Number(m.dizimo || 0), 0);
+  const totalOf = meses.reduce((s, m) => s + Number(m.oferta || 0), 0);
+  const pctDizGeral = (totalDiz + totalOf) > 0 ? (totalDiz / (totalDiz + totalOf)) * 100 : 0;
+
+  return (
+    <Card className="relative overflow-hidden">
+      <div className="absolute top-0 left-0 right-0 h-1 bg-gradient-to-r from-teal-500 to-sky-500" />
+      <CardContent className="pt-6">
+        <div className="flex items-start justify-between flex-wrap gap-3 mb-3">
+          <div>
+            <h3 className="text-base font-semibold flex items-center gap-2">
+              <TrendingUp className="h-4 w-4 text-primary" />
+              Dízimo × Oferta · {ano}
+            </h3>
+            <p className="text-xs text-muted-foreground">
+              Proporção da base de contribuição · dízimo é recorrente, oferta é eventual
+              {semExtra ? ' (sem as extraordinárias)' : ' (inclui as extraordinárias)'} ·
+              ano: <strong>{pctDizGeral.toFixed(0)}% dízimo</strong> / {(100 - pctDizGeral).toFixed(0)}% oferta
+            </p>
+          </div>
+          <div className="flex gap-1 flex-wrap">
+            {anos.map(a => (
+              <button key={a} onClick={() => setAno(a)}
+                className={`px-2.5 py-1 text-[11px] rounded-md font-medium transition ${ano === a ? 'bg-primary text-primary-foreground' : 'bg-muted text-muted-foreground hover:bg-muted/80'}`}>
+                {a}
+              </button>
+            ))}
+          </div>
+        </div>
+        {loading && !dados ? (
+          <div className="py-16 flex justify-center"><Loader2 className="h-6 w-6 animate-spin text-primary" /></div>
+        ) : formatado.length === 0 ? (
+          <div className="py-12 text-center text-sm text-muted-foreground">Sem dados de {ano}</div>
+        ) : (
+          <div style={{ width: '100%', height: 340 }}>
+            <ResponsiveContainer>
+              <ComposedChart
+                data={formatado}
+                margin={{ top: 10, right: 10, left: 0, bottom: 0 }}
+                style={{ cursor: 'pointer' }}
+
+
+                onClick={(e) => {
+                  const l = e?.activeLabel;
+                  if (!l) return;
+                  setMesSel((atual) => (atual === l ? null : l));
+                }}
+              >
+                <defs>
+                  <linearGradient id="gradDiz" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stopColor={C.primary} stopOpacity={0.95} />
+                    <stop offset="100%" stopColor={C.primary} stopOpacity={0.55} />
+                  </linearGradient>
+                  <linearGradient id="gradOf" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stopColor={C.blue} stopOpacity={0.95} />
+                    <stop offset="100%" stopColor={C.blue} stopOpacity={0.55} />
+                  </linearGradient>
+                </defs>
+                <CartesianGrid strokeDasharray="3 3" opacity={0.2} />
+                {
+                                                                    }
+                <XAxis dataKey="label" tick={{ fontSize: 13 }} />
+                <YAxis yAxisId="left" tick={{ fontSize: 12 }} width={64} tickFormatter={(v) => fmtCompact(v).replace('R$ ', '')} />
+                <YAxis yAxisId="right" orientation="right" domain={[0, 100]} tick={{ fontSize: 12 }} tickFormatter={(v) => `${v}%`} />
+                {
+
+                                                                     }
+                <Tooltip cursor={{ fill: 'var(--cbrio-text)', fillOpacity: 0.06 }} content={<TooltipLupa />} />
+                <Legend
+                  wrapperStyle={{ fontSize: 13 }}
+                  iconSize={12}
+                  payload={[
+                    { value: 'Dízimo', type: 'square', id: 'Dízimo', color: C.primary },
+                    { value: 'Oferta', type: 'square', id: 'Oferta', color: C.blue },
+                    { value: '% dízimo', type: 'line', id: 'pct', color: C.purple },
+                  ]}
+                />
+                <Bar yAxisId="left" dataKey="Dízimo" stackId="a" fill="url(#gradDiz)" radius={[0, 0, 0, 0]} animationDuration={1200} />
+                <Bar yAxisId="left" dataKey="Oferta" stackId="a" fill="url(#gradOf)" radius={[6, 6, 0, 0]} animationDuration={1300} />
+                <Line yAxisId="right" type="monotone" dataKey="pct" name="% dízimo" stroke={C.purple} strokeWidth={2.5} dot={{ r: 3 }} animationDuration={1600} />
+              </ComposedChart>
+            </ResponsiveContainer>
+          </div>
+        )}
+
+        {
+
+                                                                                  }
+        {mesSel && (() => {
+          const m = formatado.find((x) => x.label === mesSel);
+          if (!m) return null;
+          const total = m['Dízimo'] + m.Oferta;
+          const cards = [
+            { rotulo: 'Dízimo', valor: fmtMoney(m['Dízimo']), cor: C.primary },
+            { rotulo: 'Oferta', valor: fmtMoney(m.Oferta), cor: C.blue },
+            { rotulo: 'Total do mês', valor: fmtMoney(total), cor: 'var(--cbrio-text)' },
+            { rotulo: '% dízimo', valor: `${Number(m.pct || 0).toFixed(1)}%`, cor: C.purple },
+          ];
+          return (
+            <div style={{ marginTop: 18, borderTop: '1px solid var(--cbrio-border)', paddingTop: 16 }}>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
+                <div style={{ fontSize: 15, fontWeight: 700 }}>{mesSel} · {ano}</div>
+                <button
+                  onClick={() => setMesSel(null)}
+                  className="text-xs text-muted-foreground hover:text-foreground"
+                >
+                  fechar
+                </button>
+              </div>
+              <div style={{ display: 'grid', gap: 12, gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))' }}>
+                {cards.map((c) => (
+                  <div key={c.rotulo} style={{
+                    padding: '16px 18px', borderRadius: 14,
+                    border: '1px solid var(--cbrio-border)', background: 'var(--cbrio-card)',
+                  }}>
+                    <div style={{ fontSize: 12.5, color: 'var(--cbrio-text3)', marginBottom: 6 }}>{c.rotulo}</div>
+                    <div style={{ fontSize: 28, fontWeight: 800, color: c.cor, lineHeight: 1.1, letterSpacing: '-.02em' }}>
+                      {c.valor}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          );
+        })()}
+      </CardContent>
+    </Card>
+  );
+}

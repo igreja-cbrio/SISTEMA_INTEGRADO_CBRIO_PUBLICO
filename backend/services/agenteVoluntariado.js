@@ -1,0 +1,294 @@
+
+
+
+
+
+
+
+
+
+
+const { supabase } = require('../utils/supabase');
+const { notificar } = require('../services/notificar');
+const { fetchAllRows } = require('../utils/pagination');
+const { resolverTelefoneVoluntario } = require('../utils/telefoneVoluntario');
+
+const DIA = 86400000;
+
+const LOTE_IN = 200;
+
+function digitosCpf(v) {
+  const d = String(v || '').replace(/\D+/g, '');
+  return d.length === 11 ? d : null;
+}
+
+function nomeDaInscricao(vi) {
+  const completo = String(vi?.nome_completo || '').trim();
+  if (completo) return completo;
+  return [vi?.nome, vi?.sobrenome].filter(Boolean).join(' ').trim();
+}
+
+
+
+async function _emLotes(valores, build) {
+  const out = [];
+  const uniq = [...new Set((valores || []).filter(Boolean))];
+  for (let i = 0; i < uniq.length; i += LOTE_IN) {
+    const chunk = uniq.slice(i, i + LOTE_IN);
+    if (!chunk.length) break;
+    out.push(...await fetchAllRows(() => build(chunk)));
+  }
+  return out;
+}
+
+function waLink(phone, msg) {
+  const tel = String(phone || '').replace(/\D/g, '');
+  if (!tel) return null;
+  const num = tel.startsWith('55') ? tel : `55${tel}`;
+  return `https://wa.me/${num}?text=${encodeURIComponent(msg)}`;
+}
+
+function fmtData(iso) {
+  try { return new Date(iso).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }); }
+  catch { return iso; }
+}
+
+
+
+
+
+
+
+
+
+
+async function perfisPorId(ids) {
+  const out = {};
+  const uniq = [...new Set((ids || []).filter(Boolean))];
+  if (uniq.length === 0) return out;
+
+  const perfis = await _emLotes(uniq, (chunk) => supabase
+    .from('vol_profiles')
+    .select('id, full_name, phone, cpf, email, membresia_id')
+    .in('id', chunk));
+  if (!perfis.length) return out;
+
+
+  const membroIds = perfis.map((p) => p.membresia_id).filter(Boolean);
+  const membros = {};
+  for (const m of await _emLotes(membroIds, (chunk) => supabase
+    .from('mem_membros').select('id, nome, telefone').in('id', chunk).is('deleted_at', null))) {
+    membros[m.id] = m;
+  }
+
+
+  const cpfs = perfis.map((p) => digitosCpf(p.cpf)).filter(Boolean);
+  const porCpf = {};
+  for (const m of await _emLotes(cpfs, (chunk) => supabase
+    .from('mem_membros').select('id, nome, telefone, cpf').in('cpf', chunk).is('deleted_at', null))) {
+    const k = digitosCpf(m.cpf);
+    if (k && !porCpf[k]) porCpf[k] = m;
+  }
+
+
+
+  const emails = perfis.map((p) => String(p.email || '').trim().toLowerCase()).filter(Boolean);
+  const inscPorEmail = {};
+  for (const vi of await _emLotes(emails, (chunk) => supabase
+    .from('vol_inscricoes')
+    .select('email, telefone, nome, sobrenome, nome_completo, created_at')
+    .in('email', chunk).is('deleted_at', null).not('telefone', 'is', null)
+    .order('created_at', { ascending: false }))) {
+    const k = String(vi.email || '').trim().toLowerCase();
+    if (!k) continue;
+    (inscPorEmail[k] = inscPorEmail[k] || []).push(vi);
+  }
+
+
+
+
+  const contatos = {};
+  try {
+    for (const c of await _emLotes(Object.keys(membros), (chunk) => supabase
+      .from('mem_contatos').select('membro_id, valor, ultimo_visto')
+      .in('membro_id', chunk).eq('tipo', 'telefone').is('deleted_at', null)
+      .order('ultimo_visto', { ascending: false }))) {
+      (contatos[c.membro_id] = contatos[c.membro_id] || []).push({ telefone: c.valor });
+    }
+  } catch (e) {
+    console.error('[agenteVoluntariado] contatos secundários indisponíveis:', e.message);
+  }
+
+
+
+
+
+
+  let vinculosSuspeitos = 0;
+  let numerosInalcancaveis = 0;
+
+  for (const p of perfis) {
+    const membro = p.membresia_id ? membros[p.membresia_id] : null;
+    const cpf = digitosCpf(p.cpf);
+    const r = resolverTelefoneVoluntario({
+      nome: p.full_name,
+      perfilTelefone: p.phone,
+      membro,
+      membroPorCpf: cpf ? porCpf[cpf] : null,
+      inscricoes: (inscPorEmail[String(p.email || '').trim().toLowerCase()] || [])
+        .map((vi) => ({ nome: nomeDaInscricao(vi), telefone: vi.telefone })),
+      contatos: membro ? contatos[membro.id] || [] : [],
+    });
+    for (const d of r.descartados || []) {
+      if (d.motivo === 'nome_divergente' && (d.origem === 'membro' || d.origem === 'cpf')) vinculosSuspeitos++;
+      if (d.motivo === 'numero_errado') numerosInalcancaveis++;
+    }
+
+    out[p.id] = {
+      id: p.id,
+      full_name: p.full_name,
+      phone: r.telefone,
+      telefone_origem: r.origem,
+      telefone_fonte: r.rotulo,
+      membro_id: r.membro_id || p.membresia_id || null,
+    };
+  }
+
+  if (vinculosSuspeitos > 0) {
+    console.error(`[agenteVoluntariado] ${vinculosSuspeitos} perfil(is) de voluntário com nome incompatível com o cadastro de pessoa vinculado — vínculo suspeito, conferir em /entradas`);
+  }
+  if (numerosInalcancaveis > 0) {
+    console.error(`[agenteVoluntariado] ${numerosInalcancaveis} telefone(s) descartado(s) por não serem alcançáveis pelo nosso envio (DDD inexistente, faltando o 9, ou número estrangeiro)`);
+  }
+  return out;
+}
+
+
+async function analisar() {
+  const agora = Date.now();
+  const in7dIso = new Date(agora + 7 * DIA).toISOString();
+  const desde2dIso = new Date(agora - 2 * DIA).toISOString();
+
+
+  const servicos = await fetchAllRows(() => supabase
+    .from('vol_services')
+    .select('id, name, service_type_name, scheduled_at')
+    .gte('scheduled_at', desde2dIso)
+    .lte('scheduled_at', in7dIso)
+    .order('scheduled_at', { ascending: true }));
+  const futuros = (servicos || []).filter((s) => new Date(s.scheduled_at).getTime() >= agora);
+  const passados = (servicos || []).filter((s) => new Date(s.scheduled_at).getTime() < agora);
+  const svcById = Object.fromEntries((servicos || []).map((s) => [s.id, s]));
+
+  const confirmacoes_pendentes = [];
+  const reposicoes = [];
+  const no_shows = [];
+
+
+  if (futuros.length > 0) {
+    const escalas = await _emLotes(futuros.map((s) => s.id), (chunk) => supabase
+      .from('vol_schedules')
+      .select('id, service_id, volunteer_id, volunteer_name, team_name, position_name, confirmation_status')
+      .in('service_id', chunk)
+      .order('id', { ascending: true }));
+    const perfis = await perfisPorId((escalas || []).map((e) => e.volunteer_id));
+    for (const e of escalas || []) {
+      const svc = svcById[e.service_id];
+      const quando = svc ? fmtData(svc.scheduled_at) : '';
+      const funcao = [e.team_name, e.position_name].filter(Boolean).join(' · ');
+      const perfil = perfis[e.volunteer_id];
+      const nome = (e.volunteer_name || perfil?.full_name || '').trim();
+      if (e.confirmation_status === 'pending') {
+        const primeiro = nome.split(/\s+/)[0] || '';
+        const msg = `Oi ${primeiro}! Tudo bem? Você está escalado(a) para ${funcao || 'servir'} no ${svc?.name || 'culto'} (${quando}). Consegue confirmar sua presença? 💙`;
+        confirmacoes_pendentes.push({
+          schedule_id: e.id, nome, funcao, servico: svc?.name || null, quando,
+          telefone: perfil?.phone || null, whatsapp: waLink(perfil?.phone, msg), mensagem: msg,
+
+
+
+
+          telefone_fonte: perfil?.telefone_fonte || null,
+          telefone_origem: perfil?.telefone_origem || null,
+          membro_id: perfil?.membro_id || null,
+        });
+      } else if (e.confirmation_status === 'declined') {
+        reposicoes.push({
+          schedule_id: e.id, nome, funcao, team_name: e.team_name || null,
+          position_name: e.position_name || null, servico: svc?.name || null, quando,
+        });
+      }
+    }
+  }
+
+
+  if (passados.length > 0) {
+    const escalasP = await _emLotes(passados.map((s) => s.id), (chunk) => supabase
+      .from('vol_schedules')
+      .select('id, service_id, volunteer_id, volunteer_name, team_name, position_name')
+      .eq('confirmation_status', 'confirmed')
+      .in('service_id', chunk)
+      .order('id', { ascending: true }));
+    const schedIds = (escalasP || []).map((e) => e.id);
+    const comCheckin = new Set();
+    for (let i = 0; i < schedIds.length; i += 200) {
+      const chunk = schedIds.slice(i, i + 200);
+      if (chunk.length === 0) break;
+      const { data: cks } = await supabase.from('vol_check_ins').select('schedule_id').in('schedule_id', chunk);
+      for (const c of cks || []) comCheckin.add(c.schedule_id);
+    }
+    const perfisP = await perfisPorId((escalasP || []).map((e) => e.volunteer_id));
+    for (const e of escalasP || []) {
+      if (comCheckin.has(e.id)) continue;
+      const svc = svcById[e.service_id];
+      no_shows.push({
+        schedule_id: e.id,
+        nome: (e.volunteer_name || perfisP[e.volunteer_id]?.full_name || '').trim(),
+        funcao: [e.team_name, e.position_name].filter(Boolean).join(' · '),
+        servico: svc?.name || null, quando: svc ? fmtData(svc.scheduled_at) : '',
+      });
+    }
+  }
+
+  return { confirmacoes_pendentes, reposicoes, no_shows };
+}
+
+
+async function alertar() {
+  const { confirmacoes_pendentes, reposicoes, no_shows } = await analisar();
+  const hojeStr = new Date().toISOString().slice(0, 10);
+  let count = 0;
+
+  if (confirmacoes_pendentes.length > 0 || reposicoes.length > 0) {
+    const partes = [];
+    if (confirmacoes_pendentes.length) partes.push(`${confirmacoes_pendentes.length} aguardando confirmação`);
+    if (reposicoes.length) partes.push(`${reposicoes.length} recusada(s) precisando de reposição`);
+    count += await notificar({
+      modulo: 'voluntariado',
+      tipo: 'escalas_pendentes',
+      titulo: 'Escalas dos próximos cultos precisam de atenção',
+      mensagem: `${partes.join(' e ')}. Confira em Voluntariado para lembrar/repor.`,
+      link: '/voluntariado',
+      severidade: reposicoes.length ? 'warning' : 'info',
+      chaveDedup: `vol_escalas_${hojeStr}`,
+    });
+  }
+  if (no_shows.length > 0) {
+    count += await notificar({
+      modulo: 'voluntariado',
+      tipo: 'voluntario_no_show',
+      titulo: `${no_shows.length} falta(s) sem aviso no último culto`,
+      mensagem: `${no_shows.length} voluntário(s) confirmaram e não fizeram check-in. Vale um acompanhamento.`,
+      link: '/voluntariado',
+      severidade: 'info',
+      chaveDedup: `vol_noshow_${hojeStr}`,
+    });
+  }
+  return count;
+}
+
+
+
+
+
+module.exports = { analisar, alertar, perfisPorId };

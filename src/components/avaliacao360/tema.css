@@ -1,0 +1,16 @@
+
+
+.a360-res { color: #5eead4; background: rgb(20 184 166 / 0.12); box-shadow: inset 0 0 0 1px rgb(20 184 166 / 0.35); }
+.a360-comp { color: #a5b4fc; background: rgb(99 102 241 / 0.14); box-shadow: inset 0 0 0 1px rgb(99 102 241 / 0.4); }
+.a360-res-txt { color: #5eead4; }
+.a360-comp-txt { color: #a5b4fc; }
+.a360-alerta { color: #fbbf24; }
+.a360-alerta-box { border: 1px solid rgb(245 158 11 / 0.55); background: rgb(245 158 11 / 0.08); }
+.a360-filtro-on { border-color: rgb(245 158 11 / 0.7); background: rgb(245 158 11 / 0.14); }
+
+[data-theme="light"] .a360-res { color: #0f766e; background: rgb(20 184 166 / 0.1); }
+[data-theme="light"] .a360-comp { color: #4338ca; background: rgb(99 102 241 / 0.1); }
+[data-theme="light"] .a360-res-txt { color: #0f766e; }
+[data-theme="light"] .a360-comp-txt { color: #4338ca; }
+[data-theme="light"] .a360-alerta { color: #b45309; }
+[data-theme="light"] .a360-alerta-box { background: #fffbeb; }

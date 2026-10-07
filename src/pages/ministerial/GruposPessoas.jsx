@@ -1,0 +1,951 @@
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+import { useState, useEffect, useCallback, useMemo } from 'react';
+import { grupos as api } from '../../api';
+import { Input } from '../../components/ui/input';
+import { BirthDatePicker } from '../../components/ui/birth-date-picker';
+import { Select as ShadSelect, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../../components/ui/select';
+import { toast } from 'sonner';
+import { Search, Users, GraduationCap, Star, Crown, Eye, UserMinus, ChevronRight } from 'lucide-react';
+import Paginacao, { usePaginacaoLocal } from '../../components/Paginacao';
+import MarcadoresJornada from '../../components/MarcadoresJornada';
+import VinculosDuplicadosBloco from '../../components/grupos/VinculosDuplicadosBloco';
+import CompletarSexoBloco from '../../components/grupos/CompletarSexoBloco';
+
+const C = {
+  bg: 'var(--cbrio-bg)', card: 'var(--cbrio-card)', primary: '#00B39D', primaryBg: '#00B39D18',
+  text: 'var(--cbrio-text)', t2: 'var(--cbrio-text2)', t3: 'var(--cbrio-text3)',
+  border: 'var(--cbrio-border)',
+  green: '#10b981', red: '#ef4444', amber: '#f59e0b', blue: '#3b82f6', violet: '#8b5cf6',
+};
+
+
+const PAPEIS = {
+  coordenador: { label: 'Coordenador', plural: 'Coordenadores', cor: '#8b5cf6', Icon: Crown },
+  supervisor: { label: 'Supervisor', plural: 'Supervisores', cor: '#3b82f6', Icon: Eye },
+  lider: { label: 'Líder', plural: 'Líderes', cor: '#00B39D', Icon: Star },
+
+  co_lider: { label: 'Líder em treinamento', plural: 'Líderes em treinamento', cor: '#f59e0b', Icon: GraduationCap },
+  lider_treinamento: { label: 'Líder em treinamento', plural: 'Líderes em treinamento', cor: '#f59e0b', Icon: GraduationCap },
+  frequentador: { label: 'Membro', plural: 'Membros', cor: '#10b981', Icon: Users },
+  visitante: { label: 'Visitante', plural: 'Visitantes', cor: '#94a3b8', Icon: Users },
+};
+
+
+
+
+
+
+const STATUS = {
+  frequenta: { label: 'Em dia', cor: '#10b981' },
+  atencao: { label: 'Atenção', cor: '#f59e0b' },
+  ausente: { label: 'Ausente', cor: '#ef4444' },
+  sem_presenca: { label: 'Sem chamada ainda', cor: '#94a3b8' },
+};
+
+const fmtData = (d) => { if (!d) return null; try { return new Date(d + 'T12:00:00').toLocaleDateString('pt-BR'); } catch { return d; } };
+
+function statusDe(p) {
+  if (!p.ultima_frequencia) return 'sem_presenca';
+  let dias;
+  try { dias = Math.floor((Date.now() - new Date(p.ultima_frequencia + 'T12:00:00').getTime()) / 86400000); }
+  catch { return 'sem_presenca'; }
+  if (dias <= 30) return 'frequenta';
+  if (dias <= 90) return 'atencao';
+  return 'ausente';
+}
+
+
+function FichaItem({ rotulo, valor }) {
+  return (
+    <div>
+      <div style={{ fontSize: 10.5, color: C.t3, fontWeight: 700 }}>{rotulo}</div>
+      <div style={{ color: valor ? C.t2 : C.t3 }}>{valor || '—'}</div>
+    </div>
+  );
+}
+
+
+function FichaCampo({ rotulo, valor, onChange, type = 'text', inputMode }) {
+  return (
+    <div>
+      <div style={{ fontSize: 10.5, color: C.t3, fontWeight: 700, marginBottom: 4 }}>{rotulo}</div>
+      <input
+        type={type}
+        inputMode={inputMode}
+        value={valor}
+        onChange={e => onChange(e.target.value)}
+        style={{ width: '100%', boxSizing: 'border-box', padding: '7px 10px', borderRadius: 8, border: `1px solid ${C.border}`, background: 'var(--cbrio-input-bg)', color: C.text, fontSize: 12.5 }}
+      />
+    </div>
+  );
+}
+
+
+
+
+
+
+
+
+
+function gruposDe(p) {
+  const map = new Map();
+  (p.grupos || []).forEach(g => {
+    if (g.grupo_id && !map.has(g.grupo_id)) map.set(g.grupo_id, { id: g.grupo_id, nome: g.grupo_nome || 'Grupo' });
+  });
+  [...(p.lidera || []), ...(p.supervisiona || [])].forEach(g => {
+    if (g.id && !map.has(g.id)) map.set(g.id, { id: g.id, nome: g.nome || 'Grupo' });
+  });
+  return [...map.values()].sort((a, b) => (a.nome || '').localeCompare(b.nome || ''));
+}
+
+
+
+function gruposDetalhados(p) {
+  const map = new Map();
+  (p.grupos || []).forEach(g => map.set(g.grupo_id, {
+    id: g.grupo_id, nome: g.grupo_nome || 'Grupo', funcao: g.funcao || 'frequentador',
+    presencas: g.presencas || 0, entrou_em: g.entrou_em || null, supervisiona: false,
+    participacao_id: g.participacao_id || null,
+  }));
+  (p.lidera || []).forEach(g => {
+    const e = map.get(g.id);
+    if (e) e.funcao = 'lider';
+    else map.set(g.id, { id: g.id, nome: g.nome || 'Grupo', funcao: 'lider', presencas: 0, entrou_em: null, supervisiona: false });
+  });
+  (p.supervisiona || []).forEach(g => {
+    const e = map.get(g.id);
+    if (e) e.supervisiona = true;
+    else map.set(g.id, { id: g.id, nome: g.nome || 'Grupo', funcao: 'supervisor', presencas: 0, entrou_em: null, supervisiona: true });
+  });
+  return [...map.values()].sort((a, b) => (a.nome || '').localeCompare(b.nome || ''));
+}
+
+
+
+
+export default function GruposPessoas({ onOpenGrupo, gruposOptions = [], onVerDuplicatas, podeEditarDados = false, podeEditar = false, podeRemoverVinculo = false }) {
+  const [dados, setDados] = useState(null);
+  const [loading, setLoading] = useState(true);
+
+
+  const [dupIds, setDupIds] = useState(() => new Set());
+  const [dupPares, setDupPares] = useState(0);
+  useEffect(() => {
+    api.duplicatas.list()
+      .then(r => {
+        const s = new Set();
+        (r?.clusters || []).forEach(c => c.pessoas.forEach(p => s.add(p.id)));
+        setDupIds(s);
+        setDupPares((r?.clusters || []).length);
+      })
+      .catch(() => {});
+  }, []);
+  const [selected, setSelected] = useState(null);
+  const [filtro, setFiltro] = useState('todos');
+  const [filtroGrupo, setFiltroGrupo] = useState('todos');
+  const [filtroStatus, setFiltroStatus] = useState('todos');
+
+
+  const [soIncompletos, setSoIncompletos] = useState(false);
+  const [busca, setBusca] = useState('');
+
+  const [importOpen, setImportOpen] = useState(false);
+  const [importFile, setImportFile] = useState(null);
+  const [importBusy, setImportBusy] = useState(false);
+  const [importPreview, setImportPreview] = useState(null);
+  const [importResult, setImportResult] = useState(null);
+  const [importReconciliar, setImportReconciliar] = useState(false);
+
+  async function importAnalisar() {
+    if (!importFile) return;
+    setImportBusy(true); setImportResult(null);
+    try {
+      const r = await api.importarParticipantes(importFile, { dryRun: true, reconciliar: importReconciliar });
+      setImportPreview(r);
+    } catch (e) {
+      toast.error(e?.message || 'Erro ao analisar a planilha');
+    } finally { setImportBusy(false); }
+  }
+  async function importAplicar() {
+    if (!importFile) return;
+    const extra = importReconciliar ? ` Vai DESATIVAR ${importPreview?.desativar_vinculos ?? '?'} vínculos e ${importPreview?.desativar_grupos ?? '?'} grupos fora do consolidado.` : '';
+    if (!window.confirm(`Confirma aplicar? Vai criar ${importPreview?.criar ?? '?'} pessoas, atualizar ${importPreview?.atualizar ?? '?'}, criar ${importPreview?.grupos_criar ?? '?'} grupos e ${importPreview?.vinculos_criar ?? '?'} vínculos.${extra}`)) return;
+    setImportBusy(true);
+    try {
+      const r = await api.importarParticipantes(importFile, { dryRun: false, reconciliar: importReconciliar });
+      setImportResult(r);
+      toast.success(`Importado · ${r.criar} criadas, ${r.vinculos_criar} vínculos${importReconciliar ? `, ${r.desativar_vinculos} desativados` : ''}`);
+      carregar();
+    } catch (e) {
+      toast.error(e?.message || 'Erro ao importar');
+    } finally { setImportBusy(false); }
+  }
+
+  const carregar = useCallback(async () => {
+    try {
+      const r = await api.pessoasPapeis();
+      setDados(r);
+    } catch {
+      toast.error('Erro ao carregar pessoas');
+    } finally { setLoading(false); }
+  }, []);
+
+  useEffect(() => { carregar(); }, [carregar]);
+
+
+
+  const [ficha, setFicha] = useState(null);
+  const [fichaEditando, setFichaEditando] = useState(false);
+  const [fichaForm, setFichaForm] = useState({});
+  const [fichaSalvando, setFichaSalvando] = useState(false);
+
+
+  const [fichaConflito, setFichaConflito] = useState(null);
+  useEffect(() => {
+    setFicha(null); setFichaEditando(false); setFichaConflito(null);
+    if (!selected?.membro_id) return;
+    let vivo = true;
+    api.pessoaFicha(selected.membro_id)
+      .then(f => { if (vivo) setFicha(f); })
+      .catch(() => {});
+    return () => { vivo = false; };
+  }, [selected?.membro_id]);
+
+
+
+  const [freqPessoa, setFreqPessoa] = useState(null);
+  useEffect(() => {
+    setFreqPessoa(null);
+    if (!selected?.membro_id) return;
+    let vivo = true;
+    api.frequenciaPessoa(selected.membro_id)
+      .then(r => {
+        if (!vivo) return;
+        const map = {};
+        (r?.grupos || []).forEach(g => { map[g.grupo_id] = g; });
+        setFreqPessoa({ map, tem_encontro: !!r?.tem_encontro });
+      })
+      .catch(() => { if (vivo) setFreqPessoa({ map: {}, tem_encontro: false }); });
+    return () => { vivo = false; };
+  }, [selected?.membro_id]);
+
+
+
+  const [pedindoDados, setPedindoDados] = useState(false);
+  const pedirDados = async () => {
+    if (!selected?.membro_id) return;
+    setPedindoDados(true);
+    try {
+      const r = await api.pedirDadosPessoa(selected.membro_id);
+      toast.success(`Pedido enviado por ${(r.canais || []).join(' e ')} — ela completa o cadastro pelo link.`);
+    } catch (e) {
+
+
+      const MOTIVOS = {
+        sem_canal: 'Essa pessoa não tem telefone nem e-mail utilizável no cadastro — preencha um contato primeiro.',
+        ja_convidado: 'Ela já foi convidada nesta rodada — aguarde a resposta antes de insistir.',
+        template_nao_configurado: 'O canal de WhatsApp não está configurado e ela não tem e-mail.',
+        canal_nao_configurado: 'Nenhum canal de envio está configurado no servidor.',
+        pessoa_nao_encontrada: 'Cadastro não encontrado.',
+      };
+      const m = e?.motivo || e?.body?.motivo;
+      toast.error(MOTIVOS[m] || e?.detalhe || e?.message || 'Não foi possível enviar o pedido.');
+    } finally { setPedindoDados(false); }
+  };
+
+  const abrirEdicaoFicha = () => {
+    setFichaForm({
+      nome: ficha?.nome || '',
+      telefone: ficha?.telefone || '',
+      email: ficha?.email || '',
+      cpf: ficha?.cpf || '',
+      data_nascimento: ficha?.data_nascimento || '',
+      genero: ficha?.genero || '',
+      observacoes: ficha?.observacoes || '',
+    });
+    setFichaEditando(true);
+  };
+
+  const salvarFicha = async () => {
+    setFichaSalvando(true);
+    try {
+      const r = await api.pessoaFichaSalvar(selected.membro_id, fichaForm);
+      setFicha(r);
+      setFichaEditando(false);
+      toast.success('Ficha atualizada');
+      if (r.nome !== selected.nome) setSelected(s => ({ ...s, nome: r.nome }));
+
+
+
+
+      carregar();
+    } catch (e) {
+      if (e.codigo === 'cpf_em_uso' && e.outro?.id) setFichaConflito({ outroId: e.outro.id, outroNome: e.outro.nome });
+      else toast.error(e.message || 'Erro ao salvar a ficha');
+    } finally { setFichaSalvando(false); }
+  };
+
+
+
+
+  const fundirConflito = async (keepId) => {
+    const mergeId = keepId === selected.membro_id ? fichaConflito.outroId : selected.membro_id;
+    setFichaSalvando(true);
+    try {
+      await api.duplicatas.fundir(keepId, [mergeId]);
+      toast.success('Cadastros fundidos em um só — nada se perdeu');
+      setFichaConflito(null); setFichaEditando(false);
+      if (keepId === selected.membro_id) {
+        const f = await api.pessoaFicha(selected.membro_id).catch(() => null);
+        if (f) setFicha(f);
+      } else {
+        setSelected(null);
+      }
+      carregar();
+    } catch (e) { toast.error(e.message || 'Erro ao fundir'); }
+    finally { setFichaSalvando(false); }
+  };
+
+
+
+
+
+
+  const [saindo, setSaindo] = useState({});
+  const sairDoGrupo = async (g) => {
+    if (!g.participacao_id || !selected) return;
+    if (!window.confirm(`Retirar ${selected.nome} do grupo "${g.nome}"? A pessoa é retirada do grupo (reversível). Faça só se confirmou que ela realmente não participa mais.`)) return;
+    setSaindo(s => ({ ...s, [g.participacao_id]: true }));
+    try {
+      await api.sairMembro(g.participacao_id, { motivo: 'Sem frequência — revisão na aba Pessoas' });
+      toast.success(`${selected.nome} não está mais em "${g.nome}"`);
+      setSelected(s => s ? { ...s, grupos: (s.grupos || []).filter(x => x.participacao_id !== g.participacao_id) } : s);
+      carregar();
+    } catch (e) {
+      toast.error(e?.message || 'Erro ao remover do grupo');
+    } finally {
+      setSaindo(s => { const n = { ...s }; delete n[g.participacao_id]; return n; });
+    }
+  };
+
+  const pessoas = dados?.pessoas || [];
+
+  const contagens = useMemo(() => {
+    const c = {};
+    Object.keys(PAPEIS).forEach(k => { c[k] = 0; });
+
+
+    let freq = 0, visit = 0;
+    for (const p of pessoas) {
+      c[p.papel] = (c[p.papel] || 0) + 1;
+      if (p.ultima_frequencia) freq++; else visit++;
+    }
+
+
+
+    c.lideres_total = (c.lider || 0) + (c.lider_treinamento || 0) + (c.co_lider || 0);
+    c.frequentadores = freq;
+    c.visitantes = visit;
+    c.com_presenca = freq > 0;
+    return c;
+  }, [pessoas]);
+  const inscritos = dados?.inscritos ?? null;
+
+  const filtradas = useMemo(() => {
+    let lista = pessoas;
+    if (busca) {
+      const s = busca.toLowerCase();
+      lista = lista.filter(p =>
+        p.nome?.toLowerCase().includes(s) ||
+        gruposDe(p).some(g => g.nome?.toLowerCase().includes(s)));
+    }
+    if (filtro === 'lideres') lista = lista.filter(p => ['lider', 'lider_treinamento', 'co_lider'].includes(p.papel));
+    else if (filtro === 'frequentadores') lista = lista.filter(p => !!p.ultima_frequencia);
+    else if (filtro === 'visitantes') lista = lista.filter(p => !p.ultima_frequencia);
+    else if (filtro !== 'todos') lista = lista.filter(p => p.papel === filtro);
+    if (filtroGrupo !== 'todos') lista = lista.filter(p => gruposDe(p).some(g => g.id === filtroGrupo));
+    if (filtroStatus !== 'todos') lista = lista.filter(p => statusDe(p) === filtroStatus);
+
+
+
+    if (soIncompletos) lista = lista.filter(p => p.cadastro_completo === false);
+    return lista;
+  }, [pessoas, busca, filtro, filtroGrupo, filtroStatus, soIncompletos]);
+
+  const totalIncompletos = useMemo(
+    () => pessoas.filter(p => p.cadastro_completo === false).length,
+    [pessoas],
+  );
+
+  const { pageItems: filtradasPag, paginacaoProps: gruposPessoasPagProps } = usePaginacaoLocal(filtradas, 25);
+
+  if (loading) return <div style={{ padding: 40, textAlign: 'center', color: C.t3 }}>Carregando pessoas...</div>;
+
+
+
+
+  const CARDS = [
+    { key: 'todos', label: 'Pessoas', value: pessoas.length, cor: C.text },
+    ...(contagens.com_presenca ? [
+      { key: 'frequentadores', label: 'Frequentadores', value: contagens.frequentadores, cor: '#10b981' },
+      { key: 'visitantes', label: 'Visitantes', value: contagens.visitantes, cor: '#94a3b8' },
+    ] : []),
+    { key: 'lideres', label: 'Líderes', value: contagens.lideres_total || 0, cor: PAPEIS.lider.cor },
+    { key: 'supervisor', label: 'Supervisores', value: contagens.supervisor || 0, cor: PAPEIS.supervisor.cor },
+    ...(contagens.coordenador ? [{ key: 'coordenador', label: 'Coordenadores', value: contagens.coordenador, cor: PAPEIS.coordenador.cor }] : []),
+    ...(contagens.lider_treinamento ? [{ key: 'lider_treinamento', label: 'Líderes em treinamento', value: contagens.lider_treinamento, cor: PAPEIS.lider_treinamento.cor }] : []),
+  ];
+
+  const opcoesGrupo = [...gruposOptions].sort((a, b) => (a.nome || '').localeCompare(b.nome || ''));
+  const temFiltro = filtro !== 'todos' || filtroGrupo !== 'todos' || filtroStatus !== 'todos' || soIncompletos || !!busca;
+
+  return (
+    <div>
+      <div style={{ marginBottom: 14, display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12, flexWrap: 'wrap' }}>
+        <div>
+          <h3 style={{ fontSize: 15, fontWeight: 700, color: C.text, margin: 0 }}>Pessoas dos grupos</h3>
+          <p style={{ fontSize: 12, color: C.t3, margin: '4px 0 0', maxWidth: 660, lineHeight: 1.5 }}>
+            <strong style={{ color: C.text }}>{pessoas.length} pessoas</strong>
+            {inscritos != null && <> · <strong style={{ color: C.text }}>{inscritos} inscrições</strong> (uma pessoa pode estar em vários grupos)</>}.
+            Cada pessoa aparece <strong>uma vez</strong>, no papel de maior nível.
+            {!contagens.com_presenca && <> <strong style={{ color: '#f59e0b' }}>Frequência ainda não registrada</strong> — todos são inscritos aguardando a 1ª chamada; quando a frequência entrar, aparecem os cards Frequentadores e Visitantes.</>}
+          </p>
+          {                                                                   }
+          <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', marginTop: 8 }}>
+            {[
+              [STATUS.frequenta.cor, 'Em dia', 'presença no último mês'],
+              [STATUS.atencao.cor, 'Atenção', '1–3 meses sem presença'],
+              [STATUS.ausente.cor, 'Ausente', '3+ meses sem presença'],
+              [STATUS.sem_presenca.cor, 'Sem chamada ainda', 'nunca teve presença lançada'],
+            ].map(([cor, label, hint]) => (
+              <span key={label} style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 11, color: C.t3 }} title={hint}>
+                <span style={{ width: 9, height: 9, borderRadius: '50%', background: cor, flexShrink: 0 }} />
+                {label}
+              </span>
+            ))}
+          </div>
+        </div>
+        <button onClick={() => { setImportOpen(true); setImportPreview(null); setImportResult(null); setImportFile(null); }}
+          style={{ background: C.primary, color: '#fff', border: 'none', borderRadius: 10, padding: '8px 14px', fontSize: 12, fontWeight: 600, cursor: 'pointer', whiteSpace: 'nowrap' }}>
+          Importar participantes
+        </button>
+      </div>
+
+      {                                                                       }
+      {importOpen && (
+        <div onClick={() => !importBusy && setImportOpen(false)} style={{ position: 'fixed', inset: 0, background: 'var(--cbrio-overlay)', zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16 }}>
+          <div onClick={e => e.stopPropagation()} style={{ background: 'var(--cbrio-modal-bg)', borderRadius: 14, padding: 20, width: 560, maxWidth: '100%', maxHeight: '85vh', overflowY: 'auto', border: `1px solid ${C.border}` }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+              <h3 style={{ margin: 0, fontSize: 16, fontWeight: 700, color: C.text }}>Importar participantes (XLSX)</h3>
+              <button onClick={() => !importBusy && setImportOpen(false)} style={{ background: 'none', border: 'none', fontSize: 20, color: C.t3, cursor: 'pointer' }}>×</button>
+            </div>
+            <p style={{ fontSize: 12, color: C.t3, marginTop: 0 }}>
+              Cria quem não existe, ignora quem já existe e completa CPF/telefone faltantes. Não duplica pessoas nem vínculos.
+              <strong> Rode "Analisar" primeiro</strong> pra ver a prévia antes de aplicar.
+            </p>
+            <input type="file" accept=".xlsx,.xls" onChange={e => { setImportFile(e.target.files?.[0] || null); setImportPreview(null); setImportResult(null); }} style={{ fontSize: 13, marginBottom: 10, display: 'block' }} />
+
+            <label style={{ display: 'flex', gap: 8, alignItems: 'flex-start', fontSize: 12, color: C.text, marginBottom: 12, cursor: 'pointer' }}>
+              <input type="checkbox" checked={importReconciliar} onChange={e => { setImportReconciliar(e.target.checked); setImportPreview(null); setImportResult(null); }} style={{ marginTop: 2 }} />
+              <span><strong>Reconciliar (substituir pela temporada)</strong> — desativa os vínculos e grupos que <u>não estão</u> no consolidado, pra a contagem/mandala bater exatamente o arquivo. Reversível. Deixe a prévia mostrar quantos antes de aplicar.</span>
+            </label>
+
+            {(importPreview || importResult) && (
+              <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 10, padding: 12, fontSize: 13, color: C.text, marginBottom: 12 }}>
+                <div style={{ fontWeight: 700, marginBottom: 6 }}>{importResult ? '✅ Resultado' : 'Prévia (nada gravado ainda)'}</div>
+                {(() => { const r = importResult || importPreview; return (
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 4 }}>
+                    <span>Pessoas na planilha: <strong>{r.pessoas_planilha}</strong></span>
+                    <span>Criar pessoas: <strong>{r.criar}</strong></span>
+                    <span>Atualizar (CPF/tel): <strong>{r.atualizar}</strong></span>
+                    <span>Ignorar (já existem): <strong>{r.ignorar}</strong></span>
+                    <span>Ambíguos (revisar): <strong style={{ color: r.ambiguos ? C.amber : C.text }}>{r.ambiguos}</strong></span>
+                    <span>Grupos: <strong>{r.grupos_existentes}</strong> existem / <strong>{r.grupos_criar}</strong> criar</span>
+                    <span>Vínculos criar: <strong>{r.vinculos_criar}</strong></span>
+                    <span>Vínculos já existem: <strong>{r.vinculos_existentes}</strong></span>
+                    {r.desativar_vinculos != null && <span style={{ color: C.red }}>Desativar vínculos: <strong>{r.desativar_vinculos}</strong></span>}
+                    {r.desativar_grupos != null && <span style={{ color: C.red }}>Desativar grupos: <strong>{r.desativar_grupos}</strong></span>}
+                  </div>
+                ); })()}
+                {!importResult && importPreview?.ambiguos > 0 && (
+                  <div style={{ marginTop: 8, fontSize: 11, color: C.t3 }}>
+                    Ambíguos (mesmo nome de +1 pessoa no sistema · não serão criados/fundidos): {(importPreview.exemplos?.ambiguos || []).slice(0, 8).join(' · ')}…
+                  </div>
+                )}
+              </div>
+            )}
+
+            <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+              <button onClick={importAnalisar} disabled={!importFile || importBusy} style={{ background: C.card, color: C.text, border: `1px solid ${C.border}`, borderRadius: 10, padding: '8px 14px', fontSize: 12, fontWeight: 600, cursor: importFile && !importBusy ? 'pointer' : 'not-allowed', opacity: !importFile || importBusy ? 0.6 : 1 }}>
+                {importBusy && !importResult ? 'Analisando…' : 'Analisar (prévia)'}
+              </button>
+              <button onClick={importAplicar} disabled={!importPreview || importBusy || importResult} style={{ background: C.primary, color: '#fff', border: 'none', borderRadius: 10, padding: '8px 14px', fontSize: 12, fontWeight: 600, cursor: importPreview && !importBusy && !importResult ? 'pointer' : 'not-allowed', opacity: !importPreview || importBusy || importResult ? 0.6 : 1 }}>
+                {importBusy && importPreview ? 'Aplicando…' : 'Aplicar import'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {                                                              }
+      {dupIds.size > 0 && (
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap',
+          padding: '9px 14px', marginBottom: 12, borderRadius: 10,
+          background: `${C.amber}14`, border: `1px solid ${C.amber}55`, fontSize: 12.5, color: C.text,
+        }}>
+          <span>
+            <strong>{dupIds.size}</strong> pessoa{dupIds.size === 1 ? '' : 's'}
+            {dupPares > 0 && <> em <strong>{dupPares}</strong> possíve{dupPares === 1 ? 'l duplicata' : 'is duplicatas'}</>}
+            {' '}com cadastro duplicado — as linhas marcadas abaixo precisam de revisão.
+            {dupPares > 0 && <span style={{ color: C.t3 }}> (a aba Duplicatas mostra os {dupPares} casos; aqui contamos as {dupIds.size} pessoas envolvidas).</span>}
+          </span>
+          {onVerDuplicatas && (
+            <button onClick={onVerDuplicatas} style={{ background: 'none', border: 'none', color: C.primary, cursor: 'pointer', fontSize: 12.5, fontWeight: 700, padding: 0 }}>
+              Resolver duplicatas →
+            </button>
+          )}
+        </div>
+      )}
+
+      {                             }
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(135px, 1fr))', gap: 10, marginBottom: 12 }}>
+        {CARDS.map(k => {
+          const ativo = filtro === k.key;
+          return (
+            <button key={k.key} onClick={() => setFiltro(k.key)} style={{
+              background: ativo ? `${k.cor}12` : C.card, borderRadius: 12, padding: 12, textAlign: 'left', cursor: 'pointer',
+              border: ativo ? `2px solid ${k.cor}` : `1px solid ${C.border}`, transition: 'border-color 0.12s',
+            }}>
+              <div style={{ fontSize: 20, fontWeight: 700, color: k.cor }}>{k.value}</div>
+              <div style={{ fontSize: 11, color: ativo ? k.cor : C.t3, fontWeight: ativo ? 600 : 400 }}>{k.label}</div>
+            </button>
+          );
+        })}
+      </div>
+
+      {                                       }
+      <div style={{ display: 'flex', gap: 8, marginBottom: 12, flexWrap: 'wrap' }}>
+        <div style={{ position: 'relative', flex: '1 1 220px', minWidth: 200 }}>
+          <Search size={15} style={{ position: 'absolute', left: 12, top: '50%', transform: 'translateY(-50%)', color: C.t3 }} />
+          <Input placeholder="Buscar por nome ou grupo..." value={busca} onChange={e => setBusca(e.target.value)} style={{ paddingLeft: 34 }} />
+        </div>
+        <ShadSelect value={filtroGrupo} onValueChange={setFiltroGrupo}>
+          <SelectTrigger style={{ width: 200 }}><SelectValue placeholder="Grupo" /></SelectTrigger>
+          <SelectContent>
+            <SelectItem value="todos">Todos os grupos</SelectItem>
+            {opcoesGrupo.map(g => <SelectItem key={g.id} value={g.id}>{g.nome}</SelectItem>)}
+          </SelectContent>
+        </ShadSelect>
+        <ShadSelect value={filtroStatus} onValueChange={setFiltroStatus}>
+          <SelectTrigger style={{ width: 170 }}><SelectValue placeholder="Status" /></SelectTrigger>
+          <SelectContent>
+            <SelectItem value="todos">Todos os status</SelectItem>
+            {Object.entries(STATUS).map(([k, s]) => <SelectItem key={k} value={k}>{s.label}</SelectItem>)}
+          </SelectContent>
+        </ShadSelect>
+        {
+                                                        }
+        {totalIncompletos > 0 && (
+          <button
+            type="button"
+            onClick={() => setSoIncompletos(v => !v)}
+            title="Pessoas sem os dados que a inscrição pede (nome completo, CPF, telefone, e-mail, nascimento, sexo)"
+            style={{
+              background: soIncompletos ? '#64748b' : C.card,
+              color: soIncompletos ? '#fff' : C.text,
+              border: `1px solid ${soIncompletos ? '#64748b' : C.border}`,
+              borderRadius: 10, padding: '0 14px', height: 36,
+              fontSize: 12, fontWeight: 600, cursor: 'pointer', whiteSpace: 'nowrap',
+            }}>
+            Faltam dados · {totalIncompletos}
+          </button>
+        )}
+      </div>
+
+      {
+
+
+                                                                             }
+      <VinculosDuplicadosBloco podeResolver={podeRemoverVinculo} onResolvido={carregar} />
+
+      {
+
+                                                                   }
+      {totalIncompletos > 0 && <CompletarSexoBloco onAplicado={carregar} />}
+
+      {           }
+      <div style={{ background: C.card, borderRadius: 12, border: `1px solid ${C.border}`, overflow: 'hidden' }}>
+        <div style={{ padding: '8px 16px', borderBottom: `1px solid ${C.border}`, fontSize: 11, color: C.t3, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <span>{filtradas.length} pessoa{filtradas.length !== 1 ? 's' : ''}</span>
+          {temFiltro && (
+            <button onClick={() => { setFiltro('todos'); setFiltroGrupo('todos'); setFiltroStatus('todos'); setSoIncompletos(false); setBusca(''); }}
+              style={{ background: 'none', border: 'none', color: C.primary, cursor: 'pointer', fontSize: 11, fontWeight: 600 }}>
+              Limpar filtros
+            </button>
+          )}
+        </div>
+        {filtradas.length === 0 ? (
+          <div style={{ padding: 40, textAlign: 'center', color: C.t3, fontSize: 13 }}>Ninguém nesse filtro.</div>
+        ) : (
+          <div style={{ overflowX: 'auto' }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: 720 }}>
+              <thead>
+                <tr style={{ borderBottom: `1px solid ${C.border}`, background: C.bg }}>
+                  {['Pessoa', 'Função', 'Status', 'Jornada', 'Grupo', 'Última frequência', 'Último envio', 'Presenças'].map((h, i, arr) => (
+                    <th key={h} style={{ textAlign: i === arr.length - 1 ? 'right' : 'left', padding: '8px 16px', fontSize: 10, fontWeight: 700, color: C.t3, textTransform: 'uppercase', letterSpacing: 0.4, whiteSpace: 'nowrap' }}>{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {filtradasPag.map(p => {
+                  const pap = PAPEIS[p.papel] || PAPEIS.frequentador;
+                  const st = STATUS[statusDe(p)];
+                  const gs = gruposDe(p);
+                  return (
+                    <tr key={p.membro_id} style={{ borderBottom: `1px solid ${C.border}` }}>
+                      <td style={{ padding: '10px 16px' }}>
+                        <button
+                          type="button"
+                          onClick={() => setSelected(p)}
+                          title="Ver grupos da pessoa"
+                          style={{ display: 'flex', alignItems: 'center', gap: 10, background: 'none', border: 'none', padding: 0, cursor: 'pointer', textAlign: 'left' }}
+                        >
+                          <div style={{ width: 32, height: 32, borderRadius: '50%', background: p.foto_url ? `url(${p.foto_url}) center/cover` : `${pap.cor}18`, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, fontSize: 12, fontWeight: 700, color: pap.cor }}>
+                            {!p.foto_url && (p.nome?.charAt(0) || '?')}
+                          </div>
+                          <span style={{ fontSize: 13, fontWeight: 600, color: C.text, whiteSpace: 'nowrap' }}>{p.nome}</span>
+                          {dupIds.has(p.membro_id) && (
+                            <span style={{ fontSize: 9.5, padding: '2px 8px', borderRadius: 99, background: `${C.amber}20`, color: C.amber, fontWeight: 700, whiteSpace: 'nowrap' }}>
+                              Possível duplicata
+                            </span>
+                          )}
+                          {
+
+
+
+
+                                                                   }
+                          {p.cadastro_completo === false && (
+                            <span
+                              title={`Falta: ${(p.cadastro_rotulos || []).join(' · ')}`}
+                              style={{ fontSize: 9.5, padding: '2px 8px', borderRadius: 99, background: '#64748b20', color: '#64748b', fontWeight: 700, whiteSpace: 'nowrap' }}>
+                              Faltam dados
+                            </span>
+                          )}
+                        </button>
+                      </td>
+                      <td style={{ padding: '10px 16px' }}>
+                        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 10, padding: '2px 9px', borderRadius: 99, background: `${pap.cor}18`, color: pap.cor, fontWeight: 700, whiteSpace: 'nowrap' }}>
+                          <pap.Icon size={10} /> {pap.label}
+                        </span>
+                      </td>
+                      <td style={{ padding: '10px 16px' }}>
+                        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 10, padding: '2px 9px', borderRadius: 99, background: `${st.cor}18`, color: st.cor, fontWeight: 700, whiteSpace: 'nowrap' }}>
+                          <span style={{ width: 6, height: 6, borderRadius: '50%', background: st.cor }} /> {st.label}
+                        </span>
+                      </td>
+                      {
+
+
+                                                                 }
+                      <td style={{ padding: '10px 16px', maxWidth: 210 }}>
+                        <MarcadoresJornada marcadores={p.marcadores} />
+                      </td>
+                      {
+
+
+
+
+
+
+                                                          }
+                      <td style={{ padding: '10px 16px', fontSize: 12, color: C.t2, maxWidth: 260 }}>
+                        {gs.length === 0 ? (
+                          <span style={{ color: C.t3 }}>Sem grupo</span>
+                        ) : gs.length === 1 ? (
+                          <button onClick={() => onOpenGrupo?.(gs[0].id)} title={gs[0].nome}
+                            style={{ background: 'none', border: 'none', padding: 0, color: C.t2, cursor: 'pointer', fontSize: 12, fontWeight: 600, textAlign: 'left' }}>
+                            {gs[0].nome}
+                          </button>
+                        ) : (
+
+
+
+
+
+
+
+                          <button onClick={() => setSelected(p)}
+                            title={gs.map(g => g.nome).join(' · ')}
+                            style={{ display: 'inline-flex', alignItems: 'center', gap: 3, background: `${C.primary}14`, border: `1px solid ${C.primary}33`, borderRadius: 99, padding: '2px 9px', color: C.primary, cursor: 'pointer', fontSize: 11, fontWeight: 700, whiteSpace: 'nowrap' }}>
+                            {gs.length} grupos <ChevronRight size={12} />
+                          </button>
+                        )}
+                      </td>
+                      <td style={{ padding: '10px 16px', fontSize: 12, color: p.ultima_frequencia ? C.t2 : C.t3, whiteSpace: 'nowrap' }}>
+                        {p.ultima_frequencia ? fmtData(p.ultima_frequencia) : '—'}
+                      </td>
+                      <td style={{ padding: '10px 16px', fontSize: 12, color: p.ultimo_envio ? C.t2 : C.t3, whiteSpace: 'nowrap' }}
+                          title={p.ultimo_envio ? `Último: ${p.ultimo_envio.template || 'mensagem'}` : 'Nenhum envio de grupos registrado'}>
+                        {p.ultimo_envio?.em ? fmtData(String(p.ultimo_envio.em).slice(0, 10)) : '—'}
+                      </td>
+                      <td style={{ padding: '10px 16px', fontSize: 12, color: C.t2, textAlign: 'right' }}>
+                        {p.presencas_total || 0}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+        <Paginacao {...gruposPessoasPagProps} itemLabel="pessoas" />
+      </div>
+
+      {                              }
+      {selected && (() => {
+        const pap = PAPEIS[selected.papel] || PAPEIS.frequentador;
+        const gs = gruposDetalhados(selected);
+        return (
+          <div onClick={() => setSelected(null)} style={{ position: 'fixed', inset: 0, background: 'var(--cbrio-overlay)', zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16 }}>
+            <div onClick={e => e.stopPropagation()} style={{ background: 'var(--cbrio-modal-bg)', borderRadius: 14, width: 520, maxWidth: '100%', maxHeight: '85vh', overflowY: 'auto', border: `1px solid ${C.border}` }}>
+              {               }
+              <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: 20, borderBottom: `1px solid ${C.border}` }}>
+                <div style={{ width: 44, height: 44, borderRadius: '50%', background: selected.foto_url ? `url(${selected.foto_url}) center/cover` : `${pap.cor}18`, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, fontSize: 16, fontWeight: 700, color: pap.cor }}>
+                  {!selected.foto_url && (selected.nome?.charAt(0) || '?')}
+                </div>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 16, fontWeight: 700, color: C.text }}>{selected.nome}</div>
+                  <div style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 11, color: pap.cor, fontWeight: 700 }}>
+                    <pap.Icon size={11} /> {pap.label}
+                  </div>
+                  {                                                                            }
+                  {(() => { const st = STATUS[statusDe(selected)]; return (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 7, marginTop: 5, flexWrap: 'wrap' }}>
+                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 10, padding: '2px 9px', borderRadius: 99, background: `${st.cor}18`, color: st.cor, fontWeight: 700, whiteSpace: 'nowrap' }}>
+                        <span style={{ width: 6, height: 6, borderRadius: '50%', background: st.cor }} /> {st.label}
+                      </span>
+                      <span style={{ fontSize: 11, color: C.t3 }}>
+                        {selected.ultima_frequencia ? `última presença ${fmtData(selected.ultima_frequencia)}` : 'sem presença registrada'}
+                      </span>
+                    </div>
+                  ); })()}
+                  {                                                       }
+                  <div style={{ marginTop: 7 }}>
+                    <MarcadoresJornada marcadores={selected.marcadores} variante="ficha" />
+                  </div>
+                </div>
+                <button onClick={() => setSelected(null)} style={{ background: 'none', border: 'none', fontSize: 22, lineHeight: 1, color: C.t3, cursor: 'pointer' }}>×</button>
+              </div>
+
+              {                                                                   }
+              {ficha && (
+                <div style={{ padding: '14px 20px', borderBottom: `1px solid ${C.border}` }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+                    <span style={{ fontSize: 11, color: C.t3, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.4 }}>Dados da pessoa</span>
+                    {podeEditarDados && !fichaEditando && (
+                      <button onClick={abrirEdicaoFicha} style={{ background: 'none', border: 'none', color: C.primary, cursor: 'pointer', fontSize: 12, fontWeight: 700, padding: 0 }}>
+                        Editar dados
+                      </button>
+                    )}
+                  </div>
+
+                  {fichaConflito ? (
+                    <div style={{ background: `${C.amber}12`, border: `1px solid ${C.amber}55`, borderRadius: 10, padding: 12 }}>
+                      <p style={{ fontSize: 12.5, color: C.text, margin: '0 0 10px', lineHeight: 1.6 }}>
+                        Este CPF já pertence ao cadastro de <strong>{fichaConflito.outroNome}</strong>.
+                        Mesmo CPF é a mesma pessoa — em vez de dois cadastros, funda os dois em um.
+                        Nada se perde: o histórico é movido e os dados diferentes são somados nas observações.
+                      </p>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                        <button onClick={() => fundirConflito(selected.membro_id)} disabled={fichaSalvando}
+                          style={{ background: C.primary, border: 'none', borderRadius: 8, padding: '9px 14px', fontSize: 12.5, fontWeight: 700, color: '#fff', cursor: fichaSalvando ? 'wait' : 'pointer', textAlign: 'left' }}>
+                          Manter «{selected.nome}» e fundir o outro cadastro neste
+                        </button>
+                        <button onClick={() => fundirConflito(fichaConflito.outroId)} disabled={fichaSalvando}
+                          style={{ background: 'transparent', border: `1px solid ${C.primary}`, borderRadius: 8, padding: '9px 14px', fontSize: 12.5, fontWeight: 700, color: C.primary, cursor: fichaSalvando ? 'wait' : 'pointer', textAlign: 'left' }}>
+                          Manter «{fichaConflito.outroNome}» e fundir este cadastro nele
+                        </button>
+                        <button onClick={() => setFichaConflito(null)} disabled={fichaSalvando}
+                          style={{ background: 'none', border: 'none', color: C.t3, cursor: 'pointer', fontSize: 12, padding: '2px 0', textAlign: 'left' }}>
+                          Cancelar — voltar pra edição
+                        </button>
+                      </div>
+                    </div>
+                  ) : !fichaEditando ? (
+                    <>
+                    {
+
+
+
+
+                                                                            }
+                    {selected?.cadastro_completo === false && (
+                      <div style={{ marginBottom: 12, padding: 10, borderRadius: 10, background: '#64748b12', border: `1px solid ${C.border}` }}>
+                        <div style={{ fontSize: 12, color: C.text, fontWeight: 600, marginBottom: 2 }}>
+                          Faltam dados: {(selected.cadastro_rotulos || []).join(' · ')}
+                        </div>
+                        <div style={{ fontSize: 11, color: C.t3, lineHeight: 1.5, marginBottom: 8 }}>
+                          Preencha na ficha se você já tem os dados. Se não tiver, peça — a pessoa
+                          recebe um link pessoal e completa o cadastro dela mesma.
+                        </div>
+                        <button onClick={pedirDados} disabled={pedindoDados}
+                          style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 8, padding: '7px 12px', fontSize: 12, fontWeight: 600, color: C.text, cursor: pedindoDados ? 'wait' : 'pointer' }}>
+                          {pedindoDados ? 'Enviando…' : 'Pedir os dados à pessoa'}
+                        </button>
+                      </div>
+                    )}
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '8px 16px', fontSize: 12.5 }}>
+                      <FichaItem rotulo="Telefone" valor={ficha.telefone} />
+                      <FichaItem rotulo="E-mail" valor={ficha.email} />
+                      <FichaItem rotulo="CPF" valor={ficha.cpf} />
+                      <FichaItem rotulo="Nascimento" valor={ficha.data_nascimento ? fmtData(ficha.data_nascimento) : null} />
+                      <FichaItem rotulo="Sexo" valor={ficha.genero} />
+                      {ficha.observacoes && (
+                        <div style={{ gridColumn: '1 / -1' }}>
+                          <div style={{ fontSize: 10.5, color: C.t3, fontWeight: 700 }}>Observações</div>
+                          <div style={{ color: C.t2, whiteSpace: 'pre-wrap', lineHeight: 1.5 }}>{ficha.observacoes}</div>
+                        </div>
+                      )}
+                    </div>
+                    </>
+                  ) : (
+                    <div>
+                      <p style={{ fontSize: 11.5, color: C.amber, margin: '0 0 10px', lineHeight: 1.5 }}>
+                        Deixar um campo em branco <strong>apaga o dado</strong> da ficha ao salvar. Toda alteração fica registrada na auditoria.
+                      </p>
+                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 10 }}>
+                        <FichaCampo rotulo="Nome completo" valor={fichaForm.nome} onChange={v => setFichaForm(f => ({ ...f, nome: v }))} />
+                        <FichaCampo rotulo="Telefone" valor={fichaForm.telefone} onChange={v => setFichaForm(f => ({ ...f, telefone: v }))} inputMode="tel" />
+                        <FichaCampo rotulo="E-mail" valor={fichaForm.email} onChange={v => setFichaForm(f => ({ ...f, email: v }))} type="email" />
+                        <FichaCampo rotulo="CPF" valor={fichaForm.cpf} onChange={v => setFichaForm(f => ({ ...f, cpf: v }))} inputMode="numeric" />
+                        <div>
+                          <div style={{ fontSize: 10.5, color: C.t3, fontWeight: 700, marginBottom: 4 }}>Nascimento</div>
+                          <BirthDatePicker value={fichaForm.data_nascimento || ''} onChange={v => setFichaForm(f => ({ ...f, data_nascimento: v }))} />
+                        </div>
+                        {
+
+
+
+                                                                              }
+                        <div>
+                          <div style={{ fontSize: 10.5, color: C.t3, fontWeight: 700, marginBottom: 4 }}>Sexo</div>
+                          <select
+                            value={String(fichaForm.genero || '').toLowerCase() === 'm' ? 'masculino'
+                              : String(fichaForm.genero || '').toLowerCase() === 'f' ? 'feminino'
+                                : (fichaForm.genero || '')}
+                            onChange={e => setFichaForm(f => ({ ...f, genero: e.target.value }))}
+                            style={{ width: '100%', boxSizing: 'border-box', padding: '8px 10px', borderRadius: 8, border: `1px solid ${C.border}`, background: 'var(--cbrio-input-bg)', color: C.text, fontSize: 12.5, fontFamily: 'inherit' }}>
+                            <option value="">Não informado</option>
+                            <option value="masculino">Masculino</option>
+                            <option value="feminino">Feminino</option>
+                          </select>
+                        </div>
+                      </div>
+                      <div style={{ marginTop: 10 }}>
+                        <div style={{ fontSize: 10.5, color: C.t3, fontWeight: 700, marginBottom: 4 }}>Observações</div>
+                        <textarea
+                          value={fichaForm.observacoes}
+                          onChange={e => setFichaForm(f => ({ ...f, observacoes: e.target.value }))}
+                          rows={3}
+                          style={{ width: '100%', boxSizing: 'border-box', padding: '8px 10px', borderRadius: 8, border: `1px solid ${C.border}`, background: 'var(--cbrio-input-bg)', color: C.text, fontSize: 12.5, fontFamily: 'inherit', resize: 'vertical' }}
+                        />
+                      </div>
+                      <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 10 }}>
+                        <button onClick={() => setFichaEditando(false)} disabled={fichaSalvando}
+                          style={{ background: 'none', border: `1px solid ${C.border}`, borderRadius: 8, padding: '7px 14px', fontSize: 12, fontWeight: 600, color: C.t2, cursor: 'pointer' }}>
+                          Cancelar
+                        </button>
+                        <button onClick={salvarFicha} disabled={fichaSalvando}
+                          style={{ background: C.primary, border: 'none', borderRadius: 8, padding: '7px 14px', fontSize: 12, fontWeight: 700, color: '#fff', cursor: fichaSalvando ? 'wait' : 'pointer' }}>
+                          {fichaSalvando ? 'Salvando...' : 'Salvar ficha'}
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {                     }
+              <div style={{ padding: 16 }}>
+                <div style={{ fontSize: 11, color: C.t3, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.4, marginBottom: 10 }}>
+                  {gs.length} grupo{gs.length !== 1 ? 's' : ''}
+                </div>
+                {gs.length === 0 ? (
+                  <div style={{ padding: 24, textAlign: 'center', color: C.t3, fontSize: 13 }}>Não participa de nenhum grupo.</div>
+                ) : (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                    {gs.map(g => {
+                      const fp = PAPEIS[g.funcao] || { label: g.funcao || 'Membro', cor: C.t2, Icon: Users };
+
+                      const fg = freqPessoa?.map?.[g.id];
+                      const stg = fg ? STATUS[fg.status] : null;
+                      return (
+                        <div key={g.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 12px', borderRadius: 10, border: `1px solid ${C.border}`, background: C.bg }}>
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <button
+                              onClick={() => { setSelected(null); onOpenGrupo?.(g.id); }}
+                              style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', fontSize: 13, fontWeight: 600, color: C.text, textAlign: 'left' }}
+                            >
+                              {g.nome}
+                            </button>
+                            <div style={{ fontSize: 11, color: C.t3, marginTop: 2 }}>
+                              {g.entrou_em ? `desde ${fmtData(g.entrou_em)}` : 'participante'}
+                              {fg && fg.total_encontros > 0
+                                ? ` · ${fg.presencas}/${fg.total_encontros} encontro${fg.total_encontros !== 1 ? 's' : ''}`
+                                : (g.presencas ? ` · ${g.presencas} presença${g.presencas !== 1 ? 's' : ''}` : '')}
+                              {g.supervisiona ? ' · supervisiona' : ''}
+                            </div>
+                            {                                                                   }
+                            {stg && fg.total_encontros > 0 && (
+                              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, marginTop: 5, fontSize: 10, padding: '2px 8px', borderRadius: 99, background: `${stg.cor}18`, color: stg.cor, fontWeight: 700 }}>
+                                <span style={{ width: 6, height: 6, borderRadius: '50%', background: stg.cor }} />
+                                {fg.status === 'sem_presenca' ? 'não foi ainda' : stg.label}
+                                {fg.ultima ? ` · ${fmtData(fg.ultima)}` : ''}
+                              </span>
+                            )}
+                          </div>
+                          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 10, padding: '2px 9px', borderRadius: 99, background: `${fp.cor}18`, color: fp.cor, fontWeight: 700, whiteSpace: 'nowrap' }}>
+                            <fp.Icon size={10} /> {fp.label}
+                          </span>
+                          {                                                                                  }
+                          {podeEditar && g.participacao_id && !g.supervisiona && (g.funcao === 'frequentador' || g.funcao === 'visitante') && (
+                            <button
+                              onClick={() => sairDoGrupo(g)}
+                              disabled={!!saindo[g.participacao_id]}
+                              title="Retirar do grupo (reversível)"
+                              style={{ display: 'inline-flex', alignItems: 'center', gap: 4, background: 'none', border: `1px solid ${C.border}`, borderRadius: 8, padding: '5px 9px', fontSize: 11, fontWeight: 600, color: saindo[g.participacao_id] ? C.t3 : C.red, cursor: saindo[g.participacao_id] ? 'wait' : 'pointer', whiteSpace: 'nowrap', flexShrink: 0 }}
+                            >
+                              <UserMinus size={12} /> {saindo[g.participacao_id] ? 'Retirando…' : 'Retirar do grupo'}
+                            </button>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+    </div>
+  );
+}

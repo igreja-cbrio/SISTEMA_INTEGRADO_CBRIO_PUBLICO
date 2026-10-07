@@ -1,0 +1,519 @@
+
+
+
+
+
+
+
+
+
+
+
+import { useState, useEffect, useMemo } from 'react';
+import { useKpis } from '../hooks/useKpis';
+import { useMyKpiAreas } from '../hooks/useMyKpiAreas';
+import { kpis as kpisApi, dadosBrutos as dadosBrutosApi } from '../api';
+
+import KpiEditorModal from '../components/KpiEditorModal';
+import { Button } from '../components/ui/button';
+import { toast } from 'sonner';
+import { Pencil, Plus, Activity, Clock, CheckCircle2, AlertCircle, Heart } from 'lucide-react';
+
+const C = {
+  bg: 'var(--cbrio-bg)', card: 'var(--cbrio-card)', text: 'var(--cbrio-text)',
+  t2: 'var(--cbrio-text2)', t3: 'var(--cbrio-text3)', border: 'var(--cbrio-border)',
+  primary: '#00B39D', primaryBg: '#00B39D18',
+  green: '#10b981', greenBg: '#10b98120',
+  amber: '#f59e0b', amberBg: '#f59e0b20',
+  red: '#ef4444', redBg: '#ef444420',
+};
+
+const PERIODICIDADE_LABEL = {
+  semanal: 'Esta semana',
+  mensal: 'Este mês',
+  trimestral: 'Este trimestre',
+  semestral: 'Este semestre',
+  anual: 'Este ano',
+};
+
+const PERIODICIDADE_ORDER = ['semanal', 'mensal', 'trimestral', 'semestral', 'anual'];
+
+const VALORES_LABEL = {
+  seguir: { label: 'Seguir', cor: '#8b5cf6' },
+  conectar: { label: 'Conectar', cor: '#3b82f6' },
+  investir: { label: 'Investir', cor: '#f59e0b' },
+  servir: { label: 'Servir', cor: '#10b981' },
+  generosidade: { label: 'Generosidade', cor: '#ec4899' },
+};
+
+
+function periodKey(periodicidade, date = new Date()) {
+  const y = date.getUTCFullYear();
+  const m = String(date.getUTCMonth() + 1).padStart(2, '0');
+  switch (periodicidade) {
+    case 'semanal': {
+      const d = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
+      const day = d.getUTCDay() || 7;
+      d.setUTCDate(d.getUTCDate() + 4 - day);
+      const yearStart = new Date(Date.UTC(d.getUTCFullYear(), 0, 1));
+      const week = Math.ceil((((d - yearStart) / 86400000) + 1) / 7);
+      return `${d.getUTCFullYear()}-W${String(week).padStart(2, '0')}`;
+    }
+    case 'mensal': return `${y}-${m}`;
+    case 'trimestral': return `${y}-Q${Math.floor(date.getUTCMonth() / 3) + 1}`;
+    case 'semestral': return `${y}-S${date.getUTCMonth() < 6 ? 1 : 2}`;
+    case 'anual': return `${y}`;
+    default: return `${y}-${m}`;
+  }
+}
+
+
+
+
+function isMyKpi(kpi, kpiAreas, kpiValores, isAdmin) {
+  if (isAdmin) return true;
+  const area = String(kpi.area_db || kpi.area || '').toLowerCase();
+  if (kpiAreas.includes(area)) return true;
+  const valores = (kpi.valores || []).map(v => String(v).toLowerCase());
+  return valores.some(v => kpiValores.includes(v));
+}
+
+export default function MeusKpis() {
+  const { kpis, isLoading, refetch } = useKpis();
+  const { kpiAreas, kpiValores, isAdmin, canEditAny } = useMyKpiAreas();
+  const [registros, setRegistros] = useState([]);
+  const [loadingRegs, setLoadingRegs] = useState(false);
+
+  const [editKpi, setEditKpi] = useState(null);
+  const [createOpen, setCreateOpen] = useState(false);
+
+  const [filtroValores, setFiltroValores] = useState(new Set());
+
+
+  const meusKpis = useMemo(() => {
+    let arr = kpis.filter(k => k.ativo && isMyKpi(k, kpiAreas, kpiValores, isAdmin));
+    if (filtroValores.size > 0) {
+      arr = arr.filter(k => (k.valores || []).some(v => filtroValores.has(String(v).toLowerCase())));
+    }
+    return arr;
+  }, [kpis, kpiAreas, kpiValores, isAdmin, filtroValores]);
+
+  const toggleValor = (v) => setFiltroValores(prev => {
+    const novo = new Set(prev);
+    if (novo.has(v)) novo.delete(v); else novo.add(v);
+    return novo;
+  });
+
+
+  const porPeriodicidade = useMemo(() => {
+    const m = {};
+    meusKpis.forEach(k => {
+      const p = k.periodicidade || 'mensal';
+      if (!m[p]) m[p] = [];
+      m[p].push(k);
+    });
+    return m;
+  }, [meusKpis]);
+
+
+  const [dadosBrutos, setDadosBrutos] = useState([]);
+
+
+  useEffect(() => {
+    if (!meusKpis.length) { setRegistros([]); setDadosBrutos([]); return; }
+    setLoadingRegs(true);
+    (async () => {
+      try {
+        const areasUnicas = Array.from(new Set(meusKpis.map(k => k.area_db).filter(Boolean)));
+        const tiposUnicos = Array.from(new Set(
+          meusKpis.map(k => k.formula_config?.dado_tipo).filter(Boolean)
+        ));
+
+
+        const regsPromises = areasUnicas.map(area =>
+          kpisApi.v2.registros.list({ area }).catch(() => [])
+        );
+
+        const brutosPromises = tiposUnicos.map(tipo_id =>
+          dadosBrutosApi.list({ tipo_id, limit: 100 }).catch(() => [])
+        );
+
+        const [regsArrs, brutosArrs] = await Promise.all([
+          Promise.all(regsPromises),
+          Promise.all(brutosPromises),
+        ]);
+        setRegistros(regsArrs.flat());
+        setDadosBrutos(brutosArrs.flat());
+      } catch (e) {
+        console.error('[meus-kpis] registros', e);
+      } finally {
+        setLoadingRegs(false);
+      }
+    })();
+  }, [meusKpis]);
+
+
+  const ultimoRegPorIndicador = useMemo(() => {
+    const m = {};
+    registros.forEach(r => {
+      const cur = m[r.indicador_id];
+      if (!cur || (r.data_preenchimento || '') > (cur.data_preenchimento || '')) {
+        m[r.indicador_id] = r;
+      }
+    });
+    return m;
+  }, [registros]);
+
+
+  const ultimoDadoBrutoPorTipoArea = useMemo(() => {
+    const m = {};
+    dadosBrutos.forEach(d => {
+      const key = `${d.tipo_id}::${(d.area || '').toLowerCase()}`;
+      const cur = m[key];
+      if (!cur || (d.data || '') > (cur.data || '')) {
+        m[key] = d;
+      }
+    });
+    return m;
+  }, [dadosBrutos]);
+
+
+  function periodoDeData(periodicidade, dataStr) {
+    if (!dataStr) return null;
+    const d = new Date(dataStr + 'T12:00:00Z');
+    return periodKey(periodicidade, d);
+  }
+
+  function statusKpi(kpi) {
+    const periodoEsperado = periodKey(kpi.periodicidade);
+    const dadoTipo = kpi.formula_config?.dado_tipo;
+
+
+    if (dadoTipo) {
+      const area = String(kpi.area_db || kpi.area || '').toLowerCase();
+      const d = ultimoDadoBrutoPorTipoArea[`${dadoTipo}::${area}`];
+      if (!d) return { tipo: 'pendente', label: 'Pendente', cor: C.red, corBg: C.redBg, Icon: AlertCircle };
+      const pAtual = periodoDeData(kpi.periodicidade, d.data);
+      if (pAtual === periodoEsperado) {
+        return { tipo: 'ok', label: 'Em dia', cor: C.green, corBg: C.greenBg, Icon: CheckCircle2 };
+      }
+      return { tipo: 'atrasado', label: 'Atrasado', cor: C.amber, corBg: C.amberBg, Icon: Clock };
+    }
+
+
+    const reg = ultimoRegPorIndicador[kpi.id];
+    if (!reg) return { tipo: 'pendente', label: 'Pendente', cor: C.red, corBg: C.redBg, Icon: AlertCircle };
+    if (reg.periodo_referencia === periodoEsperado) {
+      return { tipo: 'ok', label: 'Em dia', cor: C.green, corBg: C.greenBg, Icon: CheckCircle2 };
+    }
+    return { tipo: 'atrasado', label: 'Atrasado', cor: C.amber, corBg: C.amberBg, Icon: Clock };
+  }
+
+
+
+  if (isLoading) {
+    return <div style={{ padding: 60, textAlign: 'center', color: C.t3 }}>Carregando KPIs...</div>;
+  }
+
+  if (!isAdmin && kpiAreas.length === 0 && kpiValores.length === 0) {
+    return (
+      <div style={{ padding: '40px 32px', maxWidth: 720, margin: '0 auto', textAlign: 'center' }}>
+        <Heart size={32} style={{ color: C.t3, marginBottom: 12 }} />
+        <h1 style={{ fontSize: 18, fontWeight: 700, color: C.text, marginBottom: 8 }}>Você ainda não lidera nenhuma área ou valor</h1>
+        <p style={{ fontSize: 13, color: C.t3 }}>
+          Peça para um administrador atribuir suas áreas e/ou valores da Jornada no módulo de Permissões.
+          Depois, você vê aqui apenas os KPIs que precisa preencher.
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ padding: '24px 32px', maxWidth: 1100, margin: '0 auto' }}>
+      <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 16, marginBottom: 4, flexWrap: 'wrap' }}>
+        <div>
+          <h1 style={{ fontSize: 22, fontWeight: 700, color: C.text, margin: 0, display: 'flex', alignItems: 'center', gap: 10 }}>
+            <Activity size={22} style={{ color: C.primary }} /> Meus KPIs
+          </h1>
+          <p style={{ fontSize: 12, color: C.t3, marginTop: 4, marginBottom: 8 }}>
+            Você lança <strong>dados</strong> (frequência, batismos, NPS, etc) e os KPIs calculam sozinhos.
+            KPIs marcados "Automático" sobem via módulo (cultos, contribuições, etc) — sem preenchimento manual.
+          </p>
+          <p style={{ fontSize: 13, color: C.t3, marginTop: 0, display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 6 }}>
+            {isAdmin ? (
+              <span>Você está vendo <strong>todos os KPIs</strong> (admin/diretor).</span>
+            ) : (
+              <>
+                {kpiAreas.length > 0 && (
+                  <>
+                    <span>Áreas:</span>
+                    {kpiAreas.map(a => (
+                      <span key={a} style={{ padding: '2px 10px', borderRadius: 99, background: C.primaryBg, color: C.primary, fontWeight: 600, fontSize: 11 }}>{a}</span>
+                    ))}
+                  </>
+                )}
+                {kpiValores.length > 0 && (
+                  <>
+                    <span style={{ marginLeft: kpiAreas.length > 0 ? 8 : 0 }}>Valores:</span>
+                    {kpiValores.map(v => (
+                      <span key={v} style={{
+                        padding: '2px 10px', borderRadius: 99,
+                        background: (VALORES_LABEL[v]?.cor || C.primary) + '20',
+                        color: VALORES_LABEL[v]?.cor || C.primary,
+                        fontWeight: 600, fontSize: 11,
+                      }}>{VALORES_LABEL[v]?.label || v}</span>
+                    ))}
+                  </>
+                )}
+              </>
+            )}
+          </p>
+        </div>
+        {canEditAny && (
+          <Button onClick={() => setCreateOpen(true)} variant="outline">
+            <Plus size={14} style={{ marginRight: 4 }} /> Novo KPI da minha área
+          </Button>
+        )}
+      </div>
+
+      {                              }
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 16, flexWrap: 'wrap' }}>
+        <span style={{ fontSize: 11, color: C.t3, fontWeight: 600, textTransform: 'uppercase', letterSpacing: 0.5 }}>Filtrar por valor:</span>
+        {Object.entries(VALORES_LABEL).map(([key, info]) => {
+          const sel = filtroValores.has(key);
+          return (
+            <button key={key} onClick={() => toggleValor(key)} style={{
+              padding: '4px 12px', fontSize: 11, fontWeight: 600, borderRadius: 99, cursor: 'pointer',
+              border: `1px solid ${sel ? info.cor : C.border}`,
+              background: sel ? info.cor + '20' : 'transparent',
+              color: sel ? info.cor : C.t2,
+            }}>{info.label}</button>
+          );
+        })}
+        {filtroValores.size > 0 && (
+          <button onClick={() => setFiltroValores(new Set())} style={{
+            padding: '4px 10px', fontSize: 10, fontWeight: 600,
+            background: 'transparent', color: C.t3, border: `1px solid ${C.border}`,
+            borderRadius: 4, cursor: 'pointer',
+          }}>Limpar</button>
+        )}
+      </div>
+
+      {meusKpis.length === 0 ? (
+        <div style={{ padding: 60, textAlign: 'center', color: C.t3, background: C.card, borderRadius: 16, border: `1px dashed ${C.border}`, boxShadow: 'var(--shadow)' }}>
+          Nenhum KPI ativo nas suas áreas ainda. {canEditAny && 'Clique em "Novo KPI da minha área" para criar o primeiro.'}
+        </div>
+      ) : (
+        PERIODICIDADE_ORDER.filter(p => porPeriodicidade[p]?.length).map(p => (
+          <SecaoPeriodicidade
+            key={p}
+            periodicidade={p}
+            kpis={porPeriodicidade[p]}
+            statusKpi={statusKpi}
+            ultimoRegPorIndicador={ultimoRegPorIndicador}
+            onEditar={setEditKpi}
+            canEditArea={(kpi) => isAdmin || kpiAreas.includes(String(kpi.area_db || '').toLowerCase())}
+          />
+        ))
+      )}
+
+      {editKpi && (
+        <KpiEditorModal
+          open={!!editKpi}
+          kpi={editKpi}
+          onClose={() => setEditKpi(null)}
+          onSaved={() => { setEditKpi(null); refetch(); toast.success('KPI atualizado'); }}
+        />
+      )}
+
+      {createOpen && (
+        <KpiEditorModal
+          open={createOpen}
+          kpi={null}
+          defaultArea={kpiAreas[0] || ''}
+          allowedAreas={isAdmin ? null : kpiAreas}
+          onClose={() => setCreateOpen(false)}
+          onSaved={() => { setCreateOpen(false); refetch(); toast.success('KPI criado'); }}
+        />
+      )}
+    </div>
+  );
+}
+
+function SecaoPeriodicidade({ periodicidade, kpis, statusKpi, ultimoRegPorIndicador, onEditar, canEditArea }) {
+  return (
+    <section style={{ marginBottom: 28 }}>
+      <h2 style={{ fontSize: 14, fontWeight: 700, color: C.t2, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 12 }}>
+        {PERIODICIDADE_LABEL[periodicidade] || periodicidade} <span style={{ fontSize: 11, color: C.t3, fontWeight: 400 }}>({kpis.length})</span>
+      </h2>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))', gap: 12 }}>
+        {kpis.map(kpi => {
+          const status = statusKpi(kpi);
+          const reg = ultimoRegPorIndicador[kpi.id];
+          const StatusIcon = status.Icon;
+          const podeEditar = canEditArea(kpi);
+          return (
+            <div key={kpi.id} style={{ position: 'relative', overflow: 'hidden', background: 'var(--panel)', WebkitBackdropFilter: 'blur(14px) saturate(140%)', backdropFilter: 'blur(14px) saturate(140%)', borderRadius: 16, padding: 14, border: '1px solid var(--hairline)', boxShadow: 'var(--shadow), var(--hi)', display: 'flex', flexDirection: 'column' }}>
+              <div style={{ position: 'absolute', inset: 0, background: `linear-gradient(135deg, ${status.cor}22, transparent 58%)`, pointerEvents: 'none' }} />
+              <div style={{ position: 'absolute', top: 0, left: 0, right: 0, height: 3, background: status.cor, opacity: 0.9 }} />
+              <div style={{ position: 'relative', zIndex: 1, display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 8, marginBottom: 8 }}>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 10, color: C.t3, fontWeight: 600 }}>{kpi.id} · {kpi.area}</div>
+                  <div style={{ fontSize: 13, fontWeight: 600, color: C.text, marginTop: 2 }}>{kpi.indicador}</div>
+                </div>
+                <span style={{
+                  display: 'inline-flex', alignItems: 'center', gap: 4,
+                  padding: '2px 8px', borderRadius: 99, fontSize: 10, fontWeight: 600,
+                  background: status.corBg, color: status.cor,
+                }}>
+                  <StatusIcon size={11} /> {status.label}
+                </span>
+              </div>
+
+              {kpi.descricao && (
+                <div style={{ position: 'relative', zIndex: 1, fontSize: 11, color: C.t3, marginBottom: 8, lineHeight: 1.4 }}>{kpi.descricao}</div>
+              )}
+
+              <div style={{ position: 'relative', zIndex: 1, display: 'flex', alignItems: 'center', gap: 12, fontSize: 11, color: C.t2, marginBottom: 8, flexWrap: 'wrap' }}>
+                {kpi.meta_descricao && (
+                  <span><strong style={{ color: C.text }}>Meta:</strong> {kpi.meta_descricao}{kpi.unidade ? ` ${kpi.unidade}` : ''}</span>
+                )}
+                {reg && (
+                  <span>
+                    <strong style={{ color: C.text }}>Último:</strong> {reg.valor_realizado ?? reg.valor_texto ?? '—'}
+                    <span style={{ color: C.t3, marginLeft: 4 }}>({reg.periodo_referencia})</span>
+                  </span>
+                )}
+              </div>
+
+              {kpi.valores?.length > 0 && (
+                <div style={{ position: 'relative', zIndex: 1, display: 'flex', flexWrap: 'wrap', gap: 4, marginBottom: 10 }}>
+                  {kpi.valores.map(v => {
+                    const meta = VALORES_LABEL[v];
+                    if (!meta) return null;
+                    return (
+                      <span key={v} title={`Alimenta: ${meta.label}`} style={{
+                        fontSize: 10, padding: '1px 8px', borderRadius: 99,
+                        background: meta.cor + '20', color: meta.cor, fontWeight: 600,
+                      }}>{meta.label}</span>
+                    );
+                  })}
+                  {kpi.is_okr && (
+                    <span style={{ fontSize: 10, padding: '1px 8px', borderRadius: 99, background: '#f97316' + '20', color: '#f97316', fontWeight: 700 }}>OKR</span>
+                  )}
+                </div>
+              )}
+
+              {                                                                        }
+              <div style={{ position: 'relative', zIndex: 1 }}><OrigemDado kpi={kpi} podeEditar={podeEditar} onEditar={onEditar} /></div>
+            </div>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
+
+
+
+
+
+
+const MODULO_POR_DADO_TIPO = {
+
+  frequencia_culto: { titulo: 'Cultos',          path: '/cultos' },
+  conversoes:       { titulo: 'Visitantes',      path: '/visitantes' },
+  batismos:         { titulo: 'Batismo',         path: '/batismo' },
+
+  voluntarios_ativos:      { titulo: 'Voluntariado', path: '/voluntariado' },
+  voluntarios_inativos_3m: { titulo: 'Voluntariado', path: '/voluntariado' },
+  voluntarios_recuperados: { titulo: 'Voluntariado', path: '/voluntariado' },
+  voluntarios_checkin:     { titulo: 'Voluntariado', path: '/voluntariado' },
+  voluntarios_treinamento: { titulo: 'Voluntariado', path: '/voluntariado' },
+  voluntarios_alocados:    { titulo: 'Voluntariado', path: '/voluntariado' },
+
+  doacoes_valor:        { titulo: 'Generosidade', path: '/generosidade' },
+  doadores_count:       { titulo: 'Generosidade', path: '/generosidade' },
+  doadores_recorrentes: { titulo: 'Generosidade', path: '/generosidade' },
+  doacoes_qualidade:    { titulo: 'Generosidade', path: '/generosidade' },
+
+  frequencia_next:        { titulo: 'NEXT',     path: '/next' },
+
+  inscricoes_jornada180:  { titulo: 'Cuidados · Jornada 180', path: '/cuidados?tab=agregado' },
+  devocionais:            { titulo: 'Cuidados · Devocional',  path: '/cuidados?tab=agregado' },
+  solicitacoes_capelania: { titulo: 'Cuidados',  path: '/cuidados?tab=agregado' },
+  solicitacoes_aconselh:  { titulo: 'Cuidados',  path: '/cuidados?tab=agregado' },
+  novos_convertidos_atend:{ titulo: 'Cuidados',  path: '/cuidados?tab=agregado' },
+
+  frequencia_grupos: { titulo: 'Grupos',     path: '/grupos' },
+  grupos_ativos:     { titulo: 'Grupos',     path: '/grupos' },
+  lideres_grupos:    { titulo: 'Supervisão Grupos', path: '/grupos/supervisao' },
+
+  nps_geral:       { titulo: 'NPS', path: '/nps' },
+  nps_next:        { titulo: 'NPS', path: '/nps' },
+  nps_lideres:     { titulo: 'NPS', path: '/nps' },
+  nps_voluntarios: { titulo: 'NPS', path: '/nps' },
+  nps_culto:       { titulo: 'NPS', path: '/nps' },
+};
+
+function OrigemDado({ kpi, podeEditar, onEditar }) {
+  const dadoTipo = kpi.formula_config?.dado_tipo;
+  const fonteAuto = kpi.fonte_auto;
+  const dadoTipoManual = !!kpi.dado_tipo_manual;
+  const moduloInfo = dadoTipo && MODULO_POR_DADO_TIPO[dadoTipo];
+
+
+
+  const isAutomatico = (!!fonteAuto && !dadoTipo) || (!!dadoTipo && !dadoTipoManual);
+  if (isAutomatico) {
+    return (
+      <div style={{ marginTop: 'auto', padding: '8px 10px', background: C.primaryBg, borderRadius: 6 }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 6 }}>
+          <div style={{ fontSize: 10, fontWeight: 700, color: C.primary, textTransform: 'uppercase', letterSpacing: 0.5 }}>
+            Automático
+          </div>
+          {moduloInfo && (
+            <a href={moduloInfo.path} style={{ fontSize: 10, color: C.primary, fontWeight: 600, textDecoration: 'none' }}>
+              Ver {moduloInfo.titulo} →
+            </a>
+          )}
+        </div>
+        <div style={{ fontSize: 10, color: C.t3, marginTop: 2 }}>
+          {moduloInfo ? `Sobe via módulo ${moduloInfo.titulo}` : 'Sobe via outro módulo'}
+        </div>
+        {podeEditar && (
+          <button onClick={() => onEditar(kpi)}
+            style={{ marginTop: 6, fontSize: 10, background: 'none', border: 'none', color: C.t3, cursor: 'pointer', padding: 0, textDecoration: 'underline' }}>
+            Editar meta
+          </button>
+        )}
+      </div>
+    );
+  }
+
+
+  const destino = moduloInfo || { titulo: 'Dados Brutos', path: '/dados-brutos' };
+  return (
+    <div style={{ marginTop: 'auto', padding: '8px 10px', background: 'var(--cbrio-input-bg)', borderRadius: 6 }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 6 }}>
+        <div style={{ fontSize: 10, fontWeight: 700, color: '#F59E0B', textTransform: 'uppercase', letterSpacing: 0.5 }}>
+          Manual
+        </div>
+        <a href={destino.path} style={{ fontSize: 10, color: C.primary, fontWeight: 700, textDecoration: 'none' }}>
+          Lançar em {destino.titulo} →
+        </a>
+      </div>
+      <div style={{ fontSize: 10, color: C.t3, marginTop: 2 }}>
+        Preencha o dado no módulo · KPI calcula sozinho
+      </div>
+      {podeEditar && (
+        <button onClick={() => onEditar(kpi)}
+          style={{ marginTop: 6, fontSize: 10, background: 'none', border: 'none', color: C.t3, cursor: 'pointer', padding: 0, textDecoration: 'underline' }}>
+          Editar meta
+        </button>
+      )}
+    </div>
+  );
+}
+
