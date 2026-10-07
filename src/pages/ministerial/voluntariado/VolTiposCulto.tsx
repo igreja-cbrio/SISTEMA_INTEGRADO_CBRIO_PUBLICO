@@ -1,0 +1,287 @@
+import { useState } from 'react';
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
+import { Badge } from '@/components/ui/badge';
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { Switch } from '@/components/ui/switch';
+import {
+  useVolServiceTypes, useCreateServiceType, useUpdateServiceType,
+  useDeleteServiceType, useGenerateServices,
+} from './hooks';
+import { Plus, Trash2, Edit2, Calendar, RefreshCw } from 'lucide-react';
+import { toast } from 'sonner';
+import type { VolServiceType } from './types';
+
+import { useVolPodeEscrever } from './hooks/useVolPodeEscrever';
+
+const WEEKDAYS = ['Domingo', 'Segunda', 'Terca', 'Quarta', 'Quinta', 'Sexta', 'Sabado'];
+
+export default function VolTiposCulto() {
+
+  const podeMexerNoTipo = useVolPodeEscrever(5);
+  const { data: types = [], isLoading } = useVolServiceTypes();
+  const [showForm, setShowForm] = useState(false);
+  const [editType, setEditType] = useState<VolServiceType | null>(null);
+
+  if (isLoading) {
+    return <div className="flex items-center justify-center py-20"><div className="h-6 w-6 animate-spin rounded-full border-2 border-muted-foreground/30 border-t-primary" /></div>;
+  }
+
+  return (
+    <div className="space-y-6">
+      <div className="flex items-center justify-between">
+        <h1 className="text-2xl font-bold text-foreground">Tipos de Culto</h1>
+        {                                                                     }
+        <Button onClick={() => setShowForm(true)} disabled={!podeMexerNoTipo} className="gap-1.5 bg-[#00B39D] hover:bg-[#00B39D]/90">
+          <Plus className="h-4 w-4" /> Novo Tipo
+        </Button>
+      </div>
+
+      {types.length === 0 ? (
+        <Card>
+          <CardContent className="flex flex-col items-center justify-center py-16 text-center">
+            <Calendar className="h-12 w-12 text-muted-foreground/30 mb-4" />
+            <p className="text-lg font-medium text-muted-foreground">Nenhum tipo de culto cadastrado</p>
+            <p className="text-sm text-muted-foreground/60 mt-1">Crie tipos com recorrência para gerar cultos automaticamente</p>
+          </CardContent>
+        </Card>
+      ) : (
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+          {types.map(st => (
+            <ServiceTypeCard
+              key={st.id}
+              serviceType={st}
+              onEdit={() => setEditType(st)}
+            />
+          ))}
+        </div>
+      )}
+
+      {(showForm || editType) && (
+        <ServiceTypeFormDialog
+          serviceType={editType}
+          onClose={() => { setShowForm(false); setEditType(null); }}
+        />
+      )}
+    </div>
+  );
+}
+
+function ServiceTypeCard({ serviceType, onEdit }: { serviceType: VolServiceType; onEdit: () => void }) {
+
+
+  const podeMexerNoTipo = useVolPodeEscrever(5);
+  const podeGerarCultos = useVolPodeEscrever();
+  const generateServices = useGenerateServices();
+  const [generating, setGenerating] = useState(false);
+
+  const handleGenerate = async (year: number) => {
+    setGenerating(true);
+    generateServices.mutate({ id: serviceType.id, year }, {
+      onSuccess: (data: any) => {
+        toast.success(`${data.generated} culto(s) gerado(s) para ${year}`);
+        setGenerating(false);
+      },
+      onError: () => { toast.error('Erro ao gerar cultos'); setGenerating(false); },
+    });
+  };
+
+  return (
+    <Card>
+      <CardHeader className="pb-2">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            {serviceType.color && <div className="h-3 w-3 rounded-full" style={{ backgroundColor: serviceType.color }} />}
+            <CardTitle className="text-base">{serviceType.name}</CardTitle>
+          </div>
+          {                                                                        }
+          <Button variant="ghost" size="icon" className="h-7 w-7" onClick={onEdit} disabled={!podeMexerNoTipo}>
+            <Edit2 className="h-3.5 w-3.5" />
+          </Button>
+        </div>
+      </CardHeader>
+      <CardContent className="pt-0 space-y-3">
+        {serviceType.description && (
+          <p className="text-sm text-muted-foreground">{serviceType.description}</p>
+        )}
+        <div className="flex flex-wrap gap-2">
+          {serviceType.recurrence_day != null && (
+            <Badge variant="outline">{WEEKDAYS[serviceType.recurrence_day]}</Badge>
+          )}
+          {serviceType.recurrence_time && (
+            <Badge variant="outline">{serviceType.recurrence_time.slice(0, 5)}</Badge>
+          )}
+          {!serviceType.is_active && <Badge variant="destructive">Inativo</Badge>}
+        </div>
+
+        {                                                                            }
+        {serviceType.recurrence_day != null && serviceType.recurrence_time && (
+          <Button size="sm" variant="outline" className="gap-1 text-xs w-full" disabled={generating || !podeGerarCultos} onClick={() => handleGenerate(2026)}>
+            <RefreshCw className={`h-3 w-3 ${generating ? 'animate-spin' : ''}`} /> Gerar 2026 inteiro
+          </Button>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function ServiceTypeFormDialog({ serviceType, onClose }: { serviceType: VolServiceType | null; onClose: () => void }) {
+  const create = useCreateServiceType();
+  const update = useUpdateServiceType();
+  const remove = useDeleteServiceType();
+
+  const [name, setName] = useState(serviceType?.name || '');
+  const [description, setDescription] = useState(serviceType?.description || '');
+  const [recurrenceDay, setRecurrenceDay] = useState<string>(serviceType?.recurrence_day?.toString() || '');
+  const [recurrenceTime, setRecurrenceTime] = useState(serviceType?.recurrence_time?.slice(0, 5) || '');
+  const [color, setColor] = useState(serviceType?.color || '#00B39D');
+
+
+
+
+  const [hasKids, setHasKids] = useState(serviceType?.has_kids ?? false);
+  const [hasOnline, setHasOnline] = useState(serviceType?.has_online ?? false);
+  const [hasOnlineStream, setHasOnlineStream] = useState(serviceType?.has_online_stream ?? false);
+  const [presencialLabel, setPresencialLabel] = useState(serviceType?.presencial_label || 'Presencial');
+
+  const handleSave = () => {
+    if (!name.trim()) return toast.error('Nome obrigatório');
+    const data = {
+      name: name.trim(),
+      description: description.trim() || null,
+      recurrence_day: recurrenceDay !== '' ? parseInt(recurrenceDay) : null,
+      recurrence_time: recurrenceTime || null,
+      color,
+      has_kids: hasKids,
+      has_online: hasOnline,
+      has_online_stream: hasOnlineStream,
+      presencial_label: presencialLabel.trim() || 'Presencial',
+    };
+    if (serviceType) {
+      update.mutate({ id: serviceType.id, data }, {
+        onSuccess: () => { toast.success('Tipo atualizado'); onClose(); },
+        onError: () => toast.error('Erro ao atualizar'),
+      });
+    } else {
+      create.mutate(data, {
+        onSuccess: () => { toast.success('Tipo criado'); onClose(); },
+        onError: () => toast.error('Erro ao criar'),
+      });
+    }
+  };
+
+  const handleDelete = () => {
+    if (!serviceType) return;
+    if (!confirm('Remover este tipo de culto?')) return;
+    remove.mutate(serviceType.id, {
+      onSuccess: () => { toast.success('Tipo removido'); onClose(); },
+      onError: () => toast.error('Erro ao remover'),
+    });
+  };
+
+  return (
+    <Dialog open onOpenChange={onClose}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>{serviceType ? 'Editar Tipo de Culto' : 'Novo Tipo de Culto'}</DialogTitle>
+        </DialogHeader>
+        <div className="space-y-4 py-2">
+          <div>
+            <Label>Nome</Label>
+            <Input value={name} onChange={e => setName(e.target.value)} placeholder="Ex: Culto Domingo Manhã" />
+          </div>
+          <div>
+            <Label>Descrição</Label>
+            <Input value={description} onChange={e => setDescription(e.target.value)} placeholder="Descrição (opcional)" />
+          </div>
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <Label>Dia da Semana</Label>
+              <Select value={recurrenceDay} onValueChange={setRecurrenceDay}>
+                <SelectTrigger><SelectValue placeholder="Selecione" /></SelectTrigger>
+                <SelectContent>
+                  {WEEKDAYS.map((day, i) => (
+                    <SelectItem key={i} value={i.toString()}>{day}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div>
+              <Label>Horario</Label>
+              <Input type="time" value={recurrenceTime} onChange={e => setRecurrenceTime(e.target.value)} />
+            </div>
+          </div>
+          <div>
+            <Label>Cor</Label>
+            <Input type="color" value={color} onChange={e => setColor(e.target.value)} className="h-10 w-20" />
+          </div>
+
+          <div className="space-y-3 rounded-lg border border-[var(--cbrio-border)] p-3">
+            <p className="text-sm font-semibold">O que acontece neste culto</p>
+
+            <label className="flex items-start gap-3 cursor-pointer">
+              <Switch checked={hasOnlineStream} onCheckedChange={setHasOnlineStream} className="mt-0.5" />
+              <span className="text-sm">
+                Gerar os cultos automaticamente toda semana
+                <span className="block text-xs text-[var(--cbrio-text3)]">
+                  Sem isto o tipo existe no catálogo mas nenhum culto é criado sozinho.
+                  Esta mesma opção inclui o culto na coleta automática do YouTube.
+                </span>
+              </span>
+            </label>
+
+            <label className="flex items-start gap-3 cursor-pointer">
+              <Switch checked={hasKids} onCheckedChange={setHasKids} className="mt-0.5" />
+              <span className="text-sm">
+                Tem CBKids em paralelo
+                <span className="block text-xs text-[var(--cbrio-text3)]">
+                  Sem isto, nenhuma criança consegue fazer check-in neste culto.
+                </span>
+              </span>
+            </label>
+
+            <label className="flex items-start gap-3 cursor-pointer">
+              <Switch checked={hasOnline} onCheckedChange={setHasOnline} className="mt-0.5" />
+              <span className="text-sm">
+                É transmitido ao vivo
+                <span className="block text-xs text-[var(--cbrio-text3)]">
+                  Liga a seção de transmissão no lançamento do culto e o formulário
+                  público de decisão online.
+                </span>
+              </span>
+            </label>
+
+            <div>
+              <Label>Rótulo da frequência presencial</Label>
+              <Input
+                value={presencialLabel}
+                onChange={e => setPresencialLabel(e.target.value)}
+                placeholder="Presencial"
+              />
+              <span className="block text-xs text-[var(--cbrio-text3)] mt-1">
+                Use <strong>Sede</strong> nos cultos do templo — é por este rótulo que o
+                Dashboard Semanal separa os cultos da Sede dos demais.
+              </span>
+            </div>
+          </div>
+        </div>
+        <DialogFooter className="flex justify-between">
+          {serviceType && (
+            <Button variant="destructive" onClick={handleDelete} disabled={remove.isPending}>
+              <Trash2 className="h-4 w-4 mr-1" /> Remover
+            </Button>
+          )}
+          <div className="flex gap-2 ml-auto">
+            <Button variant="outline" onClick={onClose}>Cancelar</Button>
+            <Button onClick={handleSave} disabled={create.isPending || update.isPending} className="bg-[#00B39D] hover:bg-[#00B39D]/90">
+              {serviceType ? 'Salvar' : 'Criar'}
+            </Button>
+          </div>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}

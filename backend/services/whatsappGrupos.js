@@ -1,0 +1,669 @@
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+const Anthropic = require('@anthropic-ai/sdk');
+const { supabase } = require('../utils/supabase');
+const { enviarTexto } = require('./whatsappSend');
+
+const MODEL = 'claude-haiku-4-5-20251001';
+const GRAPH_VERSION = process.env.WHATSAPP_GRAPH_VERSION || 'v21.0';
+const JANELA_SESSAO_MIN = 60 * 24 * 7;
+
+const hojeISO = () => new Date().toISOString().slice(0, 10);
+
+function isoSemana(d = new Date()) {
+
+  const inicio = new Date(Date.UTC(d.getUTCFullYear(), 0, 1));
+  const dias = Math.floor((d - inicio) / 86400000);
+  return `${d.getUTCFullYear()}-W${String(Math.floor(dias / 7)).padStart(2, '0')}`;
+}
+
+function normalizarNome(s) {
+  return (s || '').toString().toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/\s+/g, ' ').trim();
+}
+
+
+async function enviarComFallback(telefone, texto, templateEnv, params) {
+  const r = await enviarTexto(telefone, texto);
+  if (r.ok) return { ...r, via: 'texto' };
+  const tpl = process.env[templateEnv];
+  if (tpl) {
+
+
+
+    const { enfileirar } = require('./whatsappFila');
+    const rt = await enfileirar({ telefone, template: tpl, params, contexto: 'grupos.fallback_template' });
+    return { ok: !!(rt.sent || rt.queued), message_id: rt.messageId || null, error: rt.sent || rt.queued ? null : (rt.reason || 'erro'), via: 'template' };
+  }
+  return { ...r, via: 'texto' };
+}
+
+
+async function baixarMedia(mediaId) {
+  const token = process.env.WHATSAPP_ACCESS_TOKEN;
+  if (!token) return null;
+  const meta = await fetch(`https://graph.facebook.com/${GRAPH_VERSION}/${mediaId}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  }).then(r => r.json()).catch(() => null);
+  if (!meta?.url) return null;
+  const resp = await fetch(meta.url, { headers: { Authorization: `Bearer ${token}` } }).catch(() => null);
+  if (!resp || !resp.ok) return null;
+  const buffer = Buffer.from(await resp.arrayBuffer());
+
+  if (buffer.length > 16 * 1024 * 1024) return null;
+  return { buffer, mime: meta.mime_type || resp.headers.get('content-type') || 'application/octet-stream' };
+}
+
+
+function audioConfigurado() { return !!process.env.OPENAI_API_KEY; }
+
+async function transcreverAudio(mediaId) {
+  if (!audioConfigurado()) return { ok: false, error: 'sem_chave' };
+  const media = await baixarMedia(mediaId);
+  if (!media) return { ok: false, error: 'download_falhou' };
+  try {
+    const fd = new FormData();
+    const ext = media.mime.includes('mpeg') ? 'mp3' : media.mime.includes('mp4') ? 'm4a' : 'ogg';
+    fd.append('file', new Blob([media.buffer], { type: media.mime }), `audio.${ext}`);
+    fd.append('model', process.env.OPENAI_TRANSCRIBE_MODEL || 'whisper-1');
+    fd.append('language', 'pt');
+    const resp = await fetch('https://api.openai.com/v1/audio/transcriptions', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}` },
+      body: fd,
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      console.error('[whatsappGrupos] whisper:', resp.status, JSON.stringify(data).slice(0, 300));
+      return { ok: false, error: data?.error?.message || `HTTP ${resp.status}` };
+    }
+    const texto = (data.text || '').trim().slice(0, 2000);
+    return texto ? { ok: true, texto } : { ok: false, error: 'transcricao_vazia' };
+  } catch (e) {
+    console.error('[whatsappGrupos] transcrever:', e.message);
+    return { ok: false, error: e.message };
+  }
+}
+
+
+function normalizarTelefoneBR(raw) {
+  const d = (raw || '').toString().replace(/\D+/g, '');
+  if (d.length === 10 || d.length === 11) return '55' + d;
+  if ((d.length === 12 || d.length === 13) && d.startsWith('55')) return d;
+  return null;
+}
+
+
+
+
+
+
+async function sincronizarLideresGrupos() {
+  const { data: grupos } = await supabase
+    .from('mem_grupos')
+    .select('id, nome, lider_id')
+    .eq('ativo', true).is('deleted_at', null)
+    .not('lider_id', 'is', null);
+  const r = { criados: 0, atualizados: 0, desativados: 0, sem_telefone: 0 };
+  if (!grupos?.length) return r;
+
+  const liderIds = [...new Set(grupos.map(g => g.lider_id))];
+  const membros = {};
+  for (let i = 0; i < liderIds.length; i += 400) {
+    const { data: ms } = await supabase
+      .from('mem_membros').select('id, nome, telefone, email')
+      .in('id', liderIds.slice(i, i + 400)).is('deleted_at', null);
+    (ms || []).forEach(m => { membros[m.id] = m; });
+  }
+
+  const { data: vincs } = await supabase
+    .from('whatsapp_lideres')
+    .select('id, telefone, escopo, grupo_id, origem, ativo')
+    .is('deleted_at', null)
+    .limit(1000);
+  const porTelefone = new Map((vincs || []).map(v => [v.telefone, v]));
+
+
+
+  const grupoDoLider = new Map();
+  for (const g of grupos) if (!grupoDoLider.has(g.lider_id)) grupoDoLider.set(g.lider_id, g);
+
+  const telefonesDeLideres = new Set();
+  for (const [liderId, g] of grupoDoLider) {
+    const m = membros[liderId];
+    const tel = normalizarTelefoneBR(m?.telefone);
+    if (!tel) { r.sem_telefone++; continue; }
+    telefonesDeLideres.add(tel);
+    const v = porTelefone.get(tel);
+    if (!v) {
+      let profileId = null;
+      if (m.email) {
+        const { data: prof } = await supabase.from('profiles').select('id').eq('email', m.email).maybeSingle();
+        profileId = prof?.id || null;
+      }
+      const { error } = await supabase.from('whatsapp_lideres').insert({
+        telefone: tel, nome_exibicao: m.nome, escopo: ['grupos'], grupo_id: g.id,
+        papel: 'lider', origem: 'auto', ativo: true, profile_id: profileId,
+      });
+      if (!error) r.criados++;
+      else if (error.code !== '23505') console.error('[whatsappGrupos] sync insert:', error.message);
+    } else if (v.origem === 'auto') {
+      const patch = {};
+      if (v.grupo_id !== g.id) patch.grupo_id = g.id;
+      if (!v.ativo) patch.ativo = true;
+      if (!(v.escopo || []).includes('grupos')) patch.escopo = [...(v.escopo || []), 'grupos'];
+      if (Object.keys(patch).length) {
+        await supabase.from('whatsapp_lideres').update(patch).eq('id', v.id);
+        r.atualizados++;
+      }
+    }
+  }
+
+
+  for (const v of (vincs || [])) {
+    if (v.origem === 'auto' && v.ativo && !telefonesDeLideres.has(v.telefone)) {
+      await supabase.from('whatsapp_lideres').update({ ativo: false }).eq('id', v.id);
+      r.desativados++;
+    }
+  }
+  return r;
+}
+
+
+
+
+async function resolverGrupoDoLider(lider) {
+  if (lider.grupo_id) {
+    const { data: g } = await supabase
+      .from('mem_grupos').select('id, nome, dia_semana, lider_id')
+      .eq('id', lider.grupo_id).eq('ativo', true).is('deleted_at', null).maybeSingle();
+    if (g) return g;
+  }
+  if (lider.profile_id) {
+    const { data: prof } = await supabase.from('profiles').select('email').eq('id', lider.profile_id).maybeSingle();
+    if (prof?.email) {
+      const { data: membro } = await supabase.from('mem_membros').select('id').eq('email', prof.email).maybeSingle();
+      if (membro?.id) {
+        const { data: g } = await supabase
+          .from('mem_grupos').select('id, nome, dia_semana, lider_id')
+          .eq('lider_id', membro.id).eq('ativo', true).is('deleted_at', null)
+          .limit(1).maybeSingle();
+        if (g) return g;
+      }
+    }
+  }
+  return null;
+}
+
+
+function ultimaOcorrencia(diaSemana) {
+  const hoje = new Date();
+  if (diaSemana === null || diaSemana === undefined) return hojeISO();
+  const diff = (hoje.getDay() - Number(diaSemana) + 7) % 7;
+  const d = new Date(hoje); d.setDate(hoje.getDate() - diff);
+  return d.toISOString().slice(0, 10);
+}
+
+
+async function sessaoEncontroAberta(liderId) {
+  const limite = new Date(Date.now() - JANELA_SESSAO_MIN * 60 * 1000).toISOString();
+  const { data } = await supabase
+    .from('whatsapp_coletas')
+    .select('id, parsed')
+    .eq('lider_id', liderId).eq('status', 'aguardando_info')
+    .gte('created_at', limite)
+    .order('created_at', { ascending: false })
+    .limit(5);
+  return (data || []).find(c => c.parsed?.fonte === 'grupo_encontro') || null;
+}
+
+async function abrirSessaoEncontro({ lider, telefone, grupo, dataEncontro }) {
+  const messageId = `lembrete:${grupo.id}:${dataEncontro}`;
+  const { data, error } = await supabase.from('whatsapp_coletas').insert({
+    whatsapp_message_id: messageId,
+    telefone,
+    lider_id: lider.id,
+    raw_text: '[sessão de relato do encontro aberta pelo bot]',
+    status: 'aguardando_info',
+    modulo_destino: 'grupos',
+    parsed: {
+      fonte: 'grupo_encontro',
+      grupo_id: grupo.id,
+      grupo_nome: grupo.nome,
+      data_encontro: dataEncontro,
+      fotos: [],
+    },
+  }).select('id, parsed').single();
+  if (error) {
+    if (error.code === '23505') return null;
+    throw new Error(error.message);
+  }
+  return data;
+}
+
+
+const SYSTEM_RELATO = `Você é o assistente da CBRio que registra o relato do encontro de um grupo de conexão, contado pelo líder em pt-BR (texto livre ou transcrição de áudio). Tom: caloroso e breve, pode usar 1 emoji.
+
+Você recebe a LISTA DE MEMBROS do grupo e o RELATO do líder. Tarefa:
+1. Extrair o total de presentes, os NOMES citados como presentes, visitantes (pessoas de fora do grupo) e um resumo breve do encontro.
+2. Casar cada nome citado com a LISTA DE MEMBROS (aceite apelido/primeiro nome/erro de digitação óbvio). Use EXATAMENTE o nome como está na lista no campo "nomes_presentes". Nome citado que não casar com ninguém da lista vai em "nao_reconhecidos" (como o líder falou).
+3. NUNCA invente nome nem número. O que não foi dito = null/lista vazia.
+4. Se o líder só cumprimentou ou tirou dúvida, devolva tudo null e uma resposta natural pedindo o relato.
+
+Responda APENAS com JSON válido (sem markdown):
+{
+  "presentes": n|null,
+  "visitantes": n|null,
+  "nomes_presentes": ["nome exato da lista", ...],
+  "nao_reconhecidos": ["nome citado fora da lista", ...],
+  "resumo": "resumo breve do encontro dito pelo líder"|null,
+  "opt_out": boolean,  // true SÓ se o líder pediu pra parar de receber mensagens/lembretes do bot
+  "resposta": "mensagem curta pra responder ao líder agora"
+}`;
+
+async function extrairRelato({ texto, membros, jaColetado }) {
+  const anthropic = new Anthropic();
+  const lista = membros.map(m => m.nome).join('\n');
+  const contexto = jaColetado && (jaColetado.presentes || jaColetado.resumo)
+    ? `\n\nJÁ COLETADO antes (mescle, não descarte): ${JSON.stringify({ presentes: jaColetado.presentes, visitantes: jaColetado.visitantes, resumo: jaColetado.resumo, nomes: (jaColetado.nomes_presentes || []).map(n => n.nome) })}`
+    : '';
+  try {
+    const resp = await anthropic.messages.create({
+      model: MODEL,
+      max_tokens: 700,
+      system: SYSTEM_RELATO,
+      messages: [{
+        role: 'user',
+        content: `LISTA DE MEMBROS do grupo:\n${lista || '(vazia)'}\n\nRELATO do líder:\n"""${texto}"""${contexto}`,
+      }],
+    });
+    const raw = resp.content?.[0]?.text || '';
+    const json = JSON.parse(raw.slice(raw.indexOf('{'), raw.lastIndexOf('}') + 1));
+    return json && typeof json === 'object' ? json : null;
+  } catch (e) {
+    console.error('[whatsappGrupos] extrairRelato:', e.message);
+    return null;
+  }
+}
+
+
+async function salvarFotoEncontro({ mediaId, grupo, lider }) {
+  const media = await baixarMedia(mediaId);
+  if (!media) return null;
+  const ext = media.mime.includes('png') ? 'png' : media.mime.includes('webp') ? 'webp' : 'jpg';
+  const nome = `encontro_${grupo?.id ? String(grupo.id).slice(0, 8) : 'grupo'}_${Date.now()}.${ext}`;
+  const supaPath = `grupos/fotos/${grupo?.id || 'sem-grupo'}/${nome}`;
+  const { error: upErr } = await supabase.storage
+    .from('eventos-anexos')
+    .upload(supaPath, media.buffer, { contentType: media.mime, upsert: true });
+  if (upErr) {
+    console.error('[whatsappGrupos] upload foto:', upErr.message);
+    return null;
+  }
+  const { data: urlData } = supabase.storage.from('eventos-anexos').getPublicUrl(supaPath);
+  const url = urlData?.publicUrl || null;
+  await supabase.from('mem_grupo_documentos').insert({
+    tipo: ext,
+    nome,
+    comentario: `Foto do encontro via WhatsApp${lider?.nome_exibicao ? ` · ${lider.nome_exibicao}` : ''}${grupo?.nome ? ` · ${grupo.nome}` : ''}`,
+    etiquetas: ['Fotos de grupos'],
+    grupo_ids: grupo?.id ? [grupo.id] : [],
+    storage_path: url,
+    uploaded_by_name: lider?.nome_exibicao || 'WhatsApp',
+  });
+  return url;
+}
+
+
+
+
+
+async function tratarMensagemGrupos({ m, lider, telefone, messageId }) {
+  const escopo = lider?.escopo || [];
+  if (!escopo.includes('grupos')) return false;
+
+  const soGrupos = escopo.length === 1;
+  const ehAudio = m.type === 'audio';
+  const ehImagem = m.type === 'image';
+  const ehTexto = m.type === 'text';
+  let texto = ehTexto ? (m.text?.body || '').slice(0, 2000) : '';
+
+  let sessao = await sessaoEncontroAberta(lider.id);
+
+
+
+
+  if (!sessao && !(ehAudio || ehImagem || (ehTexto && soGrupos))) return false;
+
+  const grupo = sessao?.parsed?.grupo_id
+    ? { id: sessao.parsed.grupo_id, nome: sessao.parsed.grupo_nome, dia_semana: null }
+    : await resolverGrupoDoLider(lider);
+
+  if (!grupo) {
+    if (ehTexto && soGrupos) {
+      await registrarColetaSimples({ messageId, telefone, lider, texto, erro: 'sem_grupo_vinculado' });
+      await enviarTexto(telefone,
+        'Não achei um grupo vinculado ao seu número. Pede pro coordenador vincular seu grupo em /admin/whatsapp que aí eu registro seus encontros por aqui. 🙏');
+      return true;
+    }
+    return false;
+  }
+
+
+  if (ehImagem) {
+    await registrarColetaSimples({ messageId, telefone, lider, texto: '[foto]', erro: 'foto_encontro' });
+    const url = await salvarFotoEncontro({ mediaId: m.image?.id, grupo, lider });
+    if (url && sessao) {
+      const fotos = [...(sessao.parsed.fotos || []), url];
+      await supabase.from('whatsapp_coletas')
+        .update({ parsed: { ...sessao.parsed, fotos } })
+        .eq('id', sessao.id);
+    }
+    await enviarTexto(telefone, url
+      ? `📸 Foto guardada no histórico do grupo ${grupo.nome}. Valeu!`
+      : 'Recebi a foto mas não consegui guardar agora. Pode tentar de novo mais tarde? 🙏');
+    return true;
+  }
+
+
+  if (ehAudio) {
+    if (!audioConfigurado()) {
+      await registrarColetaSimples({ messageId, telefone, lider, texto: '[áudio]', erro: 'audio_sem_transcricao' });
+      await enviarTexto(telefone,
+        'Ainda não consigo ouvir áudios por aqui 😅 Me manda por texto: quantas pessoas vieram, quem veio e um resumo do encontro. 🙏');
+      return true;
+    }
+    const tr = await transcreverAudio(m.audio?.id);
+    if (!tr.ok) {
+      await registrarColetaSimples({ messageId, telefone, lider, texto: '[áudio]', erro: `audio_falhou: ${tr.error}`.slice(0, 200) });
+      await enviarTexto(telefone, 'Não consegui entender o áudio. Pode mandar de novo ou escrever por texto? 🙏');
+      return true;
+    }
+    texto = tr.texto;
+  }
+
+
+  if (!sessao) {
+    sessao = await abrirSessaoEncontro({ lider, telefone, grupo, dataEncontro: ultimaOcorrencia(grupo.dia_semana) });
+    if (!sessao) sessao = await sessaoEncontroAberta(lider.id);
+    if (!sessao) return false;
+  }
+
+
+  const { data: parts } = await supabase
+    .from('mem_grupo_membros')
+    .select('membro_id, mem_membros!inner(id, nome)')
+    .eq('grupo_id', grupo.id)
+    .is('saiu_em', null)
+    .limit(200);
+  const membros = (parts || []).map(p => ({ membro_id: p.membro_id, nome: p.mem_membros?.nome })).filter(x => x.nome);
+
+  const r = await extrairRelato({ texto, membros, jaColetado: sessao.parsed });
+  if (!r) {
+    await enviarTexto(telefone, 'Tive um problema aqui. Pode mandar de novo, por favor? 🙏');
+    return true;
+  }
+
+
+  if (r.opt_out === true) {
+    await supabase.from('whatsapp_lideres').update({ recebe_lembretes: false }).eq('id', lider.id);
+    await supabase.from('whatsapp_coletas').update({ whatsapp_message_id: messageId, raw_text: (ehAudio ? '[áudio] ' : '') + texto }).eq('id', sessao.id);
+    await enviarTexto(telefone,
+      'Tudo bem, não vou mais te mandar lembretes! Quando quiser registrar um encontro, é só me mandar mensagem que eu anoto. 🙏');
+    return true;
+  }
+
+
+  const porNome = new Map(membros.map(mm => [normalizarNome(mm.nome), mm]));
+  const nomesPresentes = [];
+  const naoReconhecidos = [...(r.nao_reconhecidos || [])];
+  for (const n of (r.nomes_presentes || [])) {
+    const hit = porNome.get(normalizarNome(n));
+    if (hit && !nomesPresentes.some(x => x.membro_id === hit.membro_id)) {
+      nomesPresentes.push({ membro_id: hit.membro_id, nome: hit.nome });
+    } else if (n) naoReconhecidos.push(n);
+  }
+
+  const antigos = sessao.parsed.nomes_presentes || [];
+  for (const a of antigos) if (!nomesPresentes.some(x => x.membro_id === a.membro_id)) nomesPresentes.push(a);
+
+  const presentes = r.presentes ?? sessao.parsed.presentes ?? (nomesPresentes.length || null);
+  const visitantes = r.visitantes ?? sessao.parsed.visitantes ?? null;
+  const resumo = r.resumo || sessao.parsed.resumo || null;
+  const pronto = !!(presentes || nomesPresentes.length);
+
+  const parsed = {
+    ...sessao.parsed,
+    presentes, visitantes, resumo,
+    nomes_presentes: nomesPresentes,
+    nao_reconhecidos: [...new Set(naoReconhecidos)],
+  };
+
+  await supabase.from('whatsapp_coletas').update({
+    whatsapp_message_id: messageId,
+    raw_text: (ehAudio ? '[áudio] ' : '') + texto,
+    parsed,
+    status: pronto ? 'parseado' : 'aguardando_info',
+  }).eq('id', sessao.id);
+
+  let resposta;
+  if (pronto) {
+    const linhaNomes = nomesPresentes.length ? `\n👥 ${nomesPresentes.map(x => x.nome.split(' ')[0]).join(', ')}` : '';
+    const linhaNao = parsed.nao_reconhecidos.length ? `\n❓ Não reconheci: ${parsed.nao_reconhecidos.join(', ')} (visitantes?)` : '';
+    resposta = `Anotei o encontro do ${grupo.nome}:\n`
+      + `✅ ${presentes ?? nomesPresentes.length} presente(s)${visitantes ? ` · ${visitantes} visitante(s)` : ''}`
+      + linhaNomes + linhaNao
+      + (resumo ? `\n📝 ${resumo}` : '')
+      + '\n\nUm coordenador vai conferir e o encontro entra no histórico do grupo. Se quiser, manda também uma foto! 📸';
+  } else {
+    resposta = r.resposta || `Me conta como foi o encontro do ${grupo.nome}: quantas pessoas vieram, quem veio e um resumo breve. Pode ser áudio! 🙏`;
+  }
+  await enviarTexto(telefone, resposta);
+  return true;
+}
+
+
+async function registrarColetaSimples({ messageId, telefone, lider, texto, erro }) {
+  const { error } = await supabase.from('whatsapp_coletas').insert({
+    whatsapp_message_id: messageId, telefone, lider_id: lider?.id || null,
+    raw_text: texto, status: 'ignorado', modulo_destino: 'grupos', erro,
+  });
+  if (error && error.code !== '23505') console.error('[whatsappGrupos] log coleta:', error.message);
+}
+
+
+
+
+
+
+
+async function enviarLembretesEncontro() {
+  const ontem = new Date(); ontem.setDate(ontem.getDate() - 1);
+  const dataEncontro = ontem.toISOString().slice(0, 10);
+  const dia = ontem.getDay();
+
+  const { data: grupos } = await supabase
+    .from('mem_grupos')
+    .select('id, nome, dia_semana, lider_id')
+    .eq('ativo', true).is('deleted_at', null).eq('dia_semana', dia);
+  if (!grupos?.length) return { grupos: 0, enviados: 0, sem_lider: 0 };
+
+  const { data: lideres } = await supabase
+    .from('whatsapp_lideres')
+    .select('id, telefone, nome_exibicao, escopo, grupo_id, profile_id, recebe_lembretes')
+    .eq('ativo', true).is('deleted_at', null)
+    .neq('recebe_lembretes', false)
+    .contains('escopo', ['grupos']);
+
+
+  const porGrupoId = new Map();
+  (lideres || []).forEach(l => { if (l.grupo_id) porGrupoId.set(l.grupo_id, l); });
+  const porMembroLider = new Map();
+  for (const l of (lideres || [])) {
+    if (l.grupo_id || !l.profile_id) continue;
+    const { data: prof } = await supabase.from('profiles').select('email').eq('id', l.profile_id).maybeSingle();
+    if (!prof?.email) continue;
+    const { data: membro } = await supabase.from('mem_membros').select('id').eq('email', prof.email).maybeSingle();
+    if (membro?.id) porMembroLider.set(membro.id, l);
+  }
+
+  let enviados = 0, semLider = 0;
+  for (const g of grupos) {
+    const lider = porGrupoId.get(g.id) || (g.lider_id ? porMembroLider.get(g.lider_id) : null);
+    if (!lider) { semLider++; continue; }
+
+    const sessao = await abrirSessaoEncontro({ lider, telefone: lider.telefone, grupo: g, dataEncontro });
+    if (!sessao) continue;
+
+    const primeiro = (lider.nome_exibicao || '').split(' ')[0];
+    const msg = `Oi${primeiro ? ', ' + primeiro : ''}! Como foi o encontro do ${g.nome} ontem? `
+      + 'Me conta quantas pessoas vieram, quem veio e um resumo breve — pode ser por áudio. '
+      + 'E se tiver foto do encontro, manda também! 📸';
+    const r = await enviarComFallback(lider.telefone, msg, 'WHATSAPP_TEMPLATE_LEMBRETE_GRUPO', [primeiro || 'líder', g.nome]);
+    if (r.ok) enviados++;
+    else {
+      await supabase.from('whatsapp_coletas')
+        .update({ erro: ('lembrete_falhou: ' + String(r.error || '?')).slice(0, 250) })
+        .eq('id', sessao.id);
+    }
+  }
+  return { grupos: grupos.length, enviados, sem_lider: semLider };
+}
+
+
+
+
+
+
+
+
+
+
+
+
+async function enviarEstudoSemanal() {
+  const { data: material } = await supabase
+    .from('mem_grupo_documentos')
+    .select('id, nome, comentario, storage_path, sharepoint_url')
+    .eq('estudo_semana', true)
+    .order('created_at', { ascending: false })
+    .limit(1).maybeSingle();
+  if (!material) return { enviados: 0, erro: 'nenhum material marcado como estudo da semana' };
+
+  const link = material.storage_path || material.sharepoint_url || null;
+  const { data: lideres } = await supabase
+    .from('whatsapp_lideres')
+    .select('id, telefone, nome_exibicao')
+    .eq('ativo', true).is('deleted_at', null)
+    .eq('papel', 'coordenador');
+  if (!lideres?.length) {
+    return { enviados: 0, erro: 'nenhum vínculo com papel=coordenador · marque quem posta no grupo dos líderes (ex.: Pr. Nélio) como coordenador em /admin/whatsapp' };
+  }
+
+  const semana = isoSemana();
+  let enviados = 0, pulados = 0, falhas = 0;
+  for (const l of lideres) {
+
+    const { error: dupErr } = await supabase.from('whatsapp_coletas').insert({
+      whatsapp_message_id: `estudo:${semana}:${l.id}`,
+      telefone: l.telefone, lider_id: l.id,
+      raw_text: `[estudo da semana enviado: ${material.nome}]`,
+      status: 'ignorado', modulo_destino: 'grupos', erro: 'estudo_enviado',
+    });
+    if (dupErr) { if (dupErr.code === '23505') { pulados++; continue; } falhas++; continue; }
+
+    const primeiro = (l.nome_exibicao || '').split(' ')[0];
+    const titulo = material.comentario || material.nome;
+    const msg = `Oi${primeiro ? ', ' + primeiro : ''}! 📖 Estudo desta semana pros grupos de conexão:\n\n`
+      + `*${titulo}*${link ? `\n${link}` : '\n(arquivo na aba Materiais do módulo Grupos)'}`
+      + '\n\n👉 Encaminhe esta mensagem no grupo de WhatsApp dos líderes. Bom encontro! 🙌';
+    const r = await enviarComFallback(l.telefone, msg, 'WHATSAPP_TEMPLATE_ESTUDO_GRUPO', [primeiro || 'líder', titulo]);
+    if (r.ok) enviados++;
+    else {
+      falhas++;
+      await supabase.from('whatsapp_coletas')
+        .update({ erro: ('estudo_falhou: ' + String(r.error || '?')).slice(0, 250) })
+        .eq('whatsapp_message_id', `estudo:${semana}:${l.id}`);
+    }
+  }
+  return { material: material.nome, coordenadores: lideres.length, enviados, pulados, falhas };
+}
+
+
+
+
+
+async function aplicarColetaGrupoEncontro(coleta, userId) {
+  const p = coleta.parsed || {};
+  if (!p.grupo_id) return { ok: false, status: 422, error: 'Coleta sem grupo vinculado. Lance manualmente.' };
+
+  const ids = (p.nomes_presentes || []).map(x => x.membro_id).filter(Boolean);
+  const obsPartes = ['Via WhatsApp'];
+  if (p.resumo) obsPartes.push(p.resumo);
+  if (p.visitantes) obsPartes.push(`${p.visitantes} visitante(s)`);
+  if (p.presentes && ids.length && Number(p.presentes) !== ids.length) {
+    obsPartes.push(`líder informou ${p.presentes} presentes (${ids.length} identificados nominalmente)`);
+  }
+  if ((p.nao_reconhecidos || []).length) obsPartes.push(`não reconhecidos: ${p.nao_reconhecidos.join(', ')}`);
+  if ((p.fotos || []).length) obsPartes.push(`fotos: ${p.fotos.join(' ')}`);
+
+  const { data: encontroId, error } = await supabase.rpc('registrar_encontro_grupo', {
+    p_grupo_id: p.grupo_id,
+    p_data: p.data_encontro || hojeISO(),
+    p_tema: 'Encontro do grupo',
+    p_observacoes: obsPartes.join(' · '),
+    p_registrado_por: userId || null,
+    p_registrado_por_nome: 'Bot WhatsApp',
+    p_membros_presentes: ids,
+  });
+  if (error) {
+    if (error.code === '23505') {
+      return { ok: false, status: 409, error: 'Já existe encontro registrado nessa data pra esse grupo. Edite o encontro existente.' };
+    }
+    return { ok: false, status: 400, error: error.message };
+  }
+
+  await supabase.from('whatsapp_coletas')
+    .update({ status: 'aplicado', aplicado_em: new Date().toISOString(), aplicado_por: userId || null, destino_ref: encontroId || null })
+    .eq('id', coleta.id);
+
+  return { ok: true, destino: 'encontro', encontro_id: encontroId, presencas: ids.length };
+}
+
+module.exports = {
+  tratarMensagemGrupos,
+  enviarLembretesEncontro,
+  enviarEstudoSemanal,
+  sincronizarLideresGrupos,
+  aplicarColetaGrupoEncontro,
+  audioConfigurado,
+};

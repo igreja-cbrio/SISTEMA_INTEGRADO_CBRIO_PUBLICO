@@ -1,0 +1,791 @@
+"use client";
+
+import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  Search,
+  Sun,
+  Moon,
+  MapPin,
+  Clock,
+  Navigation as NavIcon,
+  Users,
+  ChevronLeft,
+  ChevronRight,
+  X,
+} from "lucide-react";
+import { Map, MapMarker, MarkerContent, MarkerPopup, MapControls, useMap } from "@/components/ui/map";
+import { Input } from "@/components/ui/input";
+import { Button } from "@/components/ui/button";
+import { cn } from "@/lib/utils";
+import { espalharPinosSobrepostos } from "@/lib/pinosMapa";
+import { AbrirRotaMenu } from "@/components/grupos/AbrirRotaMenu";
+
+import { normalizarBusca, contemNormalizado } from "@/lib/busca";
+
+const DIAS_MAP: Record<number, string> = {
+  0: "Domingo",
+  1: "Segunda",
+  2: "Terça",
+  3: "Quarta",
+  4: "Quinta",
+  5: "Sexta",
+  6: "Sábado",
+};
+
+
+const ehDiario = (g: { recorrencia?: string | null }) =>
+  (g?.recorrencia || "").toLowerCase().trim() === "diario";
+
+
+const liderExibicao = (g: any): string | null => {
+  if (g?.lideres_exibicao?.length) return g.lideres_exibicao.join(" · ");
+  const nome = g?.lider?.nome || g?.lider_nome;
+  if (!nome) return null;
+  return g?.lider_apelido ? `${nome} (${g.lider_apelido})` : nome;
+};
+
+export interface MapGroup {
+  id: string;
+  nome: string;
+  categoria?: string | null;
+  lat?: number | null;
+  lng?: number | null;
+  local?: string | null;
+  dia_semana?: number | null;
+  recorrencia?: string | null;
+  horario?: string | null;
+  lider?: { nome?: string } | null;
+  lider_nome?: string | null;
+  lider_apelido?: string | null;
+  lideres_exibicao?: string[] | null;
+  lideres_busca?: string[] | null;
+  dist?: number | null;
+  bairro?: string | null;
+  codigo?: string | null;
+  temporada?: string | null;
+  complemento?: string | null;
+
+
+  endereco_publico?: string | null;
+  descricao?: string | null;
+
+
+  pinoAproximado?: boolean;
+}
+
+interface Coords {
+  lat: number;
+  lng: number;
+}
+
+interface GruposMapViewProps {
+  grupos: MapGroup[];
+  memberCoords?: Coords | null;
+  variant?: "admin" | "kiosk";
+  defaultTheme?: "light" | "dark";
+  onGroupSelect?: (g: MapGroup) => void;
+  onGroupSelectLabel?: string;
+
+
+  onPinClick?: (g: MapGroup) => void;
+  className?: string;
+
+  temporadasMap?: Record<string, { inscricoes_abertas: boolean; label?: string }>;
+
+  mostrarBotaoInscricao?: boolean;
+}
+
+function fmtDist(km: number) {
+  return km < 1 ? `${Math.round(km * 1000)}m` : `${km.toFixed(1)}km`;
+}
+
+
+function FlyToTarget({ target }: { target: MapGroup | null }) {
+  const { map, isLoaded } = useMap();
+  useEffect(() => {
+    if (!isLoaded || !map || !target?.lat || !target?.lng) return;
+    map.flyTo({
+      center: [target.lng, target.lat],
+      zoom: 15,
+      duration: 800,
+      essential: true,
+    });
+  }, [target, isLoaded, map]);
+  return null;
+}
+
+
+const PIN_COLOR = "#00B39D";
+const PIN_MEMBER_COLOR = "#3B82F6";
+
+function GroupPin({ active = false, color = PIN_COLOR }: { active?: boolean; color?: string }) {
+  return (
+    <div className="relative flex flex-col items-center" style={{ transform: active ? "scale(1.15)" : undefined }}>
+      <svg width="32" height="40" viewBox="0 0 28 36" xmlns="http://www.w3.org/2000/svg">
+        <path
+          d="M14 0C6.3 0 0 6.3 0 14c0 10.5 14 22 14 22S28 24.5 28 14C28 6.3 21.7 0 14 0z"
+          fill={color}
+          stroke="#fff"
+          strokeWidth={2}
+        />
+        <circle cx={14} cy={14} r={6} fill="#fff" />
+      </svg>
+      {active && (
+        <span
+          className="absolute -bottom-1 h-2 w-2 rounded-full animate-ping"
+          style={{ backgroundColor: color, opacity: 0.6 }}
+        />
+      )}
+    </div>
+  );
+}
+
+function MemberPin() {
+  return (
+    <div style={{ position: "relative", width: 28, height: 28 }}>
+      <style>{`
+        @keyframes cbrio-member-pulse {
+          0%   { transform: translate(-50%,-50%) scale(1); opacity: 0.6; }
+          100% { transform: translate(-50%,-50%) scale(3.8); opacity: 0; }
+        }
+        .cbrio-member-ring {
+          position: absolute; top: 50%; left: 50%;
+          width: 22px; height: 22px; border-radius: 50%;
+          background: rgba(59,130,246,0.4);
+          animation: cbrio-member-pulse 1.8s ease-out infinite;
+        }
+        .cbrio-member-ring-2 {
+          position: absolute; top: 50%; left: 50%;
+          width: 22px; height: 22px; border-radius: 50%;
+          background: rgba(59,130,246,0.3);
+          animation: cbrio-member-pulse 1.8s ease-out infinite;
+          animation-delay: 0.6s;
+        }
+        .cbrio-member-dot {
+          position: absolute; top: 50%; left: 50%;
+          transform: translate(-50%,-50%);
+          width: 18px; height: 18px; border-radius: 50%;
+          background: #3B82F6;
+          border: 2.5px solid white;
+          box-shadow: 0 0 8px rgba(59,130,246,0.8);
+        }
+      `}</style>
+      <div className="cbrio-member-ring" />
+      <div className="cbrio-member-ring-2" />
+      <div className="cbrio-member-dot" />
+    </div>
+  );
+}
+
+export function GruposMapView({
+  grupos,
+  memberCoords,
+  variant = "admin",
+  defaultTheme = "dark",
+  onGroupSelect,
+  onGroupSelectLabel = "Quero participar",
+  onPinClick,
+  className,
+  temporadasMap,
+  mostrarBotaoInscricao = false,
+}: GruposMapViewProps) {
+  const [theme, setTheme] = useState<"light" | "dark">(defaultTheme);
+  const [search, setSearch] = useState("");
+  const [filterCat, setFilterCat] = useState<string>("");
+  const [filterBairro, setFilterBairro] = useState<string>("");
+  const [activeId, setActiveId] = useState<string | null>(null);
+
+
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+
+
+  const isMobile = typeof window !== "undefined" && window.matchMedia && window.matchMedia("(max-width: 640px)").matches;
+  const flyTargetRef = useRef<MapGroup | null>(null);
+  const [flyTarget, setFlyTarget] = useState<MapGroup | null>(null);
+  const [locatedCoords, setLocatedCoords] = useState<Coords | null>(null);
+
+  const isKiosk = variant === "kiosk";
+
+
+
+  const categories = useMemo(
+    () => Array.from(new Set(grupos.map((g) => g.categoria).filter(Boolean))) as string[],
+    [grupos]
+  );
+
+  const bairros = useMemo(
+    () => Array.from(new Set(grupos.map((g: any) => g.bairro).filter(Boolean))).sort() as string[],
+    [grupos]
+  );
+
+  const filtered = useMemo(() => {
+    const s = normalizarBusca(search);
+    return grupos.filter((g: any) => {
+      if (filterCat && g.categoria !== filterCat) return false;
+      if (filterBairro && g.bairro !== filterBairro) return false;
+      if (s) {
+
+        const hay = [
+          g.nome,
+          g.lider?.nome ?? g.lider_nome,
+          ...(g.lideres_busca || []),
+          g.local,
+          g.bairro,
+        ].filter(Boolean).join(" ");
+        if (!contemNormalizado(hay, s)) return false;
+      }
+      return true;
+    });
+  }, [grupos, search, filterCat, filterBairro]);
+
+  const withCoords = useMemo(
+    () => espalharPinosSobrepostos(filtered.filter((g) => g.lat != null && g.lng != null)),
+    [filtered]
+  );
+
+
+
+
+
+
+
+  const posPorId = useMemo(() => {
+    const m: Record<string, MapGroup> = {};
+    withCoords.forEach((g) => { m[g.id] = g; });
+    return m;
+  }, [withCoords]);
+
+
+
+
+  const origPorId = useMemo(() => {
+    const m: Record<string, MapGroup> = {};
+    filtered.forEach((g) => { m[g.id] = g; });
+    return m;
+  }, [filtered]);
+
+
+  const infoDoPino = (g: MapGroup): MapGroup => ({
+    ...(origPorId[g.id] ?? g),
+    pinoAproximado: g.pinoAproximado,
+  });
+
+
+  const initialCenter: [number, number] = memberCoords
+    ? [memberCoords.lng, memberCoords.lat]
+    : withCoords[0]?.lat && withCoords[0]?.lng
+    ? [withCoords[0].lng!, withCoords[0].lat!]
+    : [-43.1729, -22.9068];
+
+  const handleSelectFromList = (g: MapGroup) => {
+    if (g.lat == null || g.lng == null) return;
+    const alvo = posPorId[g.id] ?? g;
+    setActiveId(g.id);
+    flyTargetRef.current = alvo;
+    setFlyTarget({ ...alvo });
+  };
+
+  const themeBg = theme === "dark" ? "bg-gray-950 text-white" : "bg-white text-gray-900";
+  const sidebarBg = theme === "dark" ? "bg-gray-900/95 border-white/10 text-white" : "bg-white/95 border-gray-200 text-gray-900";
+  const itemBg = theme === "dark" ? "bg-white/5 hover:bg-white/10 border-white/10" : "bg-gray-50 hover:bg-gray-100 border-gray-200";
+  const itemActive = "border-[#00B39D] bg-[#00B39D]/10";
+  const mutedText = theme === "dark" ? "text-white/60" : "text-gray-600";
+  const subtleText = theme === "dark" ? "text-white/40" : "text-gray-500";
+
+  const totalSemCoord = filtered.length - withCoords.length;
+
+  return (
+    <div className={cn("relative flex h-full w-full overflow-hidden", themeBg, className)}>
+      {             }
+      <aside
+        className={cn(
+          "relative z-30 flex flex-col min-h-0 shrink-0 border-r transition-all duration-300 ease-out",
+          sidebarBg,
+
+
+          sidebarOpen ? "w-[85vw] max-w-[320px]" : "w-0",
+        )}
+      >
+        {sidebarOpen && (
+          <>
+            <div className="p-4 border-b border-inherit space-y-3 shrink-0">
+              <div className="flex items-center justify-between">
+                <h3 className="text-sm font-bold uppercase tracking-wider opacity-80">
+                  Grupos no mapa
+                </h3>
+                <span className={cn("text-xs", subtleText)}>
+                  {withCoords.length}/{filtered.length}
+                </span>
+              </div>
+
+              <div className="relative">
+                <Search className={cn("absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5", subtleText)} />
+                <input
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                  placeholder="Buscar grupo, líder, local..."
+                  className={cn(
+                    "w-full pl-8 pr-3 py-2 rounded-md text-sm outline-none border",
+                    theme === "dark"
+                      ? "bg-white/5 border-white/10 placeholder:text-white/30"
+                      : "bg-white border-gray-200 placeholder:text-gray-400 focus:border-[#00B39D]"
+                  )}
+                />
+              </div>
+
+              {categories.length > 0 && (
+                <div className="flex flex-wrap gap-1.5">
+                  <button
+                    onClick={() => setFilterCat("")}
+                    className={cn(
+                      "px-2.5 py-1 rounded-full text-xs transition-colors",
+                      !filterCat
+                        ? "bg-[#00B39D] text-white"
+                        : theme === "dark"
+                        ? "bg-white/10 text-white/60 hover:bg-white/15"
+                        : "bg-gray-100 text-gray-600 hover:bg-gray-200"
+                    )}
+                  >
+                    Todos
+                  </button>
+                  {categories.map((cat) => (
+                    <button
+                      key={cat}
+                      onClick={() => setFilterCat(cat === filterCat ? "" : cat)}
+                      className={cn(
+                        "px-2.5 py-1 rounded-full text-xs transition-colors",
+                        filterCat === cat
+                          ? "bg-[#00B39D] text-white"
+                          : theme === "dark"
+                          ? "bg-white/10 text-white/60 hover:bg-white/15"
+                          : "bg-gray-100 text-gray-600 hover:bg-gray-200"
+                      )}
+                    >
+                      {cat}
+                    </button>
+                  ))}
+                </div>
+              )}
+
+              {
+                                                                           }
+              {bairros.length > 0 && (
+                <div className="hidden sm:flex flex-wrap gap-1.5">
+                  <span className={cn("px-2 py-1 text-[10px] uppercase tracking-wide self-center", theme === "dark" ? "text-white/40" : "text-gray-400")}>Bairro:</span>
+                  <button
+                    onClick={() => setFilterBairro("")}
+                    className={cn(
+                      "px-2.5 py-1 rounded-full text-xs transition-colors",
+                      !filterBairro
+                        ? "bg-[#00B39D] text-white"
+                        : theme === "dark"
+                        ? "bg-white/10 text-white/60 hover:bg-white/15"
+                        : "bg-gray-100 text-gray-600 hover:bg-gray-200"
+                    )}
+                  >
+                    Todos
+                  </button>
+                  {bairros.map((b) => (
+                    <button
+                      key={b}
+                      onClick={() => setFilterBairro(b === filterBairro ? "" : b)}
+                      className={cn(
+                        "px-2.5 py-1 rounded-full text-xs transition-colors",
+                        filterBairro === b
+                          ? "bg-[#00B39D] text-white"
+                          : theme === "dark"
+                          ? "bg-white/10 text-white/60 hover:bg-white/15"
+                          : "bg-gray-100 text-gray-600 hover:bg-gray-200"
+                      )}
+                    >
+                      {b}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            <div className="flex-1 min-h-0 overflow-y-auto p-3 space-y-2">
+              {filtered.length === 0 && (
+                <div className={cn("text-center text-sm py-12", mutedText)}>
+                  Nenhum grupo encontrado.
+                </div>
+              )}
+              {filtered.map((g) => {
+                const hasCoord = g.lat != null && g.lng != null;
+                const isActive = activeId === g.id;
+                return (
+                  <button
+                    key={g.id}
+                    onClick={() => hasCoord && handleSelectFromList(g)}
+                    disabled={!hasCoord}
+                    className={cn(
+                      "w-full text-left rounded-xl border p-3 transition-all",
+                      hasCoord ? "cursor-pointer hover:scale-[1.01]" : "opacity-50 cursor-not-allowed",
+                      isActive ? itemActive : itemBg,
+                    )}
+                  >
+                    <div className="flex items-start gap-2">
+                      <div className="h-8 w-8 rounded-lg bg-[#00B39D]/20 flex items-center justify-center shrink-0">
+                        <Users className="h-4 w-4 text-[#00B39D]" />
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <p className="text-sm font-semibold truncate">{g.nome}</p>
+                        {liderExibicao(g) && (
+                          <p className={cn("text-xs truncate", mutedText)}>
+                            Líder: {liderExibicao(g)}
+                          </p>
+                        )}
+                        <div className={cn("flex flex-wrap gap-x-2 gap-y-0.5 mt-1 text-[11px]", subtleText)}>
+                          {ehDiario(g) ? (
+                            <span className="flex items-center gap-1">
+                              <Clock className="h-3 w-3" />
+                              Diário
+                              {g.horario ? ` • ${String(g.horario).slice(0, 5)}` : ""}
+                            </span>
+                          ) : g.dia_semana != null && (
+                            <span className="flex items-center gap-1">
+                              <Clock className="h-3 w-3" />
+                              {DIAS_MAP[g.dia_semana]}
+                              {g.horario ? ` • ${String(g.horario).slice(0, 5)}` : ""}
+                            </span>
+                          )}
+                          {g.local && (
+                            <span className="flex items-center gap-1 truncate">
+                              <MapPin className="h-3 w-3" />
+                              <span className="truncate">{g.local}</span>
+                            </span>
+                          )}
+                          {g.dist != null && (
+                            <span className="flex items-center gap-1 text-[#00B39D]">
+                              <NavIcon className="h-3 w-3" />
+                              {fmtDist(g.dist)}
+                            </span>
+                          )}
+                        </div>
+                        {!hasCoord && (
+                          <p className="text-[10px] text-amber-500 mt-1">Sem coordenadas</p>
+                        )}
+                      </div>
+                    </div>
+                  </button>
+                );
+              })}
+              {totalSemCoord > 0 && (
+                <p className={cn("text-[11px] text-center pt-2", subtleText)}>
+                  {totalSemCoord} grupo(s) sem coordenadas
+                </p>
+              )}
+            </div>
+          </>
+        )}
+      </aside>
+
+      {                           }
+      <button
+        onClick={() => setSidebarOpen((v) => !v)}
+        className={cn(
+          "absolute z-40 top-1/2 -translate-y-1/2 h-12 w-6 rounded-r-md flex items-center justify-center shadow-md transition-all",
+          theme === "dark" ? "bg-gray-900/95 text-white border border-l-0 border-white/10" : "bg-white text-gray-900 border border-l-0 border-gray-200",
+        )}
+        style={{ left: sidebarOpen ? "min(85vw, 320px)" : 0 }}
+        aria-label={sidebarOpen ? "Fechar lista" : "Abrir lista"}
+      >
+        {sidebarOpen ? <ChevronLeft className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+      </button>
+
+      {         }
+      <div className="flex-1 relative">
+        <Map
+          theme={theme}
+          center={initialCenter}
+          zoom={memberCoords ? 13 : 12}
+        >
+          <FlyToTarget target={flyTarget} />
+
+          {memberCoords && (
+            <MapMarker longitude={memberCoords.lng} latitude={memberCoords.lat}>
+              <MarkerContent>
+                <MemberPin />
+              </MarkerContent>
+              <MarkerPopup>
+                <p className="text-sm font-semibold">Você está aqui</p>
+              </MarkerPopup>
+            </MapMarker>
+          )}
+
+          {locatedCoords && (
+            <MapMarker longitude={locatedCoords.lng} latitude={locatedCoords.lat}>
+              <MarkerContent>
+                <MemberPin />
+              </MarkerContent>
+              <MarkerPopup>
+                <p className="text-sm font-semibold">Você está aqui</p>
+              </MarkerPopup>
+            </MapMarker>
+          )}
+
+          {withCoords.map((g) => (
+            <MapMarker
+              key={g.id}
+              longitude={g.lng!}
+              latitude={g.lat!}
+              onClick={() => { setActiveId(g.id); onPinClick?.(origPorId[g.id] ?? g); }}
+            >
+              <MarkerContent>
+                <GroupPin active={activeId === g.id} />
+              </MarkerContent>
+              {
+                                                              }
+              {!isMobile && (
+                <MarkerPopup>
+                  <GrupoInfo
+                    g={infoDoPino(g)}
+                    onGroupSelect={onGroupSelect}
+                    onGroupSelectLabel={onGroupSelectLabel}
+                    mostrarBotaoInscricao={mostrarBotaoInscricao}
+                    temporadasMap={temporadasMap}
+                  />
+                </MarkerPopup>
+              )}
+            </MapMarker>
+          ))}
+
+          {
+
+                                                             }
+          {isMobile && (() => {
+            const pino = withCoords.find((g) => g.id === activeId);
+            if (!pino) return null;
+            const ativo = infoDoPino(pino);
+            return (
+              <div
+                className={cn(
+                  "absolute bottom-3 left-3 right-3 z-30 rounded-xl p-3 shadow-xl border max-h-[52%] flex flex-col",
+                  theme === "dark" ? "bg-gray-900/95 border-white/10 text-white" : "bg-white/95 border-gray-200 text-gray-900"
+                )}
+              >
+                <button
+                  onClick={() => setActiveId(null)}
+                  className={cn(
+                    "absolute top-2 right-2 h-7 w-7 rounded-md flex items-center justify-center z-10",
+                    theme === "dark" ? "text-white/60 hover:bg-white/10" : "text-gray-500 hover:bg-gray-100"
+                  )}
+                  aria-label="Fechar"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+                <div className="flex-1 min-h-0 overflow-y-auto pr-8">
+                  <GrupoInfo g={ativo} comAcao={false} />
+                </div>
+                <div className="pt-2 shrink-0">
+                  <GrupoAcao
+                    g={ativo}
+                    onGroupSelect={onGroupSelect}
+                    onGroupSelectLabel={onGroupSelectLabel}
+                    mostrarBotaoInscricao={mostrarBotaoInscricao}
+                    temporadasMap={temporadasMap}
+                  />
+                </div>
+              </div>
+            );
+          })()}
+
+          <MapControls
+            position="bottom-right"
+            showZoom
+            showLocate
+            showFullscreen={isKiosk}
+            onLocate={(c) => setLocatedCoords({ lat: c.latitude, lng: c.longitude })}
+          />
+
+
+          {                  }
+          <button
+            onClick={() => setTheme((t) => (t === "dark" ? "light" : "dark"))}
+            className={cn(
+              "absolute top-3 right-3 z-20 h-9 w-9 rounded-lg shadow-lg border flex items-center justify-center transition-colors",
+              theme === "dark"
+                ? "bg-gray-900/95 border-white/10 text-white hover:bg-[#00B39D]/15 hover:text-[#00B39D]"
+                : "bg-white/95 border-gray-200 text-gray-900 hover:bg-[#00B39D]/15 hover:text-[#00B39D]"
+            )}
+            aria-label={theme === "dark" ? "Modo claro" : "Modo escuro"}
+            title={theme === "dark" ? "Modo claro" : "Modo escuro"}
+          >
+            {theme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
+          </button>
+
+          {                   }
+          <div
+            className={cn(
+              "absolute top-3 left-3 z-20 px-3 py-1.5 rounded-lg text-xs font-medium shadow-lg border",
+              theme === "dark"
+                ? "bg-gray-900/95 border-white/10 text-white"
+                : "bg-white/95 border-gray-200 text-gray-900"
+            )}
+          >
+            <span className="text-[#00B39D] font-bold">{withCoords.length}</span>
+            <span className="opacity-60"> grupo(s) no mapa</span>
+          </div>
+        </Map>
+      </div>
+    </div>
+  );
+}
+
+
+
+
+function GrupoInfo({
+  g,
+  onGroupSelect,
+  onGroupSelectLabel,
+  mostrarBotaoInscricao,
+  temporadasMap,
+  comAcao = true,
+}: {
+  g: any;
+  onGroupSelect?: (g: any) => void;
+  onGroupSelectLabel?: string;
+  mostrarBotaoInscricao?: boolean;
+  temporadasMap?: Record<string, { inscricoes_abertas?: boolean }>;
+  comAcao?: boolean;
+}) {
+  return (
+    <div className="min-w-[240px] max-w-[300px] space-y-2">
+      {                                                                        }
+      <div className="pr-5">
+        <p className="text-[13px] font-bold leading-snug text-foreground">{g.nome}</p>
+        {(g.categoria || g.codigo) && (
+          <div className="flex items-center gap-2 mt-1">
+            {g.categoria && (
+              <span className="inline-block text-[10px] font-semibold uppercase tracking-wide text-[#00B39D] bg-[#00B39D]/10 rounded px-1.5 py-0.5">
+                {g.categoria}
+              </span>
+            )}
+            {g.codigo && <code className="text-[10px] text-muted-foreground font-mono">#{g.codigo}</code>}
+          </div>
+        )}
+      </div>
+      {liderExibicao(g) && (
+        <p className="text-xs text-muted-foreground">
+          Líder: <span className="text-foreground font-medium">{liderExibicao(g)}</span>
+        </p>
+      )}
+      <div className="flex flex-wrap gap-x-2 gap-y-1 text-xs text-muted-foreground">
+        {ehDiario(g) ? (
+          <span className="flex items-center gap-1">
+            <Clock className="h-3 w-3" />
+            Diário
+            {g.horario ? ` • ${String(g.horario).slice(0, 5)}` : ""}
+          </span>
+        ) : g.dia_semana != null && (
+          <span className="flex items-center gap-1">
+            <Clock className="h-3 w-3" />
+            {DIAS_MAP[g.dia_semana]}
+            {g.horario ? ` • ${String(g.horario).slice(0, 5)}` : ""}
+          </span>
+        )}
+        {g.bairro && (
+          <span className="flex items-center gap-1">
+            <MapPin className="h-3 w-3" />
+            {g.bairro}
+          </span>
+        )}
+      </div>
+      {g.endereco_publico && (
+        <p className="text-xs text-muted-foreground">{g.endereco_publico}</p>
+      )}
+      {g.local && (
+        <p className="text-xs text-muted-foreground">
+          {g.local}{g.complemento ? ` — ${g.complemento}` : ''}
+        </p>
+      )}
+      {g.descricao && (
+        <p className="text-xs text-muted-foreground line-clamp-3">{g.descricao}</p>
+      )}
+      {
+                                                                  }
+      {g.pinoAproximado && (
+        <p className="text-[11px] text-amber-600 dark:text-amber-400">
+          Localização aproximada — confirme o endereço com o líder.
+        </p>
+      )}
+      {g.dist != null && (
+        <p className="text-xs text-[#00B39D] font-medium">
+          {fmtDist(g.dist)} de você
+        </p>
+      )}
+      {(g.lat != null && g.lng != null) && (
+        <AbrirRotaMenu
+          lat={g.lat} lng={g.lng}
+          endereco={[g.endereco_publico || g.local, g.bairro, "Rio de Janeiro"].filter(Boolean).join(", ")}
+          className="inline-flex items-center gap-1 mt-1 text-xs font-medium text-[#00B39D] hover:underline"
+        >
+          <NavIcon className="h-3 w-3" /> Como chegar
+        </AbrirRotaMenu>
+      )}
+      {comAcao && (
+        <GrupoAcao
+          g={g}
+          onGroupSelect={onGroupSelect}
+          onGroupSelectLabel={onGroupSelectLabel}
+          mostrarBotaoInscricao={mostrarBotaoInscricao}
+          temporadasMap={temporadasMap}
+        />
+      )}
+    </div>
+  );
+}
+
+
+
+function GrupoAcao({
+  g,
+  onGroupSelect,
+  onGroupSelectLabel,
+  mostrarBotaoInscricao,
+  temporadasMap,
+}: {
+  g: any;
+  onGroupSelect?: (g: any) => void;
+  onGroupSelectLabel?: string;
+  mostrarBotaoInscricao?: boolean;
+  temporadasMap?: Record<string, { inscricoes_abertas?: boolean }>;
+}) {
+  if (onGroupSelect) {
+    return (
+      <Button
+        onClick={() => onGroupSelect(g)}
+        size="sm"
+        className="w-full mt-1 bg-[#00B39D] hover:bg-[#00B39D]/90 text-white"
+      >
+        {onGroupSelectLabel}
+      </Button>
+    );
+  }
+  if (mostrarBotaoInscricao) {
+    const t = g.temporada && temporadasMap ? temporadasMap[g.temporada] : undefined;
+    const aberta = t ? t.inscricoes_abertas : false;
+    if (aberta) {
+      return (
+        <a
+          href={`/inscricao-grupos?grupo=${g.id}`}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="block w-full mt-1 text-center px-3 py-1.5 rounded-md bg-[#00B39D] hover:bg-[#00B39D]/90 text-white text-sm font-semibold"
+        >
+          Inscrever-se neste grupo
+        </a>
+      );
+    }
+    return (
+      <div className="mt-1 px-3 py-2 rounded-md bg-amber-100 dark:bg-amber-500/15 text-amber-800 dark:text-amber-300 text-xs text-center">
+        Inscrições fechadas. Aguarde a próxima abertura.
+      </div>
+    );
+  }
+  return null;
+}
+
+export default GruposMapView;

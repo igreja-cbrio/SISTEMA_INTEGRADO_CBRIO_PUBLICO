@@ -1,0 +1,309 @@
+const router = require('express').Router();
+const { authenticate, authorize } = require('../middleware/auth');
+const { supabase } = require('../utils/supabase');
+const { gerarTodasNotificacoes } = require('../services/notificacaoGenerator');
+
+
+router.get('/cron', async (req, res) => {
+  const cronSecret = process.env.CRON_SECRET;
+  if (!cronSecret) {
+    return res.status(500).json({ error: 'CRON_SECRET não configurado' });
+  }
+  const provided = req.headers.authorization || '';
+  const expected = `Bearer ${cronSecret}`;
+  if (provided.length !== expected.length ||
+      !require('crypto').timingSafeEqual(Buffer.from(provided), Buffer.from(expected))) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  try {
+    const total = await gerarTodasNotificacoes();
+
+
+
+
+
+
+
+
+    let fichaContratada = null;
+    try {
+      const { cobrancaDiariaFichaContratada } = require('./rh');
+      fichaContratada = await cobrancaDiariaFichaContratada();
+    } catch (err) {
+      console.error('[Cron] cobrança da ficha da contratada:', err.message);
+      fichaContratada = { erro: err.message };
+    }
+
+
+    let aval360 = null;
+    try {
+      const { lembretesDoDia } = require('./avaliacao360');
+      aval360 = await lembretesDoDia();
+    } catch (err) {
+      console.error('[Cron] lembretes da avaliação 360:', err.message);
+      aval360 = { erro: err.message };
+    }
+
+
+
+    let temasAssistente = null;
+    try {
+      const { expurgarTemasAntigos } = require('../services/assistenteTemas');
+      temasAssistente = await expurgarTemasAntigos();
+    } catch (err) {
+      console.error('[Cron] retenção dos temas do assistente:', err.message);
+      temasAssistente = { erro: err.message };
+    }
+
+    res.json({ success: true, geradas: total, ficha_contratada: fichaContratada, avaliacao360: aval360, temas_assistente: temasAssistente });
+  } catch (e) {
+    console.error('[Cron] Erro:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+
+
+router.get('/cron/alerta-culto-dados', async (req, res) => {
+  const cronSecret = process.env.CRON_SECRET;
+  if (!cronSecret) return res.status(500).json({ error: 'CRON_SECRET não configurado' });
+  const provided = req.headers.authorization || '';
+  const expected = `Bearer ${cronSecret}`;
+  if (provided.length !== expected.length ||
+      !require('crypto').timingSafeEqual(Buffer.from(provided), Buffer.from(expected))) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  try {
+    const { enviarAlertaCultoSemDados } = require('../services/alertaCulto');
+    const r = await enviarAlertaCultoSemDados();
+    res.json({ success: true, ...r });
+  } catch (e) {
+    console.error('[Cron alerta-culto]', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+router.use(authenticate);
+
+
+router.post('/alerta-culto/testar', authorize('admin', 'diretor'), async (req, res) => {
+  try {
+    const { enviarAlertaCultoSemDados, apurarCultosPendentes } = require('../services/alertaCulto');
+    if (req.query.dry === '1') return res.json({ pendentes: await apurarCultosPendentes() });
+    const r = await enviarAlertaCultoSemDados();
+    res.json(r);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+
+router.get('/', async (req, res) => {
+  try {
+
+
+
+
+
+    let query = supabase
+      .from('notificacoes')
+      .select('*')
+      .eq('usuario_id', req.user.userId)
+      .order('lida', { ascending: true })
+      .order('created_at', { ascending: false })
+      .limit(100);
+
+    if (req.query.modulo) query = query.eq('modulo', req.query.modulo);
+    if (req.query.severidade) query = query.eq('severidade', req.query.severidade);
+
+    const { data, error } = await query;
+    if (error) return res.status(400).json({ error: error.message });
+    res.json(data);
+  } catch (e) {
+    res.status(500).json({ error: 'Erro ao buscar notificações' });
+  }
+});
+
+
+router.get('/count', async (req, res) => {
+  try {
+    const { count, error } = await supabase
+      .from('notificacoes')
+      .select('id', { count: 'exact', head: true })
+      .eq('usuario_id', req.user.userId)
+      .eq('lida', false);
+    if (error) return res.status(400).json({ error: error.message });
+    res.json({ count: count || 0 });
+  } catch (e) {
+    res.status(500).json({ error: 'Erro ao contar notificações' });
+  }
+});
+
+
+
+router.post('/_test', authorize('admin', 'diretor'), async (req, res) => {
+  try {
+    const { error, data } = await supabase.from('notificacoes').insert({
+      usuario_id: req.user.userId,
+      titulo: 'Teste de notificação',
+      mensagem: `Disparado em ${new Date().toLocaleString('pt-BR')} por ${req.user.email}. Se você está vendo isso, o sino funciona.`,
+      tipo: 'teste',
+      modulo: 'sistema',
+      severidade: 'info',
+      lida: false,
+    }).select().single();
+    if (error) {
+      console.error('[notif _test] erro insert:', error.message);
+      return res.status(500).json({ error: error.message });
+    }
+    res.json({ success: true, notificacaoId: data.id, usuarioId: req.user.userId });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+
+router.post('/gerar', authorize('admin', 'diretor'), async (req, res) => {
+  try {
+    const total = await gerarTodasNotificacoes();
+    res.json({ success: true, geradas: total });
+  } catch (e) {
+    console.error('[Notificações] Erro ao gerar:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+
+router.patch('/:id/ler', async (req, res) => {
+  try {
+    const { error } = await supabase
+      .from('notificacoes')
+      .update({ lida: true })
+      .eq('id', req.params.id)
+      .eq('usuario_id', req.user.userId);
+    if (error) return res.status(400).json({ error: error.message });
+    res.json({ success: true });
+  } catch (e) {
+    res.status(500).json({ error: 'Erro ao marcar notificação' });
+  }
+});
+
+
+router.patch('/ler-todas', async (req, res) => {
+  try {
+    const { error } = await supabase
+      .from('notificacoes')
+      .update({ lida: true })
+      .eq('usuario_id', req.user.userId)
+      .eq('lida', false);
+    if (error) return res.status(400).json({ error: error.message });
+    res.json({ success: true });
+  } catch (e) {
+    res.status(500).json({ error: 'Erro ao marcar notificações' });
+  }
+});
+
+
+
+
+router.get('/regras', authorize('admin', 'diretor'), async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from('notificacao_regras')
+      .select('*, profiles(name, email)')
+      .order('modulo');
+    if (error) return res.status(400).json({ error: error.message });
+    res.json(data);
+  } catch (e) {
+    res.status(500).json({ error: 'Erro ao buscar regras' });
+  }
+});
+
+
+router.post('/regras', authorize('admin', 'diretor'), async (req, res) => {
+  try {
+    const { modulo, profile_id } = req.body;
+
+
+
+    const tipo = String(req.body?.tipo || '').trim() || null;
+    const { data, error } = await supabase
+      .from('notificacao_regras')
+
+
+
+
+      .upsert({ modulo, tipo, profile_id, ativo: true }, { onConflict: 'modulo,tipo,profile_id' })
+      .select()
+      .single();
+    if (error) return res.status(400).json({ error: error.message });
+    res.json(data);
+  } catch (e) {
+    res.status(500).json({ error: 'Erro ao criar regra' });
+  }
+});
+
+
+router.delete('/regras/:id', authorize('admin', 'diretor'), async (req, res) => {
+  try {
+    const { error } = await supabase
+      .from('notificacao_regras')
+      .delete()
+      .eq('id', req.params.id);
+    if (error) return res.status(400).json({ error: error.message });
+    res.json({ success: true });
+  } catch (e) {
+    res.status(500).json({ error: 'Erro ao remover regra' });
+  }
+});
+
+
+const webpushService = require('../services/webpush');
+
+
+
+
+router.get('/push/vapid-key', (req, res) => {
+  const key = webpushService.getVapidPublicKey();
+  if (!key) return res.status(204).end();
+  res.json({ key });
+});
+
+
+router.post('/push/subscribe', async (req, res) => {
+  try {
+    const { endpoint, keys } = req.body || {};
+    if (!endpoint || !keys?.p256dh || !keys?.auth) {
+      return res.status(400).json({ error: 'subscription invalida' });
+    }
+    const userAgent = (req.headers['user-agent'] || '').slice(0, 500);
+    const { error } = await supabase.from('push_subscriptions').upsert({
+      auth_user_id: req.user.userId,
+      endpoint,
+      p256dh: keys.p256dh,
+      auth: keys.auth,
+      user_agent: userAgent,
+      last_used_at: new Date().toISOString(),
+    }, { onConflict: 'endpoint' });
+    if (error) return res.status(400).json({ error: error.message });
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('[push subscribe]', e.message);
+    res.status(500).json({ error: 'Erro ao registrar subscription' });
+  }
+});
+
+
+router.post('/push/unsubscribe', async (req, res) => {
+  try {
+    const { endpoint } = req.body || {};
+    if (!endpoint) return res.status(400).json({ error: 'endpoint obrigatorio' });
+    await supabase.from('push_subscriptions')
+      .delete().eq('endpoint', endpoint).eq('auth_user_id', req.user.userId);
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: 'Erro ao remover subscription' });
+  }
+});
+
+module.exports = router;

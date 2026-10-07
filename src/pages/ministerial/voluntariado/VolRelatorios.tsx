@@ -1,0 +1,675 @@
+import { useState, useMemo } from 'react';
+import { Card, CardContent } from '@/components/ui/card';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { Button } from '@/components/ui/button';
+import { Badge } from '@/components/ui/badge';
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import PeriodFilter from './components/reports/PeriodFilter';
+import { ehAno, anoDe } from '@/lib/janelaPeriodo';
+import VolunteerThermometer from './components/reports/VolunteerThermometer';
+import { useVolReportData, useVolunteerThermometer, useInactiveVolunteers } from './hooks';
+import { useVolTeams } from './hooks';
+import { UserX, Flame, BarChart3, Calendar, CheckCircle2, TrendingUp, Users, Printer, AlertTriangle, Filter, Clock, ChevronRight, XCircle, UserPlus } from 'lucide-react';
+import { format } from 'date-fns';
+import { ptBR } from 'date-fns/locale';
+import { ciMatchesSched, dateOfSP, normName, blocoDoServico } from './volMatch';
+
+
+
+
+const schedPersonKey = (s: any) =>
+  s.planning_center_person_id || s.volunteer_id || normName(s.volunteer_name) || s.id;
+
+function dedupePorPessoa(scheds: any[]): any[] {
+  const map = new Map<string, any>();
+  for (const s of scheds) {
+    const k = schedPersonKey(s);
+    const ex = map.get(k);
+    if (!ex) {
+      map.set(k, { ...s, _equipes: [s.team_name].filter(Boolean) });
+    } else if (s.team_name && !ex._equipes.includes(s.team_name)) {
+      ex._equipes.push(s.team_name);
+    }
+  }
+  return [...map.values()];
+}
+
+
+const ciTemIdentidade = (c: any) =>
+  !!(c.volunteer?.full_name || c.schedule?.volunteer_name || c.volunteer_name);
+
+const METHOD_LABELS: Record<string, string> = {
+  qr_code: 'QR',
+  manual: 'Manual',
+  facial: 'Facial',
+  self_service: 'Self',
+};
+
+export default function VolRelatorios() {
+  const [period, setPeriod] = useState('week');
+  const [teamFilter, setTeamFilter] = useState('__all__');
+  const [inactiveMode, setInactiveMode] = useState<'checkin' | 'schedule'>('checkin');
+  const [openKey, setOpenKey] = useState<string | null>(null);
+  const [printOpen, setPrintOpen] = useState(false);
+  const teamFilterValue = teamFilter === '__all__' ? undefined : teamFilter;
+  const { data: reportData } = useVolReportData(period as any);
+  const { data: thermometerData = [] } = useVolunteerThermometer(period as any, teamFilterValue);
+  const { data: inactiveByCheckin = [] } = useInactiveVolunteers(period, teamFilterValue, 'checkin');
+  const { data: inactiveBySchedule = [] } = useInactiveVolunteers(period, teamFilterValue, 'schedule');
+  const { data: teams = [] } = useVolTeams();
+  const inactiveData = inactiveMode === 'checkin' ? inactiveByCheckin : inactiveBySchedule;
+
+
+
+  const svcDateById = useMemo(() => {
+    const m = new Map<string, string | null>();
+    for (const s of reportData?.services || []) m.set(s.id, dateOfSP(s.scheduled_at));
+    return m;
+  }, [reportData]);
+
+
+
+  const isRealmenteSemEscala = useMemo(() => {
+    const schedules = reportData?.schedules || [];
+    return (ci: import('./types').VolCheckIn) => {
+      const ciDate = (ci.service_id ? svcDateById.get(ci.service_id) : null) ?? dateOfSP(ci.service?.scheduled_at);
+      return !schedules.some(sch => ciMatchesSched(ci, sch) && svcDateById.get(sch.service_id) === ciDate);
+    };
+  }, [reportData, svcDateById]);
+
+
+  const overviewStats = useMemo(() => {
+    if (!reportData) return { rate: 0, uniqueVol: 0, totalServices: 0, unscheduledCount: 0 };
+    const scheduled = reportData.schedules.length;
+    const checkedIn = reportData.checkIns.length;
+    const rate = scheduled > 0 ? Math.round((checkedIn / scheduled) * 100) : 0;
+    const uniqueVol = new Set(reportData.schedules.map(s => s.planning_center_person_id)).size;
+    const unscheduledCount = reportData.checkIns.filter(isRealmenteSemEscala).length;
+    return { rate, uniqueVol, totalServices: reportData.services.length, unscheduledCount };
+  }, [reportData, isRealmenteSemEscala]);
+
+
+  const unscheduledCheckIns = useMemo(() => {
+    if (!reportData) return [];
+    return reportData.checkIns
+      .filter(isRealmenteSemEscala)
+      .filter(ciTemIdentidade)
+      .sort((a, b) => new Date(b.checked_in_at).getTime() - new Date(a.checked_in_at).getTime())
+      .map(ci => {
+        const svc = reportData.services.find(s => s.id === ci.service_id);
+        return { ...ci, serviceName: svc?.name || 'Desconhecido' };
+      });
+  }, [reportData, isRealmenteSemEscala]);
+
+  const unscheduledAnonimos = useMemo(() => {
+    if (!reportData) return 0;
+    return reportData.checkIns.filter(isRealmenteSemEscala).filter(c => !ciTemIdentidade(c)).length;
+  }, [reportData, isRealmenteSemEscala]);
+
+
+  const weeklyStats = useMemo(() => {
+    if (!reportData) return { scheduled: 0, checkedIn: 0, rate: 0, uniqueVol: 0 };
+    const scheduled = reportData.schedules.length;
+    const checkedIn = reportData.checkIns.length;
+    const rate = scheduled > 0 ? Math.round((checkedIn / scheduled) * 100) : 0;
+    const uniqueVol = new Set(reportData.schedules.map(s => s.planning_center_person_id)).size;
+    return { scheduled, checkedIn, rate, uniqueVol };
+  }, [reportData]);
+
+
+
+  const ciIdentity = (c: any) =>
+    c.volunteer?.planning_center_id || c.volunteer_id ||
+    normName(c.volunteer?.full_name || c.schedule?.volunteer_name || c.volunteer_name);
+
+
+
+
+
+
+
+
+
+
+  const turnoBreakdown = useMemo(() => {
+    if (!reportData) return [];
+    const grupos = new Map<string, any>();
+    for (const svc of reportData.services) {
+      const bloco = blocoDoServico(svc.name);
+      const dia = dateOfSP(svc.scheduled_at);
+      const key = bloco ? `${bloco}|${dia}` : `svc:${svc.id}`;
+      let g = grupos.get(key);
+      if (!g) { g = { key, name: bloco || svc.name, bloco, scheduled_at: svc.scheduled_at, services: [] as any[] }; grupos.set(key, g); }
+      g.services.push(svc);
+
+      if (new Date(svc.scheduled_at).getTime() < new Date(g.scheduled_at).getTime()) g.scheduled_at = svc.scheduled_at;
+    }
+
+    return [...grupos.values()]
+      .map(g => {
+        const svcIds = new Set(g.services.map((s: any) => s.id));
+
+        const scheds = dedupePorPessoa(reportData.schedules.filter(s => svcIds.has(s.service_id)));
+        const checks = reportData.checkIns.filter(c => c.service_id && svcIds.has(c.service_id));
+        const total = scheds.length;
+        const present = scheds.filter(sch => checks.some(c => ciMatchesSched(c, sch))).length;
+        const rate = total > 0 ? Math.round((present / total) * 100) : 0;
+
+        const serviram = new Set(checks.filter(ciTemIdentidade).map(ciIdentity)).size;
+        const anonimos = checks.filter(c => !ciTemIdentidade(c) && isRealmenteSemEscala(c)).length;
+
+        const porCulto = g.services
+          .map((s: any) => ({
+            id: s.id,
+            name: s.name,
+            scheduled_at: s.scheduled_at,
+            serviram: new Set(checks.filter(c => c.service_id === s.id && ciTemIdentidade(c)).map(ciIdentity)).size,
+          }))
+          .filter((c: any) => c.serviram > 0)
+          .sort((a: any, b: any) => new Date(a.scheduled_at).getTime() - new Date(b.scheduled_at).getTime());
+        return { ...g, scheds, checks, total, present, rate, serviram, anonimos, porCulto };
+      })
+      .filter(r => r.total > 0 || r.serviram > 0 || r.anonimos > 0)
+      .sort((a, b) => new Date(b.scheduled_at).getTime() - new Date(a.scheduled_at).getTime());
+  }, [reportData, isRealmenteSemEscala]);
+
+
+
+
+  const turnoDetail = useMemo(() => {
+    if (!openKey || !reportData) return null;
+    const row = turnoBreakdown.find(r => r.key === openKey);
+    if (!row) return null;
+    const scheds = row.scheds;
+    const checks = row.checks;
+
+    const present: any[] = [];
+    const absent: any[] = [];
+    for (const s of scheds) {
+      (checks.some((c: any) => ciMatchesSched(c, s)) ? present : absent).push(s);
+    }
+
+
+
+    const extrasTodos = checks.filter((c: any) => !scheds.some((s: any) => ciMatchesSched(c, s)) && isRealmenteSemEscala(c));
+    const extras = extrasTodos.filter(ciTemIdentidade);
+    const extrasAnonimos = extrasTodos.length - extras.length;
+
+    return { row, present, absent, extras, extrasAnonimos };
+  }, [openKey, reportData, turnoBreakdown, isRealmenteSemEscala]);
+
+
+  const imprimirCulto = (row: any) => {
+    if (!reportData) return;
+    const scheds = row.scheds as any[];
+    const checks = row.checks as any[];
+    const present = scheds.filter(s => checks.some(c => ciMatchesSched(c, s)));
+    const absent = scheds.filter(s => !checks.some(c => ciMatchesSched(c, s)));
+    const extrasTodos = checks.filter(c => !scheds.some(s => ciMatchesSched(c, s)) && isRealmenteSemEscala(c));
+    const extras = extrasTodos.filter(ciTemIdentidade);
+    const extrasAnon = extrasTodos.length - extras.length;
+    const esc = (t: string) => (t || '').replace(/[<>&]/g, m => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[m] as string));
+    const nomeSched = (s: any) => esc(s.volunteer_name || s.volunteer?.full_name || 'Voluntário');
+    const nomeCi = (c: any) => esc(c.volunteer?.full_name || c.schedule?.volunteer_name || c.volunteer_name || 'Voluntário');
+    const equipe = (s: any) => s.team_name ? ` <span style="color:#888">· ${esc(s.team_name)}${s.position_name ? ' / ' + esc(s.position_name) : ''}</span>` : '';
+    const dt = (() => { try { return new Date(row.scheduled_at).toLocaleString('pt-BR', { dateStyle: 'full', timeStyle: 'short' }); } catch { return ''; } })();
+    const liS = (arr: any[]) => arr.length ? arr.map(s => `<li>${nomeSched(s)}${equipe(s)}</li>`).join('') : '<li style="color:#999">—</li>';
+    const liC = (arr: any[]) => arr.length ? arr.map(c => `<li>${nomeCi(c)}</li>`).join('') : '<li style="color:#999">—</li>';
+    const porCulto = (row.porCulto as any[]).length > 1
+      ? `<h2>Por culto</h2><ul>${(row.porCulto as any[]).map(c => `<li>${esc(c.name)}: <b>${c.serviram}</b> serviram</li>`).join('')}</ul>`
+      : '';
+    const html = `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><title>Chamada · ${esc(row.name)}</title>
+<style>body{font-family:system-ui,-apple-system,Arial,sans-serif;padding:28px;color:#111;max-width:760px;margin:0 auto}
+h1{font-size:20px;margin:0 0 2px} .meta{color:#555;font-size:13px;margin-bottom:14px}
+h2{font-size:14px;margin:20px 0 6px;border-bottom:1px solid #ddd;padding-bottom:4px}
+ul{margin:0;padding-left:20px} li{margin:3px 0;font-size:14px}
+.stats{font-size:13px;color:#333;background:#f4f4f5;padding:8px 12px;border-radius:8px;display:inline-block}
+@media print{button{display:none}}</style></head><body>
+<h1>${esc(row.name)}</h1>
+<div class="meta">${dt}</div>
+<div class="stats">Serviram: <b>${row.serviram}</b> · Escalados: <b>${scheds.length}</b> · Presentes: <b>${present.length}</b> · Faltaram: <b>${absent.length}</b> · Sem escala: <b>${extras.length}</b></div>
+${porCulto}
+<h2>✓ Presentes (${present.length})</h2><ul>${liS(present)}</ul>
+<h2>✗ Faltaram (${absent.length})</h2><ul>${liS(absent)}</ul>
+<h2>Check-in sem escala (${extras.length}${extrasAnon ? ` + ${extrasAnon} sem identificação` : ''})</h2><ul>${liC(extras)}${extrasAnon ? `<li style="color:#999">${extrasAnon} check-in(s) sem identificação</li>` : ''}</ul>
+<script>window.onload=function(){setTimeout(function(){window.print();},150);}</script>
+</body></html>`;
+    const w = window.open('', '_blank', 'width=820,height=920');
+    if (w) { w.document.write(html); w.document.close(); }
+    else {                       alert('Permita pop-ups para imprimir.'); }
+  };
+
+  return (
+    <div className="space-y-6">
+      {                                                         }
+      <Dialog open={printOpen} onOpenChange={setPrintOpen}>
+        <DialogContent className="max-w-md">
+          <DialogHeader><DialogTitle>Imprimir chamada de qual culto?</DialogTitle></DialogHeader>
+          <div className="space-y-1.5 max-h-[60vh] overflow-y-auto -mx-1 px-1">
+            {turnoBreakdown.length === 0 && (
+              <p className="text-sm text-muted-foreground py-4 text-center">Nenhum culto com escala/check-in no período.</p>
+            )}
+            {turnoBreakdown.map(row => (
+              <button
+                key={row.key}
+                onClick={() => { imprimirCulto(row); setPrintOpen(false); }}
+                className="w-full flex items-center justify-between gap-2 rounded-lg border bg-card px-3 py-2 text-left hover:bg-accent transition"
+              >
+                <div className="min-w-0">
+                  <p className="text-sm font-medium truncate">{row.name}</p>
+                  <p className="text-xs text-muted-foreground">
+                    {(() => { try { return new Date(row.scheduled_at).toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'short' }); } catch { return ''; } })()}
+                  </p>
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  <span className="text-xs text-muted-foreground">{row.serviram} serviram</span>
+                  <Printer className="h-4 w-4 text-muted-foreground" />
+                </div>
+              </button>
+            ))}
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {            }
+      <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+        <div>
+          <h1 className="text-xl md:text-2xl font-bold text-foreground">Relatórios</h1>
+          <p className="text-sm text-muted-foreground">Analise de presença</p>
+        </div>
+        <div className="flex gap-2 items-center w-full sm:w-auto">
+          <Button variant="outline" size="sm" className="gap-1 hidden sm:flex" onClick={() => setPrintOpen(true)}>
+            <Printer className="h-4 w-4" /> Imprimir
+          </Button>
+          <Select value={teamFilter} onValueChange={setTeamFilter}>
+            <SelectTrigger className="w-full sm:w-[170px]">
+              <div className="flex items-center gap-1.5">
+                <Filter className="h-3.5 w-3.5" />
+                <SelectValue placeholder="Todas Equipes" />
+              </div>
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="__all__">Todas Equipes</SelectItem>
+              {teams.map(t => <SelectItem key={t} value={t}>{t}</SelectItem>)}
+            </SelectContent>
+          </Select>
+        </div>
+      </div>
+
+      <Tabs defaultValue="weekly">
+        <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2">
+          <div className="w-full sm:w-auto overflow-x-auto scrollbar-hide">
+            <TabsList className="inline-flex w-auto min-w-max">
+              <TabsTrigger value="weekly" className="gap-1 text-xs sm:text-sm"><Calendar className="h-4 w-4 shrink-0" /><span className="hidden sm:inline">Relatório</span> Semanal</TabsTrigger>
+              <TabsTrigger value="overview" className="gap-1 text-xs sm:text-sm"><BarChart3 className="h-4 w-4 shrink-0" /><span className="hidden sm:inline">Visão</span> Geral</TabsTrigger>
+              <TabsTrigger value="inactive" className="gap-1 text-xs sm:text-sm"><UserX className="h-4 w-4 shrink-0" />Inativos</TabsTrigger>
+              <TabsTrigger value="thermometer" className="gap-1 text-xs sm:text-sm"><Flame className="h-4 w-4 shrink-0" />Termometro</TabsTrigger>
+            </TabsList>
+          </div>
+          <PeriodFilter value={period} onChange={setPeriod} />
+        </div>
+
+        {
+
+                                                                          }
+        <TabsContent value="weekly">
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+            <Card><CardContent className="p-4 text-center">
+              <Calendar className="h-5 w-5 mx-auto mb-1 text-muted-foreground" />
+              <p className="text-2xl font-bold">{weeklyStats.scheduled}</p>
+              <p className="text-xs text-muted-foreground">Escalados</p>
+            </CardContent></Card>
+            <Card><CardContent className="p-4 text-center">
+              <CheckCircle2 className="h-5 w-5 mx-auto mb-1 text-green-600" />
+              <p className="text-2xl font-bold">{weeklyStats.checkedIn}</p>
+              <p className="text-xs text-muted-foreground">Check-ins</p>
+            </CardContent></Card>
+            <Card><CardContent className="p-4 text-center">
+              <TrendingUp className="h-5 w-5 mx-auto mb-1 text-blue-600" />
+              <p className="text-2xl font-bold">{weeklyStats.rate}%</p>
+              <p className="text-xs text-muted-foreground">Taxa</p>
+            </CardContent></Card>
+            <Card><CardContent className="p-4 text-center">
+              <Users className="h-5 w-5 mx-auto mb-1 text-purple-600" />
+              <p className="text-2xl font-bold">{weeklyStats.uniqueVol}</p>
+              <p className="text-xs text-muted-foreground">Vol. Únicos</p>
+            </CardContent></Card>
+          </div>
+
+          <Card>
+            <CardContent className="p-4">
+              <h3 className="font-semibold mb-1">Por Turno</h3>
+              <p className="text-xs text-muted-foreground mb-4">
+                Turnos consolidados (mesmos números do Dashboard). "Serviram" = pessoas distintas com check-in no turno; clique pra ver a divisão por culto e a escala.
+              </p>
+              {turnoBreakdown.length === 0 ? (
+                <p className="text-center text-muted-foreground py-8">Nenhum culto no período</p>
+              ) : (
+                <div className="space-y-1">
+                  {turnoBreakdown.map(row => (
+                    <button
+                      key={row.key}
+                      type="button"
+                      onClick={() => setOpenKey(row.key)}
+                      className="w-full flex items-center gap-4 text-left rounded-lg px-2 py-2 -mx-2 hover:bg-accent transition-colors"
+                      title="Ver a divisão por culto, quem fez e quem faltou"
+                    >
+                      <div className="flex-1 min-w-0">
+                        <p className="font-medium text-sm">{row.name}</p>
+                        <p className="text-xs text-muted-foreground">
+                          {format(new Date(row.scheduled_at), "EEEE, dd/MM", { locale: ptBR })}
+                          {row.porCulto.length > 1 && (
+                            <span> · {row.porCulto.map((c: any) => c.serviram).join(' + ')} por culto</span>
+                          )}
+                        </p>
+                      </div>
+                      <div className="flex items-center gap-3 shrink-0">
+                        <div className="text-right">
+                          <p className="text-sm font-semibold">
+                            {row.serviram} serviram
+                            {row.anonimos > 0 && <span className="text-amber-600 dark:text-amber-400 font-normal"> +{row.anonimos}?</span>}
+                          </p>
+                          <p className="text-[11px] text-muted-foreground">escala {row.present}/{row.total}</p>
+                        </div>
+                        <div className="w-32 h-2 bg-muted rounded-full overflow-hidden hidden sm:block">
+                          <div
+                            className={`h-full rounded-full cbrio-bar ${row.rate >= 80 ? 'bg-green-500' : row.rate >= 50 ? 'bg-yellow-500' : 'bg-red-500'}`}
+                            style={{ width: `${Math.min(row.rate, 100)}%` }}
+                          />
+                        </div>
+                        <Badge variant={row.rate >= 80 ? 'default' : 'outline'} className={row.rate >= 80 ? 'bg-green-600 text-white' : ''}>
+                          {row.rate}%
+                        </Badge>
+                        <ChevronRight className="h-4 w-4 text-muted-foreground shrink-0" />
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        {
+
+                                                                          }
+        <TabsContent value="overview">
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+            <Card><CardContent className="p-4 text-center">
+              <TrendingUp className="h-5 w-5 mx-auto mb-1 text-blue-600" />
+              <p className="text-2xl font-bold">{overviewStats.rate}%</p>
+              <p className="text-xs text-muted-foreground">Taxa</p>
+            </CardContent></Card>
+            <Card><CardContent className="p-4 text-center">
+              <Users className="h-5 w-5 mx-auto mb-1 text-purple-600" />
+              <p className="text-2xl font-bold">{overviewStats.uniqueVol}</p>
+              <p className="text-xs text-muted-foreground">Voluntários</p>
+            </CardContent></Card>
+            <Card><CardContent className="p-4 text-center">
+              <Calendar className="h-5 w-5 mx-auto mb-1 text-muted-foreground" />
+              <p className="text-2xl font-bold">{overviewStats.totalServices}</p>
+              <p className="text-xs text-muted-foreground">Cultos</p>
+            </CardContent></Card>
+            <Card><CardContent className="p-4 text-center">
+              <AlertTriangle className="h-5 w-5 mx-auto mb-1 text-yellow-500" />
+              <p className="text-2xl font-bold">{overviewStats.unscheduledCount}</p>
+              <p className="text-xs text-muted-foreground">Sem escala</p>
+            </CardContent></Card>
+          </div>
+
+          {                           }
+          <Card>
+            <CardContent className="p-4">
+              <div className="flex items-center gap-2 mb-4">
+                <AlertTriangle className="h-5 w-5 text-yellow-500" />
+                <h3 className="font-semibold">Check-ins sem Escala</h3>
+              </div>
+              {unscheduledAnonimos > 0 && (
+                <p className="text-xs text-muted-foreground mb-3 rounded-lg border border-dashed px-3 py-2 bg-muted/40">
+                  {unscheduledAnonimos} check-in{unscheduledAnonimos === 1 ? '' : 's'} sem identificação no período (registrados antes do sistema guardar o nome).
+                </p>
+              )}
+              {unscheduledCheckIns.length === 0 ? (
+                <p className="text-center text-muted-foreground py-8">Nenhum check-in identificado sem escala no período</p>
+              ) : (
+                <div className="space-y-2">
+                  {unscheduledCheckIns.map(ci => (
+                    <div key={ci.id} className="flex items-center justify-between p-3 rounded-lg border bg-card">
+                      <div className="min-w-0">
+                        <p className="font-medium text-sm">{ci.volunteer?.full_name || ci.schedule?.volunteer_name || ci.volunteer_name || 'Voluntário não identificado'}</p>
+                        <p className="text-xs text-muted-foreground">{ci.serviceName}</p>
+                      </div>
+                      <div className="flex items-center gap-2 shrink-0">
+                        <span className="text-xs text-muted-foreground">
+                          {format(new Date(ci.checked_in_at), 'dd/MM HH:mm')}
+                        </span>
+                        <Badge variant="outline" className="text-xs">
+                          {METHOD_LABELS[ci.method] || ci.method}
+                        </Badge>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        {
+
+                                                                          }
+        <TabsContent value="thermometer">
+          <VolunteerThermometer data={thermometerData} period={period} />
+        </TabsContent>
+
+        {
+
+                                                                          }
+        <TabsContent value="inactive">
+          {
+
+                                                                              }
+          {ehAno(period) && (
+            <p className="mb-3 rounded-md border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-xs text-muted-foreground">
+              Esta lista <strong className="text-foreground">ignora o filtro de ano</strong> e usa os últimos
+              3 meses: "inativo" é quem parou de servir <strong className="text-foreground">agora</strong>.
+              As outras abas respeitam {anoDe(period)}.
+            </p>
+          )}
+          <div className="flex items-center justify-between mb-4">
+            <div className="flex gap-1 bg-muted rounded-lg p-1">
+              <button
+                onClick={() => setInactiveMode('checkin')}
+                className={`px-3 py-1.5 rounded-md text-sm font-medium transition-colors ${inactiveMode === 'checkin' ? 'bg-card shadow text-foreground' : 'text-muted-foreground hover:text-foreground'}`}
+              >
+                Por Check-in
+              </button>
+              <button
+                onClick={() => setInactiveMode('schedule')}
+                className={`px-3 py-1.5 rounded-md text-sm font-medium transition-colors ${inactiveMode === 'schedule' ? 'bg-card shadow text-foreground' : 'text-muted-foreground hover:text-foreground'}`}
+              >
+                Por Escala
+              </button>
+            </div>
+            <div className="flex items-center gap-2">
+              <UserX className="h-4 w-4 text-muted-foreground" />
+              <span className="text-sm font-medium">{inactiveData.length} inativos</span>
+            </div>
+          </div>
+
+          <Card>
+            <CardContent className="p-4">
+              <div className="flex items-center gap-2 mb-4">
+                <UserX className="h-5 w-5 text-red-500" />
+                <h3 className="font-semibold">
+                  Voluntarios Inativos
+                </h3>
+                <span className="text-sm text-muted-foreground">
+                  ({inactiveMode === 'checkin' ? 'sem check-in' : 'sem escala'})
+                </span>
+              </div>
+              <div className="space-y-2">
+                {inactiveData.map((v: any) => (
+                  <div key={v.planningCenterId} className="flex items-center justify-between p-3 rounded-lg border bg-card">
+                    <div className="min-w-0">
+                      <p className="font-medium">{v.name}</p>
+                      <p className="text-xs text-muted-foreground">
+                        {v.team ? `${v.team} · ` : ''}
+                        {v.lastDate ? `Último: ${new Date(v.lastDate).toLocaleDateString('pt-BR')}` : inactiveMode === 'checkin' ? 'Nunca fez check-in' : 'Nunca foi escalado'}
+                      </p>
+                    </div>
+                    <div className="shrink-0">
+                      {v.monthsInactive ? (
+                        <Badge className="bg-red-500 text-white hover:bg-red-600">
+                          {v.monthsInactive} {v.monthsInactive === 1 ? 'mês' : 'meses'}
+                        </Badge>
+                      ) : (
+                        <Badge variant="outline" className="text-muted-foreground">
+                          Nunca
+                        </Badge>
+                      )}
+                    </div>
+                  </div>
+                ))}
+                {inactiveData.length === 0 && <p className="text-center text-muted-foreground py-8">Nenhum voluntário inativo encontrado</p>}
+              </div>
+            </CardContent>
+          </Card>
+        </TabsContent>
+      </Tabs>
+
+      {                                                                            }
+      <Dialog open={!!openKey} onOpenChange={(o) => !o && setOpenKey(null)}>
+        <DialogContent className="max-w-lg max-h-[85vh] flex flex-col">
+          <DialogHeader>
+            <DialogTitle>{turnoDetail?.row?.name || 'Turno'}</DialogTitle>
+            {turnoDetail?.row && (
+              <p className="text-sm text-muted-foreground">
+                {format(new Date(turnoDetail.row.scheduled_at), "EEEE, dd/MM", { locale: ptBR })}
+              </p>
+            )}
+          </DialogHeader>
+
+          {turnoDetail && (
+            <div className="space-y-5 flex-1 overflow-y-auto min-h-0">
+              {            }
+              <div className="flex flex-wrap gap-2 text-xs">
+                <Badge className="text-white hover:opacity-90" style={{ backgroundColor: '#00B39D' }}>{turnoDetail.row.serviram} serviram</Badge>
+                <Badge className="bg-green-600 text-white hover:bg-green-600">{turnoDetail.present.length} presente(s)</Badge>
+                <Badge variant="outline" className="border-red-300 text-red-600">{turnoDetail.absent.length} faltou(aram)</Badge>
+                {(turnoDetail.extras.length > 0 || turnoDetail.extrasAnonimos > 0) && (
+                  <Badge variant="outline" className="border-yellow-300 text-yellow-700">
+                    {turnoDetail.extras.length + turnoDetail.extrasAnonimos} sem escala
+                  </Badge>
+                )}
+              </div>
+
+              {                                                    }
+              {turnoDetail.row.porCulto.length > 1 && (
+                <div>
+                  <div className="flex items-center gap-2 mb-2">
+                    <BarChart3 className="h-4 w-4 text-muted-foreground" />
+                    <h4 className="text-sm font-semibold">Serviram por culto</h4>
+                  </div>
+                  <div className="space-y-1.5">
+                    {turnoDetail.row.porCulto.map((c: any) => (
+                      <div key={c.id} className="flex items-center justify-between gap-3 p-2 rounded-lg border bg-card">
+                        <p className="text-sm truncate">{c.name}</p>
+                        <span className="text-sm font-semibold shrink-0">{c.serviram}</span>
+                      </div>
+                    ))}
+                  </div>
+                  <p className="text-[11px] text-muted-foreground mt-1.5">
+                    A soma por culto pode passar de {turnoDetail.row.serviram} (o total distinto do turno) porque quem serve em mais de um culto conta em cada um.
+                  </p>
+                </div>
+              )}
+
+              {               }
+              <div>
+                <div className="flex items-center gap-2 mb-2">
+                  <CheckCircle2 className="h-4 w-4 text-green-600" />
+                  <h4 className="text-sm font-semibold">Fizeram check-in</h4>
+                </div>
+                {turnoDetail.present.length === 0 ? (
+                  <p className="text-sm text-muted-foreground">Ninguém escalado fez check-in.</p>
+                ) : (
+                  <div className="space-y-1.5">
+                    {turnoDetail.present.map(s => (
+                      <div key={s.id} className="flex items-center justify-between gap-3 p-2 rounded-lg border bg-card">
+                        <div className="min-w-0">
+                          <p className="text-sm font-medium truncate">{s.volunteer_name}</p>
+                          {(s._equipes?.length || s.position_name) && (
+                            <p className="text-xs text-muted-foreground truncate">
+                              {s._equipes?.join(' · ') || s.team_name}{(s._equipes?.length || s.team_name) && s.position_name ? ' — ' : ''}{s.position_name}
+                            </p>
+                          )}
+                        </div>
+                        <CheckCircle2 className="h-4 w-4 text-green-600 shrink-0" />
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {              }
+              <div>
+                <div className="flex items-center gap-2 mb-2">
+                  <XCircle className="h-4 w-4 text-red-500" />
+                  <h4 className="text-sm font-semibold">Não fizeram check-in</h4>
+                </div>
+                {turnoDetail.absent.length === 0 ? (
+                  <p className="text-sm text-muted-foreground">Todos os escalados fizeram check-in. 🎉</p>
+                ) : (
+                  <div className="space-y-1.5">
+                    {turnoDetail.absent.map(s => (
+                      <div key={s.id} className="flex items-center justify-between gap-3 p-2 rounded-lg border bg-card">
+                        <div className="min-w-0">
+                          <p className="text-sm font-medium truncate">{s.volunteer_name}</p>
+                          {(s._equipes?.length || s.position_name) && (
+                            <p className="text-xs text-muted-foreground truncate">
+                              {s._equipes?.join(' · ') || s.team_name}{(s._equipes?.length || s.team_name) && s.position_name ? ' — ' : ''}{s.position_name}
+                            </p>
+                          )}
+                        </div>
+                        <span className="text-xs text-red-500 shrink-0">faltou</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {                }
+              {(turnoDetail.extras.length > 0 || turnoDetail.extrasAnonimos > 0) && (
+                <div>
+                  <div className="flex items-center gap-2 mb-2">
+                    <UserPlus className="h-4 w-4 text-yellow-600" />
+                    <h4 className="text-sm font-semibold">Fizeram check-in sem escala</h4>
+                  </div>
+                  <div className="space-y-1.5">
+                    {turnoDetail.extras.map(c => (
+                      <div key={c.id} className="flex items-center justify-between gap-3 p-2 rounded-lg border bg-card">
+                        <p className="text-sm font-medium truncate">{c.volunteer?.full_name || c.schedule?.volunteer_name || c.volunteer_name || 'Voluntário'}</p>
+                        <Badge variant="outline" className="border-yellow-300 text-yellow-700 text-xs shrink-0">sem escala</Badge>
+                      </div>
+                    ))}
+                    {turnoDetail.extrasAnonimos > 0 && (
+                      <div className="flex items-center justify-between gap-3 p-2 rounded-lg border border-dashed bg-muted/40">
+                        <p className="text-sm text-muted-foreground">
+                          {turnoDetail.extrasAnonimos} check-in{turnoDetail.extrasAnonimos === 1 ? '' : 's'} sem identificação
+                          <span className="block text-xs">registrados antes do sistema guardar o nome (05/07) — sem como saber quem foram</span>
+                        </p>
+                        <Badge variant="outline" className="text-xs shrink-0">anônimos</Badge>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
+    </div>
+  );
+}

@@ -1,0 +1,5080 @@
+import { useState, useEffect, useMemo, useRef, Fragment } from 'react';
+import { useAuth } from '../contexts/AuthContext';
+import { solicitacoes as api, marketing as marketingApi, rh as rhApi } from '../api';
+import { TIPO_FERIAS, FERIAS_STATUS } from '../lib/theme';
+import NovaSolicitacaoForm, { CATEGORIAS, DocDropzone } from '../components/solicitacoes/NovaSolicitacaoForm';
+import ConcluirPagamento from '../components/financeiro/ConcluirPagamento';
+import { prontaParaPagar, paraConcluirPagamento, CATEGORIAS_SO_CONCLUEM_PAGANDO, rotuloForma } from '../lib/conclusaoPagamentoTela';
+import CorrigirSolicitacao from '../components/solicitacoes/CorrigirSolicitacao';
+import { podeCorrigir, podeRetirarAjusteTela, ROTULO_CAMPO } from '../lib/correcaoSolicitacaoTela';
+import useConfirmarSaida from '../hooks/useConfirmarSaida';
+import { playSuccessSound } from '../lib/sounds';
+import { Badge } from '../components/ui/badge';
+import { Button } from '../components/ui/button';
+import { Card } from '../components/ui/card';
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from '../components/ui/dialog';
+import { Sheet, SheetContent, SheetHeader, SheetTitle } from '../components/ui/sheet';
+import { Input } from '../components/ui/input';
+import { DatePicker } from '@/components/ui/date-picker';
+import { Label } from '../components/ui/label';
+import { Textarea } from '../components/ui/textarea';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../components/ui/select';
+import { ScrollArea } from '../components/ui/scroll-area';
+import { Plus, ClipboardList, Clock, CheckCircle2, XCircle, Search as SearchIcon, ArrowRight, List, Upload, FileText, X, Users, Star, Trash2, Image as ImageIcon, Check, ChevronDown, Mail, Pencil, Lock, Info, Download } from 'lucide-react';
+import { supabase } from '../supabaseClient';
+import { toast } from 'sonner';
+import {
+  ehImagem, nomeDoArquivo, rotuloTipo,
+  validarAnexos, caminhoDeUpload, ACCEPT_ANEXOS, LIMITE_ARQUIVO_MB,
+} from '@/lib/anexoSolicitacao';
+
+
+
+
+
+const URGENCIAS = [
+  { value: 'baixa', label: 'Baixa', color: 'bg-muted text-muted-foreground' },
+  { value: 'normal', label: 'Normal', color: 'bg-blue-500/15 text-blue-700 dark:text-blue-400' },
+  { value: 'alta', label: 'Alta', color: 'bg-amber-500/15 text-amber-700 dark:text-amber-400' },
+  { value: 'critica', label: 'Crítica', color: 'bg-red-500/15 text-red-700 dark:text-red-400' },
+];
+
+
+
+
+
+
+
+
+
+
+const KANBAN_COLUMNS = [
+  { key: 'aguardando_aprovacao', label: 'Aguardando aprovação', icon: Clock, color: 'border-b-violet-500', match: ['aguardando_aprovacao_origem', 'aguardando_merito'], readOnly: true },
+  { key: 'em_cotacao',     label: 'Em cotação',   icon: ClipboardList, color: 'border-b-cyan-500',    match: ['em_cotacao'] },
+  { key: 'no_financeiro',  label: 'No financeiro', icon: Clock,       color: 'border-b-orange-500',  match: ['aguardando_aprovacao_financeira'], readOnly: true, hint: 'Aguardando aprovação financeira — a decisão é feita na tela do Financeiro. Compra dentro da sua alçada você aprova abrindo o card.' },
+  { key: 'pendente',       label: 'Pendente',     icon: Clock,        color: 'border-b-amber-500',   match: ['pendente', 'aguardando_ajuste'] },
+  { key: 'em_analise',     label: 'Em Análise',   icon: SearchIcon,   color: 'border-b-blue-500',    match: ['em_analise'] },
+  { key: 'em_atendimento', label: 'Em Andamento', icon: CheckCircle2, color: 'border-b-green-500',   match: ['aprovado', 'em_atendimento', 'aguardando_entrega'] },
+  { key: 'sobrestada',     label: 'Em espera',    icon: Clock,        color: 'border-b-slate-400',   match: ['sobrestada'], readOnly: true, hint: 'Aguardando verba ou equipe — volta a andar quando for retomada.' },
+  { key: 'concluido',      label: 'Concluído',    icon: CheckCircle2, color: 'border-b-emerald-600', match: ['concluido', 'avaliado'] },
+  { key: 'rejeitado',      label: 'Rejeitado',    icon: XCircle,      color: 'border-b-red-500',     match: ['rejeitado', 'cancelado'] },
+];
+
+
+
+
+
+
+const KANBAN_MACRO = [
+  { key: 'aprovacao', label: 'Aprovação', accent: '#00B39D',
+    match: ['aguardando_aprovacao_origem', 'aguardando_merito', 'pendente', 'em_analise', 'aguardando_ajuste'],
+    sub: 'precisa de decisão',
+    desc: 'Solicitações esperando uma decisão: aprovação do diretor de origem, julgamento de mérito do Pastor Presidente, ou análise/aprovação da área que atende. É aqui que alguém precisa dizer "pode seguir".' },
+  { key: 'cotacao_fin', label: 'Cotação & Financeiro', accent: '#0ea5e9',
+    match: ['em_cotacao', 'aguardando_aprovacao_financeira'],
+    sub: 'cotação e pagamento',
+    desc: 'Compras aprovadas na origem: a equipe de Logística faz a cotação com os fornecedores e envia ao financeiro; o responsável financeiro aprova o pagamento. A decisão de cada portão é feita nos blocos próprios do card (Cotação) e na tela do Financeiro.' },
+  { key: 'andamento', label: 'Em andamento', accent: '#22c55e',
+    match: ['aprovado', 'em_atendimento', 'aguardando_entrega', 'sobrestada'],
+    sub: 'aprovadas & em atendimento',
+    desc: 'Já foi aprovado e está sendo executado: comprando, pagando, a caminho da entrega, ou em atendimento pela área. "Em espera" (sobrestada) também fica aqui até ser retomada.' },
+  { key: 'concluido', label: 'Concluído', accent: '#8a938f',
+    match: ['concluido', 'avaliado'],
+    sub: 'últimos 90 dias',
+    desc: 'Solicitações entregues/finalizadas nos últimos 90 dias. As rejeitadas e canceladas ficam no bloco "Não aprovadas", separado, no rodapé.' },
+];
+const MACRO_REJEITADO_MATCH = ['rejeitado', 'cancelado'];
+
+
+
+const STATUS_ENCERRADO_ATENDER = new Set(['concluido', 'avaliado', ...MACRO_REJEITADO_MATCH]);
+
+
+
+
+const CAT_ACCENT = {
+  compras: '#f59e0b', infraestrutura: '#6366f1', servico: '#0ea5e9',
+  pagamento: '#10b981', reembolso: '#22c55e', reserva_espaco: '#a855f7',
+  hospitalidade: '#f43f5e', ti: '#3b82f6', marketing: '#ec4899',
+  producao: '#8b5cf6', ferias: '#06b6d4', licenca: '#14b8a6',
+};
+function catAccent(cat) { return CAT_ACCENT[cat] || '#8a938f'; }
+
+
+
+
+
+
+const KANBAN_COLUNAS_SOLICITANTE = [
+  { key: 'em_aprovacao',       label: 'Em aprovação',         icon: Clock,         color: 'border-b-violet-500',  match: ['aguardando_aprovacao_origem', 'aguardando_merito'], readOnly: true },
+  { key: 'cotacao_financeiro', label: 'Cotação e financeiro', icon: ClipboardList, color: 'border-b-cyan-500',    match: ['em_cotacao', 'aguardando_aprovacao_financeira'], readOnly: true },
+  { key: 'na_fila',            label: 'Na fila',              icon: List,          color: 'border-b-amber-500',   match: ['pendente', 'em_analise', 'aguardando_ajuste'], readOnly: true },
+  { key: 'em_espera',          label: 'Em espera',            icon: Clock,         color: 'border-b-slate-400',   match: ['sobrestada'], readOnly: true, hint: 'Aguardando verba ou equipe — você será avisado quando o pedido voltar a andar.' },
+  { key: 'em_andamento',       label: 'Em andamento',         icon: ArrowRight,    color: 'border-b-green-500',   match: ['aprovado', 'em_atendimento', 'aguardando_entrega'], readOnly: true },
+  { key: 'concluidas',         label: 'Concluídas',           icon: CheckCircle2,  color: 'border-b-emerald-600', match: ['concluido', 'avaliado'], readOnly: true },
+  { key: 'nao_aprovadas',      label: 'Não aprovadas',        icon: XCircle,       color: 'border-b-red-500',     match: ['rejeitado', 'cancelado'], readOnly: true },
+];
+
+const STATUS_LABELS = {
+  aguardando_aprovacao_origem: { label: 'Aguardando aprovação', color: 'bg-violet-500/15 text-violet-700 dark:text-violet-400' },
+  em_cotacao: { label: 'Em cotação', color: 'bg-cyan-500/15 text-cyan-700 dark:text-cyan-400' },
+  pendente: { label: 'Pendente', color: 'bg-amber-500/15 text-amber-700 dark:text-amber-400' },
+  aguardando_aprovacao_financeira: { label: 'Aprov. financeira', color: 'bg-orange-500/15 text-orange-700 dark:text-orange-400' },
+  em_analise: { label: 'Em Análise', color: 'bg-blue-500/15 text-blue-700 dark:text-blue-400' },
+  aprovado: { label: 'Aprovado', color: 'bg-green-500/15 text-green-700 dark:text-green-400' },
+  em_atendimento: { label: 'Em atendimento', color: 'bg-green-500/15 text-green-700 dark:text-green-400' },
+  aguardando_entrega: { label: 'Aguardando entrega', color: 'bg-teal-500/15 text-teal-700 dark:text-teal-400' },
+  rejeitado: { label: 'Rejeitado', color: 'bg-red-500/15 text-red-700 dark:text-red-400' },
+  concluido: { label: 'Concluído', color: 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-400' },
+  avaliado: { label: 'Avaliado', color: 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-400' },
+  aguardando_ajuste: { label: 'Aguardando ajuste', color: 'bg-amber-500/15 text-amber-700 dark:text-amber-400' },
+  aguardando_merito: { label: 'Julgamento de mérito', color: 'bg-violet-500/15 text-violet-700 dark:text-violet-400' },
+  sobrestada: { label: 'Em espera (sobrestada)', color: 'bg-slate-500/15 text-slate-700 dark:text-slate-400' },
+  cancelado: { label: 'Cancelado', color: 'bg-muted text-muted-foreground' },
+};
+
+function getCatMeta(cat) {
+  return CATEGORIAS.find(c => c.value === cat) || CATEGORIAS[CATEGORIAS.length - 1];
+}
+function getUrgMeta(urg) {
+  return URGENCIAS.find(u => u.value === urg) || URGENCIAS[1];
+}
+function getStatusMeta(status) {
+  return STATUS_LABELS[status] || { label: status, color: 'bg-muted text-muted-foreground' };
+}
+
+function normalizarTxt(s) {
+  return (s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().trim();
+}
+
+
+
+function areaBadgeRedundante(catLabel, areaLabel) {
+  const a = normalizarTxt(catLabel), b = normalizarTxt(areaLabel);
+  if (!a || !b) return false;
+  return a === b || a.includes(b) || b.includes(a);
+}
+
+
+export default function Solicitacoes() {
+  const { profile, isAdmin } = useAuth();
+  const [items, setItems] = useState([]);
+
+
+  const [itemsView, setItemsView] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [filterCat, setFilterCat] = useState('todas');
+  const [dialogOpen, setDialogOpen] = useState(false);
+  const [detailItem, setDetailItem] = useState(null);
+
+  const [filterArea, setFilterArea] = useState('todas');
+  const [filterStatus, setFilterStatus] = useState('todos');
+  const [busca, setBusca] = useState('');
+  const [slaOnly, setSlaOnly] = useState(false);
+  const [periodo, setPeriodo] = useState('365');
+
+
+
+
+
+  const [atenderLayout, setAtenderLayout] = useState('kanban');
+  const [aprovarLayout, setAprovarLayout] = useState('kanban');
+  const [minhasLayout, setMinhasLayout] = useState('kanban');
+
+
+
+
+
+
+
+  const PAPEL_PADRAO = { atende: false, admin: false, eh_diretor_origem: false, pendentes_origem: 0, eh_triagem_admin: false, pendentes_triagem: 0 };
+  const [papel, setPapel] = useState(() => {
+    try { const c = localStorage.getItem('cbrio_solic_papel'); return c ? { ...PAPEL_PADRAO, ...JSON.parse(c) } : PAPEL_PADRAO; }
+    catch { return PAPEL_PADRAO; }
+  });
+  const [papelCarregado, setPapelCarregado] = useState(false);
+  const atendeAreas = papel.atende;
+  const ehDiretorOrigem = papel.eh_diretor_origem;
+  const pendentesOrigem = papel.pendentes_origem || 0;
+
+  const ehTriagemAdmin = papel.eh_triagem_admin;
+  const pendentesTriagem = papel.pendentes_triagem || 0;
+
+  const ehAprovador = ehDiretorOrigem || ehTriagemAdmin;
+  const pendentesAprovar = pendentesOrigem + pendentesTriagem;
+  const isResponsavel = isAdmin || atendeAreas;
+
+
+  const [view, setView] = useState('minhas');
+  const [viewTouched, setViewTouched] = useState(false);
+
+  async function refreshPapel() {
+    try {
+      const r = await api.meuPapel?.();
+      if (r) { setPapel(r); try { localStorage.setItem('cbrio_solic_papel', JSON.stringify(r)); } catch (_) {} }
+    } catch (_) {}
+  }
+
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        const r = await api.meuPapel?.();
+        if (alive && r) { setPapel(r); try { localStorage.setItem('cbrio_solic_papel', JSON.stringify(r)); } catch (_) {} }
+      } catch (_) {}
+      finally { if (alive) setPapelCarregado(true); }
+    })();
+    return () => { alive = false; };
+  }, []);
+
+
+
+
+
+
+
+
+  const posicionouRef = useRef(false);
+  useEffect(() => {
+    if (viewTouched || posicionouRef.current || !papelCarregado) return;
+    posicionouRef.current = true;
+    if (ehAprovador && pendentesAprovar > 0) {
+      setView('aprovar');
+    } else if (isAdmin || atendeAreas) {
+      setView('atender');
+    }
+  }, [papelCarregado, isAdmin, atendeAreas, ehAprovador, pendentesAprovar, viewTouched]);
+
+
+
+
+  const [formDirty, setFormDirty] = useState(false);
+  const { tentarFechar } = useConfirmarSaida(formDirty, () => setDialogOpen(false));
+
+
+
+
+
+  const loadSeq = useRef(0);
+
+
+  const cacheRef = useRef({});
+
+
+  function dropItem(id) {
+    const keep = (arr) => (arr || []).filter(i => i.id !== id);
+    setItems(keep);
+    const key = `${view}:${periodo}`;
+    if (cacheRef.current[key]) cacheRef.current[key] = keep(cacheRef.current[key]);
+  }
+  async function load() {
+    const seq = ++loadSeq.current;
+    const key = `${view}:${periodo}`;
+    try {
+
+
+
+      let params = {};
+      if (view === 'minhas') params = { mine: 'true' };
+      else if (view === 'aprovar') params = { aba: 'aprovar' };
+
+      if (view !== 'aprovar') params.periodo = periodo;
+      const data = await api.list(params);
+      if (seq !== loadSeq.current) return;
+      setItems(data);
+      setItemsView(key);
+      cacheRef.current[key] = data;
+    } catch (e) {
+      if (seq === loadSeq.current) toast.error(e.message);
+    } finally {
+      if (seq === loadSeq.current) setLoading(false);
+    }
+  }
+
+  async function handleAprovarOrigem(id) {
+
+
+
+    dropItem(id);
+    try {
+      await api.aprovarOrigem(id);
+      toast.success('Solicitação aprovada.');
+      await refreshPapel();
+      load();
+    } catch (e) {
+      toast.error(e.message || 'Erro ao aprovar.');
+      load();
+    }
+  }
+
+  async function handleRejeitarOrigem(id, motivo) {
+    dropItem(id);
+    try {
+      await api.rejeitarOrigem(id, motivo);
+      toast.success('Solicitação rejeitada.');
+      await refreshPapel();
+      load();
+    } catch (e) {
+      toast.error(e.message || 'Erro ao rejeitar.');
+      load();
+    }
+  }
+
+
+  async function handleAprovarMerito(id) {
+    dropItem(id);
+    try {
+      await api.aprovarMerito(id);
+      toast.success('Mérito aprovado.');
+      await refreshPapel();
+      load();
+    } catch (e) {
+      toast.error(e.message || 'Erro ao aprovar o mérito.');
+      load();
+    }
+  }
+
+  async function handleReprovarMerito(id, motivo) {
+    dropItem(id);
+    try {
+      await api.reprovarMerito(id, motivo);
+      toast.success('Mérito reprovado.');
+      await refreshPapel();
+      load();
+    } catch (e) {
+      toast.error(e.message || 'Erro ao reprovar o mérito.');
+      load();
+    }
+  }
+
+
+
+
+
+  const loadRef = useRef(load);
+  useEffect(() => { loadRef.current = load; });
+
+  useEffect(() => {
+
+
+    const k = `${view}:${periodo}`;
+    const cached = cacheRef.current[k];
+    if (cached) { setItems(cached); setItemsView(k); }
+    load();
+  }, [view, periodo]);
+
+
+
+
+
+
+  const viewKey = `${view}:${periodo}`;
+  const itemsFresh = itemsView === viewKey;
+
+
+
+  async function prefetchAba(v) {
+    const key = `${v}:${periodo}`;
+    if (cacheRef.current[key]) return;
+    let params = {};
+    if (v === 'minhas') params = { mine: 'true' };
+    else if (v === 'aprovar') params = { aba: 'aprovar' };
+    if (v !== 'aprovar') params.periodo = periodo;
+    try { cacheRef.current[key] = await api.list(params); } catch {                                                       }
+  }
+  useEffect(() => {
+    if (!papelCarregado) return;
+    const abas = [];
+    if (isAdmin || atendeAreas) abas.push('atender');
+    if (ehAprovador) abas.push('aprovar');
+    abas.push('minhas');
+    abas.forEach(v => { if (v !== view) prefetchAba(v); });
+  }, [papelCarregado, periodo, isAdmin, atendeAreas, ehAprovador, view]);
+
+
+
+
+  useEffect(() => {
+    if (!supabase || !profile?.id) return;
+    let timeout = null;
+    function schedReload() {
+      if (timeout) clearTimeout(timeout);
+      timeout = setTimeout(() => { loadRef.current?.(); }, 400);
+    }
+
+
+
+    supabase.auth.getSession().then(({ data }) => {
+      const tk = data?.session?.access_token;
+      if (tk) { try { supabase.realtime.setAuth(tk); } catch {                   } }
+    }).catch(() => {});
+    const channel = supabase
+      .channel(`solicitacoes:${profile.id}`)
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'solicitacoes' },
+        schedReload
+      )
+      .subscribe();
+    return () => {
+      if (timeout) clearTimeout(timeout);
+      supabase.removeChannel(channel);
+    };
+  }, [profile?.id, isResponsavel]);
+
+
+
+
+
+
+  useEffect(() => {
+    function tick() {
+      if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return;
+      loadRef.current?.();
+    }
+    function onVisible() {
+      if (typeof document !== 'undefined' && document.visibilityState === 'visible') loadRef.current?.();
+    }
+    const interval = setInterval(tick, 12000);
+    document.addEventListener('visibilitychange', onVisible);
+    return () => {
+      clearInterval(interval);
+      document.removeEventListener('visibilitychange', onVisible);
+    };
+  }, []);
+
+
+  const areasOpts = useMemo(
+    () => [...new Set(items.map(i => i.area_responsavel).filter(Boolean))].sort(),
+    [items]);
+  const statusOpts = useMemo(
+    () => [...new Set(items.map(i => i.status).filter(Boolean))].sort(),
+    [items]);
+
+  const filtered = useMemo(() => {
+    let r = items;
+    if (filterCat !== 'todas')    r = r.filter(i => i.categoria === filterCat);
+    if (filterArea !== 'todas')   r = r.filter(i => i.area_responsavel === filterArea);
+    if (filterStatus !== 'todos') r = r.filter(i => i.status === filterStatus);
+    if (slaOnly)                  r = r.filter(isSlaEstourando);
+    const t = busca.trim().toLowerCase();
+    if (t) r = r.filter(i =>
+      (i.titulo || '').toLowerCase().includes(t) ||
+      (i.descricao || '').toLowerCase().includes(t));
+    return r;
+  }, [items, filterCat, filterArea, filterStatus, slaOnly, busca]);
+
+
+
+  const columnsMacro = useMemo(() => KANBAN_MACRO.map(col => ({
+    ...col,
+    items: filtered.filter(i => col.match.includes(i.status)),
+  })), [filtered]);
+  const rejeitadosMacro = useMemo(
+    () => filtered.filter(i => MACRO_REJEITADO_MATCH.includes(i.status)),
+    [filtered]);
+  const [showRejeitados, setShowRejeitados] = useState(false);
+  const [infoCol, setInfoCol] = useState(null);
+
+
+
+
+
+
+
+
+  const filaAtender = useMemo(() => {
+    if (filterStatus !== 'todos') return filtered;
+    return filtered.filter(i => !STATUS_ENCERRADO_ATENDER.has(i.status));
+  }, [filtered, filterStatus]);
+
+
+  const colunasSolicitante = useMemo(() => {
+    return KANBAN_COLUNAS_SOLICITANTE.map(col => ({
+      ...col,
+      items: filtered.filter(i => col.match.includes(i.status)),
+    }));
+  }, [filtered]);
+
+  async function handleStatusChange(id, newStatus, observacoes) {
+
+
+    const statusAntigo = items.find(i => i.id === id)?.status;
+    if (statusAntigo === newStatus && !observacoes) return;
+    setItems(prev => prev.map(i => i.id === id ? { ...i, status: newStatus } : i));
+    try {
+      const payload = { status: newStatus };
+      if (observacoes) payload.observacoes = observacoes;
+      await api.update(id, payload);
+      if (newStatus === 'concluido') {
+        playSuccessSound();
+        toast.success('Solicitação concluída!');
+      } else {
+        toast.success('Status atualizado');
+      }
+      load();
+    } catch (e) {
+
+      setItems(prev => prev.map(i => i.id === id ? { ...i, status: statusAntigo } : i));
+      toast.error(e.message);
+    }
+  }
+
+  async function handleNpsSubmit(id, nota, comentario) {
+    try {
+      const updated = await api.update(id, { nps_nota: nota, nps_comentario: comentario });
+      toast.success('Obrigado pela avaliação!');
+
+      setDetailItem(curr => (curr ? { ...curr, ...updated } : updated));
+      load();
+    } catch (e) {
+      toast.error(e.message || 'Erro ao enviar avaliação');
+      throw e;
+    }
+  }
+
+  return (
+    <div className="p-6 space-y-6">
+      {            }
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+        <div>
+          <h1 className="text-2xl font-bold text-foreground flex items-center gap-2">
+            <ClipboardList className="h-6 w-6 text-primary" />
+            Solicitações
+          </h1>
+          <p className="text-sm text-muted-foreground mt-1">Peça compras, serviços, contratações, pagamentos, reembolsos, reservas, TI, marketing, hospitalidade, férias e licenças — e acompanhe tudo por aqui</p>
+        </div>
+        <div className="flex items-center gap-3">
+          {                                               }
+          {isAdmin && (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => window.location.href = '/admin/solicitacoes-responsaveis'}
+              className="gap-1.5"
+              title="Configurar responsáveis por área"
+            >
+              <Users className="h-4 w-4" /> Responsáveis
+            </Button>
+          )}
+
+          {
+                                                                               }
+          <Dialog open={dialogOpen} onOpenChange={(v) => { if (v) setDialogOpen(true); else tentarFechar(); }}>
+            <DialogTrigger asChild>
+              <Button size="sm" className="gap-1.5">
+                <Plus className="h-4 w-4" /> Nova Solicitação
+              </Button>
+            </DialogTrigger>
+            <DialogContent className="sm:max-w-lg max-h-[90vh] flex flex-col">
+              <DialogHeader>
+                <DialogTitle>Nova Solicitação</DialogTitle>
+              </DialogHeader>
+              <NovaSolicitacaoForm
+                onDirtyChange={setFormDirty}
+                onCancel={tentarFechar}
+                onCreated={() => { setDialogOpen(false); load(); }}
+              />
+            </DialogContent>
+          </Dialog>
+        </div>
+      </div>
+
+      {                                                                                       }
+      {(isResponsavel || ehAprovador) && (
+        <div className="flex items-center gap-1 border-b border-border">
+          {ehAprovador && (
+            <button
+              type="button"
+              onClick={() => { setViewTouched(true); setView('aprovar'); }}
+              className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors flex items-center gap-2 ${
+                view === 'aprovar'
+                  ? 'border-primary text-primary'
+                  : 'border-transparent text-muted-foreground hover:text-foreground'
+              }`}
+            >
+              Aprovar
+              {pendentesAprovar > 0 && (
+                <Badge className="text-[10px] bg-violet-500/15 text-violet-700 dark:text-violet-400 px-1.5">
+                  {pendentesAprovar}
+                </Badge>
+              )}
+            </button>
+          )}
+          {isResponsavel && (
+            <button
+              type="button"
+              onClick={() => { setViewTouched(true); setView('atender'); }}
+              className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
+                view === 'atender'
+                  ? 'border-primary text-primary'
+                  : 'border-transparent text-muted-foreground hover:text-foreground'
+              }`}
+            >
+              Para Atender
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={() => { setViewTouched(true); setView('minhas'); }}
+            className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
+              view === 'minhas'
+                ? 'border-primary text-primary'
+                : 'border-transparent text-muted-foreground hover:text-foreground'
+            }`}
+          >
+            Minhas Solicitações
+          </button>
+        </div>
+      )}
+
+      {                                                                     }
+      {view !== 'aprovar' && !loading && (
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="relative flex-1 min-w-[180px] max-w-xs">
+            <SearchIcon className="absolute left-2.5 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+            <Input value={busca} onChange={e => setBusca(e.target.value)}
+              placeholder="Buscar título ou descrição" className="pl-8 h-9" />
+          </div>
+          <Select value={filterCat} onValueChange={setFilterCat}>
+            <SelectTrigger className="w-[150px] h-9 text-sm"><SelectValue placeholder="Categoria" /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value="todas">Todas categorias</SelectItem>
+              {CATEGORIAS.map(c => <SelectItem key={c.value} value={c.value}>{c.label}</SelectItem>)}
+            </SelectContent>
+          </Select>
+          {view === 'atender' && areasOpts.length > 1 && (
+            <Select value={filterArea} onValueChange={setFilterArea}>
+              <SelectTrigger className="w-[150px] h-9 text-sm"><SelectValue placeholder="Área" /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="todas">Todas áreas</SelectItem>
+                {areasOpts.map(a => <SelectItem key={a} value={a}>{AREA_LABELS[a] || a}</SelectItem>)}
+              </SelectContent>
+            </Select>
+          )}
+          {statusOpts.length > 1 && (
+            <Select value={filterStatus} onValueChange={setFilterStatus}>
+              <SelectTrigger className="w-[150px] h-9 text-sm"><SelectValue placeholder="Status" /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="todos">Todos status</SelectItem>
+                {statusOpts.map(s => <SelectItem key={s} value={s}>{getStatusMeta(s).label}</SelectItem>)}
+              </SelectContent>
+            </Select>
+          )}
+          <Select value={periodo} onValueChange={setPeriodo}>
+            <SelectTrigger className="w-[140px] h-9 text-sm"><SelectValue /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value="90">Últimos 90 dias</SelectItem>
+              <SelectItem value="180">Últimos 6 meses</SelectItem>
+              <SelectItem value="365">Último ano</SelectItem>
+              <SelectItem value="730">Últimos 2 anos</SelectItem>
+              <SelectItem value="tudo">Tudo</SelectItem>
+            </SelectContent>
+          </Select>
+          {view === 'atender' && (
+            <Button variant={slaOnly ? 'default' : 'outline'} size="sm"
+              onClick={() => setSlaOnly(s => !s)} className="h-9 gap-1.5">
+              <Clock className="h-4 w-4" /> SLA estourando
+            </Button>
+          )}
+          {view === 'atender' && (
+            <div className="ml-auto inline-flex rounded-md border border-border overflow-hidden">
+              <button type="button" onClick={() => setAtenderLayout('foco')}
+                className={`px-3 h-9 text-sm ${atenderLayout === 'foco' ? 'bg-primary text-primary-foreground' : 'bg-background text-muted-foreground hover:text-foreground'}`}>Foco</button>
+              <button type="button" onClick={() => setAtenderLayout('kanban')}
+                className={`px-3 h-9 text-sm border-l border-border ${atenderLayout === 'kanban' ? 'bg-primary text-primary-foreground' : 'bg-background text-muted-foreground hover:text-foreground'}`}>Kanban</button>
+              <button type="button" onClick={() => setAtenderLayout('lista')}
+                className={`px-3 h-9 text-sm border-l border-border ${atenderLayout === 'lista' ? 'bg-primary text-primary-foreground' : 'bg-background text-muted-foreground hover:text-foreground'}`}>Lista</button>
+              <button type="button" onClick={() => setAtenderLayout('solicitante')}
+                className={`px-3 h-9 text-sm border-l border-border ${atenderLayout === 'solicitante' ? 'bg-primary text-primary-foreground' : 'bg-background text-muted-foreground hover:text-foreground'}`}>Por solicitante</button>
+            </div>
+          )}
+          {view === 'minhas' && (
+            <div className="ml-auto inline-flex rounded-md border border-border overflow-hidden">
+              <button type="button" onClick={() => setMinhasLayout('lista')}
+                className={`px-3 h-9 text-sm ${minhasLayout === 'lista' ? 'bg-primary text-primary-foreground' : 'bg-background text-muted-foreground hover:text-foreground'}`}>Lista</button>
+              <button type="button" onClick={() => setMinhasLayout('kanban')}
+                className={`px-3 h-9 text-sm border-l border-border ${minhasLayout === 'kanban' ? 'bg-primary text-primary-foreground' : 'bg-background text-muted-foreground hover:text-foreground'}`}>Kanban</button>
+            </div>
+          )}
+        </div>
+      )}
+
+      {                                                                            }
+      {view === 'aprovar' && !loading && (
+        <div className="flex items-center justify-between gap-2 flex-wrap">
+          <p className="text-xs text-muted-foreground">
+            {aprovarLayout === 'historico'
+              ? 'Histórico das suas decisões (origem · gestão · mérito).'
+              : `${filtered.length} ${filtered.length === 1 ? 'solicitação aguardando' : 'solicitações aguardando'} sua aprovação.`}
+          </p>
+          <div className="ml-auto inline-flex rounded-md border border-border overflow-hidden">
+            <button type="button" onClick={() => setAprovarLayout('foco')}
+              className={`px-3 h-9 text-sm ${aprovarLayout === 'foco' ? 'bg-primary text-primary-foreground' : 'bg-background text-muted-foreground hover:text-foreground'}`}>Foco</button>
+            <button type="button" onClick={() => setAprovarLayout('kanban')}
+              className={`px-3 h-9 text-sm border-l border-border ${aprovarLayout === 'kanban' ? 'bg-primary text-primary-foreground' : 'bg-background text-muted-foreground hover:text-foreground'}`}>Kanban</button>
+            <button type="button" onClick={() => setAprovarLayout('historico')}
+              className={`px-3 h-9 text-sm border-l border-border ${aprovarLayout === 'historico' ? 'bg-primary text-primary-foreground' : 'bg-background text-muted-foreground hover:text-foreground'}`}>Histórico</button>
+          </div>
+        </div>
+      )}
+
+      {                                                                                                        }
+      {(loading || !itemsFresh) ? (
+        <div className="flex items-center justify-center min-h-[40vh]">
+          <div className="h-6 w-6 animate-spin rounded-full border-2 border-muted-foreground/30 border-t-primary" />
+        </div>
+      ) : view === 'aprovar' && aprovarLayout === 'historico' ? (
+
+        <HistoricoAprovacoes isAdmin={isAdmin} />
+      ) : view === 'aprovar' ? (
+
+        (() => {
+
+
+          const renderCard = (item) => (
+            item.aprovacao_papel_pendente === 'merito' ? (
+              <AprovacaoMeritoCard key={item.id} item={item} onApprove={handleAprovarMerito} onReject={handleReprovarMerito} onClick={() => setDetailItem(item)} />
+            ) : (
+              <AprovacaoOrigemCard key={item.id} item={item} onApprove={handleAprovarOrigem} onReject={handleRejeitarOrigem} onClick={() => setDetailItem(item)} />
+            )
+          );
+          if (filtered.length === 0) {
+            return (
+              <Card className="p-8 text-center">
+                <CheckCircle2 className="h-10 w-10 text-emerald-500 mx-auto mb-3" />
+                <p className="text-muted-foreground">Sem solicitações aguardando aprovação.</p>
+                <p className="text-sm text-muted-foreground mt-1">Quando houver uma solicitação pendente de aprovação, aparecerá aqui.</p>
+              </Card>
+            );
+          }
+          if (aprovarLayout !== 'kanban') {
+
+            const ehUrg = (i) => i.eh_urgente || i.urgencia === 'urgente';
+            const urgentes = filtered.filter(ehUrg);
+            const demais = filtered.filter(i => !ehUrg(i));
+            const valor = filtered.reduce((s, i) => s + (Number(i.valor_estimado) || 0), 0);
+            const money = (v) => Number(v || 0).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
+            return (
+              <div className="space-y-4">
+                <div className="grid grid-cols-3 gap-3">
+                  <div className="p-3 rounded-lg border bg-card">
+                    <div className="flex items-center gap-1.5 text-xs text-muted-foreground"><Clock className="h-3.5 w-3.5" style={{ color: '#00B39D' }} /> Aguardando</div>
+                    <p className="text-2xl font-bold mt-1 tabular-nums" style={{ color: '#00B39D' }}>{filtered.length}</p>
+                  </div>
+                  <div className="p-3 rounded-lg border bg-card">
+                    <div className="flex items-center gap-1.5 text-xs text-muted-foreground"><Clock className="h-3.5 w-3.5 text-red-500" /> Urgentes</div>
+                    <p className="text-2xl font-bold mt-1 tabular-nums text-red-600">{urgentes.length}</p>
+                  </div>
+                  <div className="p-3 rounded-lg border bg-card">
+                    <div className="flex items-center gap-1.5 text-xs text-muted-foreground"><FileText className="h-3.5 w-3.5 text-indigo-500" /> Valor em análise</div>
+                    <p className="text-2xl font-bold mt-1 tabular-nums text-indigo-600">{money(valor)}</p>
+                  </div>
+                </div>
+                {urgentes.length > 0 && (
+                  <div>
+                    <p className="text-[11px] font-semibold uppercase tracking-wide text-red-600 dark:text-red-400 mb-2">Urgentes · {urgentes.length}</p>
+                    <div className="space-y-3">{urgentes.map(renderCard)}</div>
+                  </div>
+                )}
+                {demais.length > 0 && (
+                  <div>
+                    {urgentes.length > 0 && <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground mb-2">Demais · {demais.length}</p>}
+                    <div className="space-y-3">{demais.map(renderCard)}</div>
+                  </div>
+                )}
+              </div>
+            );
+          }
+
+          const porCat = new Map();
+          for (const it of filtered) {
+            const k = it.categoria || 'outro';
+            if (!porCat.has(k)) porCat.set(k, []);
+            porCat.get(k).push(it);
+          }
+          const colunas = CATEGORIAS.filter(c => porCat.has(c.value));
+          const extras = [...porCat.keys()].filter(k => !CATEGORIAS.some(c => c.value === k)).map(k => ({ value: k, label: k }));
+          const todas = [...colunas, ...extras];
+          return (
+            <div className="flex gap-4 overflow-x-auto pb-2">
+              {todas.map(col => (
+                <div key={col.value} className="shrink-0 w-[340px] flex flex-col">
+                  <div className="flex items-center justify-between mb-2 px-1">
+                    <span className="font-semibold text-sm">{col.label}</span>
+                    <span className="text-xs text-muted-foreground rounded-full bg-muted px-2 py-0.5">{porCat.get(col.value).length}</span>
+                  </div>
+                  <div className="space-y-3">{porCat.get(col.value).map(renderCard)}</div>
+                </div>
+              ))}
+            </div>
+          );
+        })()
+      ) : view === 'atender' ? (
+
+        <>
+        <TermometroRefeitas />
+        {atenderLayout === 'foco' ? (
+          <AtenderFoco items={filaAtender} onOpen={setDetailItem} selectedId={detailItem?.id} />
+        ) : atenderLayout === 'lista' ? (
+          <ListaSolicitacoes items={filaAtender} onOpen={setDetailItem} profileId={profile?.id}
+            emptyMsg="Nenhuma solicitação na fila para os filtros atuais." />
+        ) : atenderLayout === 'solicitante' ? (
+          <PainelPorSolicitante items={filaAtender} onOpen={setDetailItem} />
+        ) : (
+
+        <div className="space-y-4">
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+            {columnsMacro.map(col => (
+              <div key={col.key} className="flex flex-col">
+                <div className="relative mb-3">
+                  <div className="flex items-center gap-2.5 px-3 py-2 rounded-xl border border-border/60"
+                    style={{ background: 'var(--panel)' }}>
+                    <span className="h-2.5 w-2.5 rounded-full shrink-0" style={{ background: col.accent }} />
+                    <div className="min-w-0 leading-tight flex-1">
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-[15px] font-semibold text-foreground">{col.label}</span>
+                        <span className="text-xs font-semibold text-muted-foreground">{col.items.length}</span>
+                      </div>
+                      <span className="text-[11px] text-muted-foreground">{col.sub}</span>
+                    </div>
+                    <button type="button" title="O que é esta etapa?"
+                      onClick={() => setInfoCol(infoCol === col.key ? null : col.key)}
+                      className="shrink-0 text-muted-foreground/70 hover:text-foreground transition-colors">
+                      <Info className="h-4 w-4" />
+                    </button>
+                  </div>
+                  {infoCol === col.key && (
+                    <>
+                      <div className="fixed inset-0 z-[1190]" onClick={() => setInfoCol(null)} />
+                      <div className="absolute right-0 top-full mt-1 z-[1200] w-72 rounded-xl border border-border shadow-lg p-3"
+                        style={{ background: 'var(--cbrio-card)' }}>
+                        <div className="flex items-center gap-2 mb-1.5">
+                          <span className="h-2 w-2 rounded-full" style={{ background: col.accent }} />
+                          <span className="text-sm font-semibold text-foreground">{col.label}</span>
+                        </div>
+                        <p className="text-xs text-muted-foreground leading-relaxed">{col.desc}</p>
+                      </div>
+                    </>
+                  )}
+                </div>
+                <ScrollArea className="flex-1 max-h-[calc(100vh-260px)]">
+                  {
+
+                                                                        }
+                  <div className="space-y-2.5 pr-1 min-h-[60px] pb-24 md:pb-0">
+                    {col.items.length === 0 && (
+                      <p className="text-xs text-muted-foreground/50 italic text-center py-10">Nada por aqui</p>
+                    )}
+                    {col.items.map(item => (
+                      <CardMacro
+                        key={item.id}
+                        item={item}
+                        canAgir={isResponsavel}
+                        concluido={col.key === 'concluido'}
+                        onStatusChange={handleStatusChange}
+                        onClick={() => setDetailItem(item)}
+                      />
+                    ))}
+                  </div>
+                </ScrollArea>
+              </div>
+            ))}
+          </div>
+          {                                                                   }
+          {rejeitadosMacro.length > 0 && (
+            <div className="pt-1 border-t border-border/40">
+              <button type="button" onClick={() => setShowRejeitados(v => !v)}
+                className="inline-flex items-center gap-1.5 mt-3 text-xs text-muted-foreground hover:text-foreground transition-colors">
+                <XCircle className="h-3.5 w-3.5" />
+                Não aprovadas <span className="font-semibold">{rejeitadosMacro.length}</span>
+                <ChevronDown className={`h-3.5 w-3.5 transition-transform ${showRejeitados ? 'rotate-180' : ''}`} />
+              </button>
+              {showRejeitados && (
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2.5 mt-3">
+                  {rejeitadosMacro.map(item => (
+                    <CardMacro key={item.id} item={item} canAgir={false} concluido rejeitado
+                      onStatusChange={handleStatusChange} onClick={() => setDetailItem(item)} />
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+        )}
+        </>
+      ) : minhasLayout === 'kanban' ? (
+
+        <div className="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-7 gap-4">
+          {colunasSolicitante.map(col => (
+            <div key={col.key} className="flex flex-col rounded-lg">
+              <div className={`flex items-center gap-2 pb-3 mb-3 border-b-2 ${col.color}`} title={col.hint}>
+                <col.icon className="h-4 w-4 text-muted-foreground" />
+                <span className="text-sm font-semibold text-foreground">{col.label}</span>
+                <Badge variant="secondary" className="ml-auto text-xs">{col.items.length}</Badge>
+              </div>
+              <ScrollArea className="flex-1 max-h-[calc(100vh-280px)]">
+                <div className="space-y-3 pr-1 min-h-[60px] pb-24 md:pb-0">
+                  {col.items.length === 0 && (
+                    <p className="text-xs text-muted-foreground/60 italic text-center py-8">Nada por aqui</p>
+                  )}
+                  {col.items.map(item => (
+                    <SolicitacaoCard
+                      key={item.id}
+                      item={item}
+                      isAdmin={false}
+                      onStatusChange={() => {}}
+                      onClick={() => setDetailItem(item)}
+                      draggable={false}
+                    />
+                  ))}
+                </div>
+              </ScrollArea>
+            </div>
+          ))}
+        </div>
+      ) : (
+
+        <MinhasLista
+          items={filtered}
+          onOpen={setDetailItem}
+          profileId={profile?.id}
+          temFiltros={busca.trim() !== '' || filterCat !== 'todas' || filterStatus !== 'todos' || filterArea !== 'todas' || slaOnly}
+        />
+      )}
+
+      {                                                                               }
+      <DetailDialog
+        item={detailItem}
+        asSheet={(view === 'atender' && atenderLayout === 'foco') || (view === 'aprovar' && aprovarLayout === 'foco')}
+        onClose={() => setDetailItem(null)}
+        isAdmin={isResponsavel}
+        corrigeFinanceiro={!!papel.corrige_financeiro}
+        corrigeCategorias={Array.isArray(papel.corrige_categorias) ? papel.corrige_categorias : []}
+        currentUserId={profile?.id}
+        onStatusChange={handleStatusChange}
+        onNpsSubmit={handleNpsSubmit}
+        onItemRefresh={async () => {
+
+          const params = {};
+          if (view === 'minhas') params.mine = 'true';
+          else if (view === 'aprovar') params.aba = 'aprovar';
+          if (view !== 'aprovar') params.periodo = periodo;
+          const data = await api.list(params);
+          setItems(data);
+          setDetailItem(curr => (curr ? data.find(d => d.id === curr.id) || curr : curr));
+        }}
+      />
+    </div>
+  );
+}
+
+
+const AREA_LABELS = {
+  reserva_espaco: 'Reserva de espaço', cozinha: 'Cozinha', limpeza: 'Limpeza',
+  manutencao: 'Manutenção', logistica_estoque: 'Estoque', logistica_compras: 'Compras',
+  ti: 'TI', rh: 'RH', financeiro: 'Financeiro', marketing: 'Marketing', producao: 'Produção',
+  hospitalidade: 'Hospitalidade',
+};
+
+
+
+
+
+
+
+
+const ETAPA_DO_STATUS = {
+  aguardando_aprovacao_origem: 'aprovacao',
+  aguardando_merito: 'aprovacao',
+  em_cotacao: 'cotacao',
+  aguardando_aprovacao_financeira: 'financeiro',
+  pendente: 'atendimento',
+  em_analise: 'atendimento',
+  aprovado: 'atendimento',
+  em_atendimento: 'atendimento',
+  aguardando_entrega: 'entrega',
+  concluido: 'concluida',
+  avaliado: 'concluida',
+};
+
+function etapasDoItem(item) {
+  const encerradaOk = ['concluido', 'avaliado'].includes(item.status);
+
+
+  const passaAprovacao = !!item.aprovacao_origem_status && item.aprovacao_origem_status !== 'dispensada';
+  const temCotacao = ['compras', 'servico'].includes(item.categoria);
+
+
+
+
+  const financeiroDispensado = !!item.financeiro_dispensado_em;
+  const temFinanceiro = !!item.precisa_aprovacao_financeira || financeiroDispensado;
+  const temEntrega = item.categoria === 'compras';
+
+  const etapas = [{ key: 'enviada', label: 'Enviada', data: item.created_at }];
+  if (passaAprovacao) etapas.push({ key: 'aprovacao', label: 'Aprovação', data: item.aprovacao_origem_em });
+  if (temCotacao) etapas.push({ key: 'cotacao', label: 'Cotação', data: item.cotacao_em });
+  if (temFinanceiro) {
+    etapas.push({
+      key: 'financeiro',
+      label: financeiroDispensado ? 'Financeiro · dispensado' : 'Financeiro',
+      data: financeiroDispensado ? item.financeiro_dispensado_em : item.aprovado_financeiro_em,
+    });
+  }
+  etapas.push({ key: 'atendimento', label: 'Atendimento', data: item.respondido_em });
+  if (temEntrega) etapas.push({ key: 'entrega', label: 'Entrega', data: null });
+  etapas.push({ key: 'concluida', label: 'Concluída', data: item.concluido_em });
+
+
+
+
+
+
+  let atualIdx = etapas.findIndex(e => e.key === ETAPA_DO_STATUS[item.status]);
+  if (atualIdx < 0) {
+
+
+    const gates = {
+      aprovacao: item.aprovacao_origem_em,
+      cotacao: item.cotacao_em,
+      financeiro: item.aprovado_financeiro_em || item.financeiro_dispensado_em,
+    };
+    atualIdx = etapas.findIndex(e => e.key in gates && !gates[e.key]);
+    if (atualIdx < 0) atualIdx = etapas.findIndex(e => e.key === 'atendimento');
+  }
+
+  const terminal = item.status === 'rejeitado'
+    ? { tipo: 'rejeitada', motivo: item.aprovacao_origem_status === 'rejeitada' ? (item.aprovacao_origem_motivo || null) : null }
+    : item.status === 'cancelado'
+      ? { tipo: 'cancelada' }
+      : item.status === 'aguardando_ajuste'
+        ? { tipo: 'ajuste' }
+
+
+        : item.status === 'sobrestada'
+          ? { tipo: 'sobrestada', motivo: item.sobrestada_motivo || null, revisao: item.sobrestada_revisao || null }
+          : null;
+
+  return {
+    etapas: etapas.map((e, i) => ({
+      ...e,
+      done: encerradaOk || i < atualIdx,
+      atual: !encerradaOk && i === atualIdx,
+    })),
+    terminal,
+  };
+}
+
+
+function fmtDiaMes(d) {
+  if (!d) return null;
+  const dt = new Date(String(d).length === 10 ? `${d}T00:00:00` : d);
+  return Number.isNaN(dt.getTime()) ? null : dt.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' });
+}
+
+
+
+function tempoNaEtapa(item) {
+  const ref = item.updated_at || item.created_at;
+  if (!ref) return '';
+  const dias = Math.max(0, Math.floor((Date.now() - new Date(ref).getTime()) / 86400000));
+  if (dias === 0) return 'hoje';
+  if (dias === 1) return 'há 1 dia';
+  return `há ${dias} dias`;
+}
+
+
+
+function comQuemEsta(item) {
+  const tempo = tempoNaEtapa(item);
+  const suf = tempo ? ` · ${tempo}` : '';
+  switch (item.status) {
+    case 'aguardando_aprovacao_origem': {
+      if (item.aprovacao_origem_status === 'triagem') return `Em triagem · definindo o aprovador${suf}`;
+
+
+
+
+      const pendentes = Array.isArray(item.aprovacao_pendente_de)
+        ? item.aprovacao_pendente_de.filter(Boolean) : [];
+      const aprovadores = pendentes.length ? pendentes : (Array.isArray(item.aprovacao_origem_aprovadores)
+        ? item.aprovacao_origem_aprovadores.filter(Boolean) : []);
+      const quem = aprovadores.length
+        ? aprovadores.join(' ou ')
+        : (item.aprovacao_origem_diretor?.name || 'diretor de origem');
+      return `Aguardando aprovação de ${quem}${suf}`;
+    }
+    case 'aguardando_merito':
+      return `Com o Pastor Presidente (julgamento de mérito)${suf}`;
+    case 'em_cotacao':
+      return `Com a equipe de compras (em cotação)${suf}`;
+    case 'aguardando_aprovacao_financeira':
+      return `Com o financeiro${suf}`;
+    case 'pendente':
+    case 'em_analise':
+    case 'aprovado':
+    case 'em_atendimento': {
+
+
+      if (item.aprovado_financeiro_em && ['compras', 'servico'].includes(item.categoria)) {
+        if (item.area_responsavel === 'logistica_compras') return `Aguardando compra · com a equipe de Logística (cartão)${suf}`;
+        if (item.area_responsavel === 'financeiro') return `Aguardando pagamento · com o financeiro${suf}`;
+      }
+      const area = item.area_responsavel
+        ? (AREA_LABELS[item.area_responsavel] || item.area_responsavel)
+        : 'área responsável';
+      return `Com a equipe de ${area}${suf}`;
+    }
+    case 'aguardando_entrega':
+      return 'Comprado/pago · a caminho';
+    case 'aguardando_ajuste':
+      return 'Com você · precisa de ajuste';
+    default:
+      return null;
+  }
+}
+
+
+
+
+function TrackerSolicitacao({ item, compacto = false }) {
+  const { etapas, terminal } = etapasDoItem(item);
+  const substituiStepper = terminal && !['ajuste', 'sobrestada'].includes(terminal.tipo);
+
+  const quem = ['ajuste', 'sobrestada'].includes(terminal?.tipo) ? null : comQuemEsta(item);
+  const etapaAtualLabel = etapas.find(e => e.atual)?.label || 'Concluída';
+  const fmtData = (iso) => iso
+    ? new Date(iso).toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' })
+    : null;
+
+  const faixaTerminal = substituiStepper && (
+    <div className={`rounded-md border px-3 ${compacto ? 'py-1.5 text-[11px]' : 'py-2 text-xs'} ${
+      terminal.tipo === 'rejeitada'
+        ? 'bg-red-500/10 border-red-500/30 text-red-700 dark:text-red-400'
+        : 'bg-muted border-border text-muted-foreground'
+    }`}>
+      {terminal.tipo === 'rejeitada'
+        ? <><span className="font-semibold">Não aprovada</span>{terminal.motivo ? ` · ${terminal.motivo}` : ''}</>
+        : <span className="font-semibold">Cancelada</span>}
+    </div>
+  );
+
+  const faixaAjuste = terminal?.tipo === 'ajuste' ? (
+    <div className={`rounded-md border border-amber-500/30 bg-amber-500/10 px-3 text-amber-700 dark:text-amber-400 ${compacto ? 'py-1.5 text-[11px]' : 'py-2 text-xs'}`}>
+      <span className="font-semibold">Devolvida pra você</span> · precisa de ajuste
+    </div>
+  ) : null;
+
+  const revisaoFmt = terminal?.tipo === 'sobrestada' ? fmtDiaMes(terminal.revisao) : null;
+  const EXPLICA_ESPERA = 'Aguardando verba ou equipe — você será avisado quando o pedido voltar a andar.';
+  const faixaSobrestada = terminal?.tipo === 'sobrestada' ? (
+    <div title={EXPLICA_ESPERA} className={`rounded-md border border-amber-500/30 bg-amber-500/10 px-3 text-amber-700 dark:text-amber-400 ${compacto ? 'py-1.5 text-[11px]' : 'py-2 text-xs'}`}>
+      <span className="font-semibold">Em espera</span>
+      {terminal.motivo ? ` · ${terminal.motivo}` : ''}
+      {revisaoFmt ? ` · revisão em ${revisaoFmt}` : ''}
+      {!compacto && (
+        <span className="block mt-0.5 font-normal opacity-80">{EXPLICA_ESPERA}</span>
+      )}
+    </div>
+  ) : null;
+
+  if (compacto) {
+    if (substituiStepper) {
+      return <div className="mt-3 pt-3 border-t border-border">{faixaTerminal}</div>;
+    }
+    return (
+      <div className="mt-3 pt-3 border-t border-border space-y-2">
+        {faixaAjuste}
+        {faixaSobrestada}
+        <div className="flex items-center gap-2">
+          <div className="flex items-center flex-1 min-w-0">
+            {etapas.map((et, i) => (
+              <Fragment key={et.key}>
+                {i > 0 && (
+                  <div className={`h-px flex-1 min-w-[8px] ${etapas[i - 1].done ? 'bg-primary' : 'bg-border'}`} />
+                )}
+                <div
+                  title={et.label}
+                  className={`h-2.5 w-2.5 rounded-full shrink-0 ${
+                    et.done ? 'bg-primary'
+                      : et.atual ? 'bg-primary/25 ring-2 ring-primary animate-pulse motion-reduce:animate-none'
+                        : 'bg-muted border border-border'
+                  }`}
+                />
+              </Fragment>
+            ))}
+          </div>
+          <span className="text-[10px] font-medium text-foreground shrink-0">{etapaAtualLabel}</span>
+        </div>
+        {                                                                          }
+        {quem && <p className="text-xs font-medium text-foreground/80">{quem}</p>}
+      </div>
+    );
+  }
+
+
+  return (
+    <div className="space-y-3 pb-3 border-b border-border">
+      {substituiStepper ? faixaTerminal : (
+        <>
+          {faixaAjuste}
+          {faixaSobrestada}
+          <div className="flex items-start pt-1">
+            {etapas.map((et, i) => (
+              <div key={et.key} className="relative flex-1 flex flex-col items-center min-w-0">
+                {i > 0 && (
+                  <div
+                    className={`absolute top-[13px] h-0.5 w-full ${etapas[i - 1].done ? 'bg-primary' : 'bg-border'}`}
+                    style={{ left: '-50%' }}
+                  />
+                )}
+                <div className={`relative z-[1] h-7 w-7 rounded-full flex items-center justify-center text-[11px] font-semibold ${
+                  et.done ? 'bg-primary text-primary-foreground'
+                    : et.atual ? 'bg-primary/15 text-primary ring-2 ring-primary animate-pulse motion-reduce:animate-none'
+                      : 'bg-muted text-muted-foreground'
+                }`}>
+                  {et.done ? <Check className="h-3.5 w-3.5" /> : i + 1}
+                </div>
+                <span className={`text-[10px] mt-1 text-center leading-tight ${et.done || et.atual ? 'text-foreground font-medium' : 'text-muted-foreground'}`}>
+                  {et.label}
+                </span>
+                {et.done && fmtData(et.data) && (
+                  <span className="text-[9px] text-muted-foreground">{fmtData(et.data)}</span>
+                )}
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+      {!substituiStepper && quem && <p className="text-xs font-medium text-foreground/80">{quem}</p>}
+    </div>
+  );
+}
+
+
+
+function isSlaEstourando(item) {
+  const fora = ['concluido', 'avaliado', 'rejeitado', 'cancelado', 'aprovado', 'aguardando_ajuste', 'sobrestada', 'aguardando_merito'].includes(item.status);
+  if (fora) return false;
+  const ativo = !item.respondido_em ? item.sla_resposta_deadline : item.sla_resolucao_deadline;
+  if (!ativo) return false;
+  return (new Date(ativo).getTime() - Date.now()) / 3600000 < 24;
+}
+
+
+
+
+
+
+
+
+
+function AtenderFoco({ items, onOpen, selectedId }) {
+  const money = (v) => Number(v || 0).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
+  const ehUrgente = (i) => i.eh_urgente || i.urgencia === 'urgente';
+  const urgentes = items.filter(ehUrgente);
+  const demais = items.filter(i => !ehUrgente(i));
+  const atrasadas = items.filter(isSlaEstourando);
+  const valorAnalise = items.reduce((s, i) => s + (Number(i.valor_estimado) || 0), 0);
+
+  const cards = [
+    { label: 'Na fila', valor: items.length, cor: '#00B39D', icon: ClipboardList },
+    { label: 'Urgentes', valor: urgentes.length, cor: '#ef4444', icon: Clock },
+    { label: 'SLA estourando', valor: atrasadas.length, cor: '#f59e0b', icon: Clock },
+    { label: 'Valor em análise', valor: money(valorAnalise), cor: '#6366f1', icon: FileText },
+  ];
+
+  const Row = (item) => {
+    const cat = getCatMeta(item.categoria);
+    const sla = getSlaBadge(item);
+    const ini = (item.solicitante?.name || item.titulo || '?').trim().charAt(0).toUpperCase();
+    const sub = comQuemEsta(item) || (item.solicitante?.name ? `por ${item.solicitante.name}` : '');
+    return (
+      <button
+        key={item.id}
+        onClick={() => onOpen(item)}
+        className={`w-full text-left flex items-center gap-3 px-3 py-3 rounded-lg border transition-colors hover:bg-muted/40 ${
+          selectedId === item.id ? 'border-primary ring-1 ring-primary/30 bg-primary/5' : 'border-border bg-card'
+        }`}
+      >
+        <span className="h-9 w-9 shrink-0 rounded-full flex items-center justify-center text-sm font-semibold text-white" style={{ backgroundColor: '#00B39D' }}>
+          {ini}
+        </span>
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="font-medium text-sm truncate">{item.titulo}</span>
+            <Badge className={`text-[10px] ${cat.color}`}>{cat.label}</Badge>
+            {ehUrgente(item) && <Badge className="text-[10px] bg-red-500/15 text-red-600 dark:text-red-400">Urgente</Badge>}
+          </div>
+          {sub && <p className="text-xs text-muted-foreground truncate mt-0.5">{sub}</p>}
+        </div>
+        <div className="flex items-center gap-2 shrink-0">
+          {Number(item.valor_estimado) > 0 && (
+            <span className="text-xs font-medium tabular-nums hidden sm:inline">{money(item.valor_estimado)}</span>
+          )}
+          {sla && <Badge className={`text-[10px] ${sla.color}`}>{sla.label}</Badge>}
+          <ArrowRight className="h-4 w-4 text-muted-foreground" />
+        </div>
+      </button>
+    );
+  };
+
+  return (
+    <div className="space-y-4">
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+        {cards.map(c => (
+          <div key={c.label} className="p-3 rounded-lg border bg-card">
+            <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+              <c.icon className="h-3.5 w-3.5" style={{ color: c.cor }} /> {c.label}
+            </div>
+            <p className="text-2xl font-bold mt-1 tabular-nums" style={{ color: c.cor }}>{c.valor}</p>
+          </div>
+        ))}
+      </div>
+
+      {items.length === 0 ? (
+        <Card className="p-8 text-center text-muted-foreground">Nenhuma solicitação na fila para os filtros atuais.</Card>
+      ) : (
+        <div className="space-y-5">
+          {urgentes.length > 0 && (
+            <div>
+              <p className="text-[11px] font-semibold uppercase tracking-wide text-red-600 dark:text-red-400 mb-2">
+                Urgentes <span className="text-muted-foreground">· {urgentes.length}</span>
+              </p>
+              <div className="space-y-2">{urgentes.map(Row)}</div>
+            </div>
+          )}
+          {demais.length > 0 && (
+            <div>
+              {urgentes.length > 0 && (
+                <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground mb-2">
+                  Demais <span>· {demais.length}</span>
+                </p>
+              )}
+              <div className="space-y-2">{demais.map(Row)}</div>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ListaSolicitacoes({ items, onOpen, profileId, emptyMsg, comTracker = false }) {
+  if (!items || items.length === 0) {
+    return (
+      <Card className="p-8 text-center">
+        <List className="h-10 w-10 text-muted-foreground mx-auto mb-3" />
+        <p className="text-muted-foreground">{emptyMsg || 'Nenhuma solicitação.'}</p>
+      </Card>
+    );
+  }
+  return (
+    <div className="space-y-3">
+      {items.map(item => {
+        const cat = getCatMeta(item.categoria);
+        const urg = getUrgMeta(item.urgencia);
+        const st = getStatusMeta(item.status);
+        const sla = getSlaBadge(item);
+        const date = new Date(item.created_at).toLocaleDateString('pt-BR');
+        const precisaAvaliar = item.status === 'concluido' && item.solicitante_id === profileId && item.nps_nota == null;
+        const aguardandoOrigem = item.status === 'aguardando_aprovacao_origem' && ['pendente', 'triagem'].includes(item.aprovacao_origem_status);
+        const emTriagem = item.aprovacao_origem_status === 'triagem';
+        const diretorNome = item.aprovacao_origem_diretor?.name;
+        const aprovadoresLista = Array.isArray(item.aprovacao_origem_aprovadores) ? item.aprovacao_origem_aprovadores.filter(Boolean) : [];
+        const aprovadoresLabel = aprovadoresLista.length ? aprovadoresLista.join(' ou ') : (diretorNome || 'diretor de origem');
+        const foiRejeitada = item.status === 'rejeitado' && item.aprovacao_origem_status === 'rejeitada';
+        return (
+          <Card
+            key={item.id}
+            className={`p-4 cursor-pointer hover:shadow-md transition-shadow ${
+              precisaAvaliar ? 'border-l-4 border-l-amber-500 bg-amber-500/5' :
+              aguardandoOrigem ? 'border-l-4 border-l-violet-500 bg-violet-500/5' : ''
+            }`}
+            onClick={() => onOpen(item)}
+          >
+            {
+
+
+                                                                                           }
+            <div className="flex items-start justify-between gap-3">
+              <p className="text-[15px] font-semibold leading-snug text-foreground min-w-0 flex-1 line-clamp-2">
+                {item.numero_sequencial != null && (
+                  <span className="text-muted-foreground font-normal">#{item.numero_sequencial} · </span>
+                )}
+                {item.titulo}
+              </p>
+              <span className="text-xs text-muted-foreground shrink-0 mt-0.5">{date}</span>
+            </div>
+            <div className="flex flex-wrap items-center gap-1.5 mt-2">
+              <Badge className={`text-xs ${cat.color}`}>{cat.label}</Badge>
+              {item.eh_planejado === true && (
+                <Badge className="text-xs bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border border-emerald-500/30">Planejado</Badge>
+              )}
+              {precisaAvaliar && (
+                <Badge className="text-xs bg-amber-500/15 text-amber-700 dark:text-amber-400 gap-1">
+                  <Star className="h-3 w-3" /> Avalie
+                </Badge>
+              )}
+              {item.ml_last_status && ML_STATUS_META[item.ml_last_status] && (
+                <Badge className={`text-xs ${ML_STATUS_META[item.ml_last_status].color}`}>
+                  {ML_STATUS_META[item.ml_last_status].emoji} {ML_STATUS_META[item.ml_last_status].label}
+                </Badge>
+              )}
+              {item.area_responsavel && !areaBadgeRedundante(cat.label, AREA_LABELS[item.area_responsavel] || item.area_responsavel) && (
+                <Badge className="text-xs bg-muted text-muted-foreground hidden sm:inline-flex">{AREA_LABELS[item.area_responsavel] || item.area_responsavel}</Badge>
+              )}
+              {sla && <Badge className={`text-xs ${sla.color}`}>{sla.label}</Badge>}
+              {item.urgencia && item.urgencia !== 'normal' && <Badge className={`text-xs ${urg.color}`}>{urg.label}</Badge>}
+              {!comTracker && <Badge className={`text-xs ${st.color}`}>{st.label}</Badge>}
+            </div>
+            {!comTracker && aguardandoOrigem && (
+              <p className="flex items-center gap-1.5 text-xs text-violet-700 dark:text-violet-400 mt-2">
+                <Clock className="h-3.5 w-3.5 shrink-0" />
+                {emTriagem
+                  ? <span>Em triagem · definindo o aprovador{item.eh_urgente ? ' · urgente' : ''}</span>
+                  : <span>Aguardando aprovação de <span className="font-medium">{aprovadoresLabel}</span>{item.eh_urgente ? ' · urgente' : ''}</span>}
+              </p>
+            )}
+            {!comTracker && foiRejeitada && item.aprovacao_origem_motivo && (
+              <p className="text-xs text-red-700 dark:text-red-400 mt-2">
+                <span className="font-medium">Rejeitada:</span> {item.aprovacao_origem_motivo}
+              </p>
+            )}
+            {item.descricao && (comTracker || (!aguardandoOrigem && !foiRejeitada)) && (
+              <p className="text-xs text-muted-foreground mt-2 line-clamp-1">{item.descricao}</p>
+            )}
+            {comTracker && <TrackerSolicitacao item={item} compacto />}
+          </Card>
+        );
+      })}
+    </div>
+  );
+}
+
+
+
+
+
+const STATUS_ENCERRADOS_MINHAS = ['concluido', 'avaliado', 'rejeitado', 'cancelado'];
+function MinhasLista({ items, onOpen, profileId, temFiltros = false }) {
+
+  const [encerradasToggle, setEncerradasToggle] = useState(null);
+  const precisaDeVoce = (items || []).filter(i =>
+    i.status === 'aguardando_ajuste' ||
+    (i.status === 'concluido' && i.solicitante_id === profileId && i.nps_nota == null));
+  const idsPrecisa = new Set(precisaDeVoce.map(i => i.id));
+  const emAndamento = (items || []).filter(i => !idsPrecisa.has(i.id) && !STATUS_ENCERRADOS_MINHAS.includes(i.status));
+  const encerradas = (items || []).filter(i => !idsPrecisa.has(i.id) && STATUS_ENCERRADOS_MINHAS.includes(i.status));
+  const encerradasAbertas = encerradasToggle ?? encerradas.length <= 5;
+
+  if (!items || items.length === 0) {
+    return (
+      <Card className="p-10 text-center">
+        <ClipboardList className="h-10 w-10 text-muted-foreground/60 mx-auto mb-3" />
+        {temFiltros ? (
+          <>
+            <p className="text-sm font-medium text-foreground">Nenhuma solicitação encontrada</p>
+            <p className="text-sm text-muted-foreground mt-1">Tente ajustar a busca, os filtros ou o período acima.</p>
+          </>
+        ) : (
+          <>
+            <p className="text-sm font-medium text-foreground">Você ainda não fez nenhuma solicitação</p>
+            <p className="text-sm text-muted-foreground mt-1">Clique em Nova Solicitação, no topo da página, para começar.</p>
+          </>
+        )}
+      </Card>
+    );
+  }
+
+  return (
+    <div className="space-y-6">
+      {precisaDeVoce.length > 0 && (
+        <section>
+          <div className="flex items-center gap-2 mb-2">
+            <span className="text-xs font-semibold uppercase tracking-wide text-amber-600 dark:text-amber-400">Precisa de você</span>
+            <Badge className="text-[10px] bg-amber-500/15 text-amber-700 dark:text-amber-400 px-1.5">{precisaDeVoce.length}</Badge>
+          </div>
+          <ListaSolicitacoes items={precisaDeVoce} onOpen={onOpen} profileId={profileId} comTracker />
+        </section>
+      )}
+      {emAndamento.length > 0 && (
+        <section>
+          <div className="flex items-center gap-2 mb-2">
+            <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Em andamento</span>
+            <Badge variant="secondary" className="text-[10px] px-1.5">{emAndamento.length}</Badge>
+          </div>
+          <ListaSolicitacoes items={emAndamento} onOpen={onOpen} profileId={profileId} comTracker />
+        </section>
+      )}
+      {encerradas.length > 0 && (
+        <section>
+          <button
+            type="button"
+            onClick={() => setEncerradasToggle(!encerradasAbertas)}
+            className="flex items-center gap-2 mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground hover:text-foreground transition-colors"
+          >
+            <ChevronDown className={`h-3.5 w-3.5 transition-transform ${encerradasAbertas ? '' : '-rotate-90'}`} />
+            Encerradas
+            <Badge variant="secondary" className="text-[10px] px-1.5">{encerradas.length}</Badge>
+            <span className="normal-case font-normal text-[11px]">{encerradasAbertas ? 'ocultar' : 'mostrar'}</span>
+          </button>
+          {encerradasAbertas && (
+            <ListaSolicitacoes items={encerradas} onOpen={onOpen} profileId={profileId} comTracker />
+          )}
+        </section>
+      )}
+    </div>
+  );
+}
+
+function getSlaBadge(item) {
+
+
+  const concluido = ['concluido', 'avaliado', 'rejeitado', 'cancelado', 'aprovado', 'aguardando_ajuste', 'sobrestada', 'aguardando_merito'].includes(item.status);
+  if (concluido) return null;
+  const ativo = !item.respondido_em ? item.sla_resposta_deadline : item.sla_resolucao_deadline;
+  if (!ativo) return null;
+  const horas = (new Date(ativo).getTime() - Date.now()) / 3600000;
+  if (horas < 0) {
+    return { label: `${Math.abs(Math.round(horas))}h atrasado`, color: 'bg-rose-500/15 text-rose-700 dark:text-rose-400 border border-rose-500/30' };
+  }
+  if (horas < 4) {
+    return { label: `${Math.round(horas)}h`, color: 'bg-amber-500/15 text-amber-700 dark:text-amber-400 border border-amber-500/30' };
+  }
+  if (horas < 24) {
+    return { label: `${Math.round(horas)}h`, color: 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-400' };
+  }
+  return null;
+}
+
+
+function CarimboLinha({ rotulo, status, nomes }) {
+  const lista = Array.isArray(nomes) ? nomes.filter(Boolean) : [];
+  const quem = lista.length ? ` (${lista.join(' ou ')})` : '';
+  const aprovada = status === 'aprovada';
+  return (
+    <div className="flex items-center gap-1.5 text-xs">
+      {aprovada
+        ? <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600 shrink-0" />
+        : <Clock className="h-3.5 w-3.5 text-amber-500 shrink-0" />}
+      <span className="text-muted-foreground min-w-0 truncate">{rotulo}{quem}:</span>
+      <span className={`font-medium shrink-0 ${aprovada ? 'text-emerald-700 dark:text-emerald-400' : 'text-amber-700 dark:text-amber-400'}`}>
+        {aprovada ? 'aprovada' : 'pendente'}
+      </span>
+    </div>
+  );
+}
+
+
+
+function HistoricoAprovacoes({ isAdmin }) {
+  const [rows, setRows] = useState(null);
+  const [erro, setErro] = useState(null);
+  const [todos, setTodos] = useState(false);
+
+  useEffect(() => {
+    let vivo = true;
+    setRows(null); setErro(null);
+    api.minhasAprovacoes({ dias: 180, ...(isAdmin && todos ? { todos: 1 } : {}) })
+      .then(d => { if (vivo) setRows(Array.isArray(d) ? d : []); })
+      .catch(() => { if (vivo) setErro('Não foi possível carregar o histórico.'); });
+    return () => { vivo = false; };
+  }, [isAdmin, todos]);
+
+  const etapaLabel = { origem: 'Origem (área)', gestao: '2º carimbo', merito: 'Mérito' };
+  const catLabel = (c) => (CATEGORIAS.find(x => x.value === c)?.label) || c || '—';
+  const fmt = (iso) => {
+    const d = new Date(iso);
+    return Number.isNaN(d.getTime()) ? '' : d.toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', year: '2-digit', hour: '2-digit', minute: '2-digit' });
+  };
+
+  if (erro) return <Card className="p-8 text-center text-muted-foreground">{erro}</Card>;
+  if (rows === null) return <div className="flex items-center justify-center min-h-[30vh]"><div className="h-6 w-6 animate-spin rounded-full border-2 border-muted-foreground/30 border-t-primary" /></div>;
+
+  return (
+    <div className="space-y-3">
+      {isAdmin && (
+        <label className="flex items-center justify-end gap-2 text-xs text-muted-foreground cursor-pointer">
+          <input type="checkbox" checked={todos} onChange={e => setTodos(e.target.checked)} className="accent-primary" />
+          Ver decisões de todos os aprovadores
+        </label>
+      )}
+      {rows.length === 0 ? (
+        <Card className="p-8 text-center">
+          <ClipboardList className="h-10 w-10 text-muted-foreground/50 mx-auto mb-3" />
+          <p className="text-muted-foreground">Nenhuma decisão registrada nos últimos 180 dias.</p>
+        </Card>
+      ) : (
+        <Card className="divide-y divide-border">
+          {rows.map(r => (
+            <div key={r.evento_id} className="flex items-start gap-3 p-3">
+              <div className="mt-0.5 shrink-0">
+                {r.decisao === 'rejeitada'
+                  ? <XCircle className="h-5 w-5 text-red-500" />
+                  : <CheckCircle2 className="h-5 w-5 text-emerald-500" />}
+              </div>
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="font-medium text-sm truncate">{r.titulo || 'Solicitação'}</span>
+                  <Badge className="text-[10px] bg-muted text-muted-foreground">{catLabel(r.categoria)}</Badge>
+                  <Badge className={`text-[10px] ${r.decisao === 'rejeitada' ? 'bg-red-500/10 text-red-600' : 'bg-emerald-500/10 text-emerald-600'}`}>
+                    {r.decisao === 'rejeitada' ? 'Rejeitada' : 'Aprovada'} · {etapaLabel[r.etapa] || r.etapa}
+                  </Badge>
+                </div>
+                <div className="text-xs text-muted-foreground mt-0.5">
+                  {r.solicitante ? `Pedido de ${r.solicitante}` : ''}
+                  {isAdmin && todos && r.ator ? ` · por ${r.ator}` : ''}
+                  {r.status_atual ? ` · agora: ${STATUS_LABELS[r.status_atual]?.label || r.status_atual}` : ''}
+                </div>
+              </div>
+              <div className="text-[11px] text-muted-foreground whitespace-nowrap tabular-nums shrink-0">{fmt(r.em)}</div>
+            </div>
+          ))}
+        </Card>
+      )}
+    </div>
+  );
+}
+
+function AprovacaoOrigemCard({ item, onApprove, onReject, onClick }) {
+  const [confirmReject, setConfirmReject] = useState(false);
+  const [motivo, setMotivo] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+  const cat = getCatMeta(item.categoria);
+  const urg = getUrgMeta(item.urgencia);
+  const solicitanteNome = item.solicitante?.name || item.solicitante_nome || 'Solicitante';
+  const date = new Date(item.created_at).toLocaleDateString('pt-BR');
+  const horas = Math.round((Date.now() - new Date(item.created_at).getTime()) / 3600000);
+  const aguardandoHa = horas < 24 ? `${horas}h` : `${Math.floor(horas / 24)}d ${horas % 24}h`;
+
+  async function confirmarRejeicao() {
+    if (motivo.trim().length < 5) {
+      toast.error('Motivo precisa ter pelo menos 5 caracteres');
+      return;
+    }
+    setSubmitting(true);
+    try {
+      await onReject(item.id, motivo.trim());
+      setConfirmReject(false);
+      setMotivo('');
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <Card
+      className="p-4 cursor-pointer hover:shadow-md transition-shadow border-l-4 border-l-violet-500"
+      onClick={onClick}
+    >
+      <div className="flex items-start justify-between gap-3 mb-3">
+        <div className="flex flex-wrap items-center gap-1.5">
+          <Badge className={`text-xs ${cat.color}`}>{cat.label}</Badge>
+          {item.urgencia && item.urgencia !== 'normal' && (
+            <Badge className={`text-xs ${urg.color}`}>{urg.label}</Badge>
+          )}
+          {item.eh_urgente && (
+            <Badge className="text-xs bg-red-500/15 text-red-700 dark:text-red-400">Urgente</Badge>
+          )}
+          {item.aprovacao_origem_status === 'triagem' && (
+            <Badge className="text-xs bg-amber-500/15 text-amber-700 dark:text-amber-400">Triagem · sem setor</Badge>
+          )}
+          <span className="text-xs text-muted-foreground">aguardando {aguardandoHa}</span>
+        </div>
+        <span className="text-xs text-muted-foreground whitespace-nowrap">{date}</span>
+      </div>
+      <p className="text-[15px] font-semibold leading-snug text-foreground mb-1">{item.titulo}</p>
+      <p className="text-xs text-muted-foreground mb-2">
+        por {solicitanteNome}
+        {item.area_responsavel && <> · vai pra <span className="font-medium">{AREA_LABELS[item.area_responsavel] || item.area_responsavel}</span></>}
+        {item.data_necessaria && <> · precisa até {new Date(item.data_necessaria).toLocaleDateString('pt-BR')}</>}
+      </p>
+      {item.valor_estimado != null && (
+        <p className="mb-2">
+          <span className="text-base font-bold text-foreground">
+            R$ {Number(item.valor_estimado).toLocaleString('pt-BR', { minimumFractionDigits: 2 })}
+          </span>
+          <span className="text-xs text-muted-foreground ml-1.5">valor estimado</span>
+        </p>
+      )}
+      {item.descricao && (
+        <p className="text-sm text-muted-foreground line-clamp-2 mb-2">{item.descricao}</p>
+      )}
+      {item.justificativa && (
+        <p className="text-xs text-muted-foreground mb-2"><span className="font-medium">Justificativa:</span> {item.justificativa}</p>
+      )}
+      {item.eh_urgente && item.justificativa_urgencia && (
+        <p className="text-xs text-red-700 dark:text-red-400 mb-2"><span className="font-medium">Urgência:</span> {item.justificativa_urgencia}</p>
+      )}
+
+      {
+
+
+
+                                                                                 }
+      {(() => {
+        const anexos = [
+          ...(Array.isArray(item.imagens_url) ? item.imagens_url : []),
+          ...(item.documento_url ? [item.documento_url] : []),
+        ].filter(Boolean);
+        if (!anexos.length) return null;
+        return (
+          <div className="flex flex-wrap items-center gap-1.5 mb-2">
+            {anexos.slice(0, 4).map((url, i) => (
+              <a key={i} href={url} target="_blank" rel="noopener noreferrer"
+                onClick={e => e.stopPropagation()}
+                title={nomeDoArquivo(url)}
+                className="inline-flex items-center gap-1 rounded border border-border bg-muted/40 px-1.5 py-0.5 text-[11px] text-foreground hover:border-primary/50 max-w-[170px]">
+                {ehImagem(url)
+                  ? <ImageIcon className="h-3 w-3 shrink-0 text-muted-foreground" />
+                  : <FileText className="h-3 w-3 shrink-0 text-muted-foreground" />}
+                <span className="truncate">{nomeDoArquivo(url)}</span>
+              </a>
+            ))}
+            {anexos.length > 4 && (
+              <span className="text-[11px] text-muted-foreground">+{anexos.length - 4}</span>
+            )}
+          </div>
+        );
+      })()}
+
+      {                                                                    }
+      {item.categoria === 'marketing' && (item.marketing_tipo || item.marketing_destino) && (
+        <div className="flex flex-wrap gap-1 mb-2">
+          {item.marketing_tipo && (
+            <Badge
+              className="text-[10px] px-1.5 py-0.5"
+              style={item.marketing_tipo.cor ? { backgroundColor: `${item.marketing_tipo.cor}25`, color: item.marketing_tipo.cor } : undefined}
+            >
+              {item.marketing_tipo.nome}
+            </Badge>
+          )}
+          {item.marketing_destino && (
+            <Badge
+              className="text-[10px] px-1.5 py-0.5"
+              style={item.marketing_destino.cor ? { backgroundColor: `${item.marketing_destino.cor}25`, color: item.marketing_destino.cor } : undefined}
+            >
+              {item.marketing_destino.nome}
+            </Badge>
+          )}
+          {item.marketing_tipo?.habilidade_padrao && (
+            <span className="text-[10px] text-muted-foreground self-center">
+              · sugere {item.marketing_tipo.habilidade_padrao}
+            </span>
+          )}
+        </div>
+      )}
+
+      {
+                                                                                    }
+      {item.aprovacao_gestao_status != null && (
+        <div className="space-y-1.5 rounded-md border border-border bg-muted/30 px-3 py-2.5 mb-2">
+          <CarimboLinha
+            rotulo="Diretoria da área"
+            status={item.aprovacao_origem_status}
+            nomes={item.aprovacao_origem_aprovadores}
+          />
+          <CarimboLinha
+            rotulo="Diretoria de Gestão"
+            status={item.aprovacao_gestao_status}
+            nomes={item.aprovacao_gestao_aprovadores}
+          />
+        </div>
+      )}
+
+      {!confirmReject ? (
+        <div className="flex gap-2 mt-3 pt-3 border-t border-border" onClick={e => e.stopPropagation()}>
+          <Button
+            size="sm"
+            onClick={() => onApprove(item.id)}
+            className="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white"
+          >
+            <CheckCircle2 className="h-4 w-4 mr-1" /> Aprovar
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => setConfirmReject(true)}
+            className="flex-1 text-red-600 hover:bg-red-50 dark:hover:bg-red-950/30"
+          >
+            <XCircle className="h-4 w-4 mr-1" /> Rejeitar
+          </Button>
+        </div>
+      ) : (
+        <div className="mt-3 pt-3 border-t border-border space-y-2" onClick={e => e.stopPropagation()}>
+          <Label className="text-xs">Motivo da rejeição *</Label>
+          <Textarea
+            value={motivo}
+            onChange={e => setMotivo(e.target.value)}
+            rows={2}
+            placeholder="Solicitação rejeitada não reabre · solicitante terá que criar nova."
+          />
+          <div className="flex gap-2">
+            <Button size="sm" variant="outline" onClick={() => { setConfirmReject(false); setMotivo(''); }}>
+              Cancelar
+            </Button>
+            <Button
+              size="sm"
+              onClick={confirmarRejeicao}
+              disabled={motivo.trim().length < 5 || submitting}
+              className="bg-red-600 hover:bg-red-700 text-white"
+            >
+              {submitting ? 'Rejeitando...' : 'Confirmar rejeição'}
+            </Button>
+          </div>
+        </div>
+      )}
+    </Card>
+  );
+}
+
+
+
+
+function AprovacaoMeritoCard({ item, onApprove, onReject, onClick }) {
+  const [confirmReprova, setConfirmReprova] = useState(false);
+  const [motivo, setMotivo] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+  const cat = getCatMeta(item.categoria);
+  const solicitanteNome = item.solicitante?.name || item.solicitante_nome || 'Solicitante';
+  const date = new Date(item.created_at).toLocaleDateString('pt-BR');
+
+  async function confirmarReprovacao() {
+    if (motivo.trim().length < 5) {
+      toast.error('Motivo precisa ter pelo menos 5 caracteres');
+      return;
+    }
+    setSubmitting(true);
+    try {
+      await onReject(item.id, motivo.trim());
+      setConfirmReprova(false);
+      setMotivo('');
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <Card
+      className="p-4 cursor-pointer hover:shadow-md transition-shadow border-l-4 border-l-violet-500"
+      onClick={onClick}
+    >
+      <div className="flex items-start justify-between gap-3 mb-3">
+        <div className="flex flex-wrap items-center gap-2">
+          <Badge className="text-xs bg-violet-500/15 text-violet-700 dark:text-violet-400">Julgamento de mérito</Badge>
+          <Badge className={`text-xs ${cat.color}`}>{cat.label}</Badge>
+          {item.eh_urgente && (
+            <Badge className="text-xs bg-red-500/15 text-red-700 dark:text-red-400">Urgente</Badge>
+          )}
+        </div>
+        <span className="text-xs text-muted-foreground whitespace-nowrap">{date}</span>
+      </div>
+      <p className="text-[15px] font-semibold leading-snug text-foreground mb-1">{item.titulo}</p>
+      <p className="text-xs text-muted-foreground mb-2">
+        por {solicitanteNome}
+        {item.area_responsavel && <> · vai pra <span className="font-medium">{AREA_LABELS[item.area_responsavel] || item.area_responsavel}</span></>}
+        {item.data_necessaria && <> · precisa até {new Date(item.data_necessaria).toLocaleDateString('pt-BR')}</>}
+      </p>
+      {item.valor_estimado != null && (
+        <p className="mb-2">
+          <span className="text-lg font-bold text-foreground">
+            R$ {Number(item.valor_estimado).toLocaleString('pt-BR', { minimumFractionDigits: 2 })}
+          </span>
+          <span className="text-xs text-muted-foreground ml-1.5">valor estimado</span>
+        </p>
+      )}
+      {item.descricao && (
+        <p className="text-sm text-muted-foreground line-clamp-2 mb-2">{item.descricao}</p>
+      )}
+      {item.justificativa && (
+        <p className="text-xs text-muted-foreground mb-2"><span className="font-medium">Justificativa:</span> {item.justificativa}</p>
+      )}
+
+      {!confirmReprova ? (
+        <div className="flex gap-2 mt-3 pt-3 border-t border-border" onClick={e => e.stopPropagation()}>
+          <Button
+            size="sm"
+            onClick={() => onApprove(item.id)}
+            className="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white"
+          >
+            <CheckCircle2 className="h-4 w-4 mr-1" /> Aprovar mérito
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => setConfirmReprova(true)}
+            className="flex-1 text-red-600 hover:bg-red-50 dark:hover:bg-red-950/30"
+          >
+            <XCircle className="h-4 w-4 mr-1" /> Reprovar
+          </Button>
+        </div>
+      ) : (
+        <div className="mt-3 pt-3 border-t border-border space-y-2" onClick={e => e.stopPropagation()}>
+          <Label className="text-xs">Motivo da reprovação *</Label>
+          <Textarea
+            value={motivo}
+            onChange={e => setMotivo(e.target.value)}
+            rows={2}
+            placeholder="Solicitação reprovada não reabre · o solicitante terá que criar nova."
+          />
+          <div className="flex gap-2">
+            <Button size="sm" variant="outline" onClick={() => { setConfirmReprova(false); setMotivo(''); }}>
+              Cancelar
+            </Button>
+            <Button
+              size="sm"
+              onClick={confirmarReprovacao}
+              disabled={motivo.trim().length < 5 || submitting}
+              className="bg-red-600 hover:bg-red-700 text-white"
+            >
+              {submitting ? 'Reprovando...' : 'Confirmar reprovação'}
+            </Button>
+          </div>
+        </div>
+      )}
+    </Card>
+  );
+}
+
+
+
+
+
+
+
+function tempoAtras(iso) {
+  if (!iso) return '';
+  const min = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 60000));
+  if (min < 60) return `${min}m`;
+  const h = Math.round(min / 60);
+  if (h < 24) return `${h}h`;
+  return `${Math.round(h / 24)}d`;
+}
+function ehUrgente(item) {
+  return item.eh_urgente === true || item.urgencia === 'critica' || item.urgencia === 'alta';
+}
+
+
+const STATUS_ENCERRADOS = ['concluido', 'cancelado', 'rejeitado', 'avaliado'];
+function ehEncerrada(item) {
+  return STATUS_ENCERRADOS.includes(item.status);
+}
+function dotUrg(item) {
+  if (item.urgencia === 'critica' || item.eh_urgente) return 'bg-rose-500';
+  if (item.urgencia === 'alta') return 'bg-amber-500';
+  if (item.urgencia === 'baixa') return 'bg-slate-400';
+  return 'bg-blue-500';
+}
+function iniciais(nome) {
+  const p = String(nome || '').trim().split(/\s+/).filter(Boolean);
+  return (((p[0]?.[0] || '') + (p.length > 1 ? p[p.length - 1][0] : '')).toUpperCase()) || '?';
+}
+
+function StatMini({ label, valor, tom }) {
+  const cor = tom === 'rose' ? 'text-rose-600 dark:text-rose-400'
+    : tom === 'amber' ? 'text-amber-600 dark:text-amber-400' : 'text-foreground';
+  return (
+    <Card className="p-4">
+      <p className="text-xs text-muted-foreground font-medium mb-1">{label}</p>
+      <p className={`text-2xl font-extrabold ${cor}`}>{valor}</p>
+    </Card>
+  );
+}
+
+function SolicitanteCard({ grupo, maxCarga, onOpen }) {
+  const [aberto, setAberto] = useState(false);
+  const carga = Math.round((grupo.demandas.length / maxCarga) * 100);
+  const barCor = carga >= 85 ? 'bg-rose-500' : carga >= 60 ? 'bg-amber-500' : 'bg-primary';
+  const mostra = aberto ? grupo.demandas : grupo.demandas.slice(0, 3);
+  return (
+    <Card className="p-5">
+      <div className="flex items-center gap-3 mb-4">
+        <div className="h-11 w-11 rounded-full bg-primary/15 text-primary flex items-center justify-center text-sm font-bold shrink-0">
+          {iniciais(grupo.nome)}
+        </div>
+        <div className="min-w-0">
+          <p className="text-sm font-bold truncate">{grupo.nome}</p>
+          {grupo.email && <p className="text-[12px] text-muted-foreground truncate">{grupo.email}</p>}
+        </div>
+      </div>
+
+      <div className="flex items-center justify-between text-[12px] text-muted-foreground mb-1.5">
+        <span>Solicitações</span>
+        <span className="font-semibold text-foreground">{grupo.demandas.length}</span>
+      </div>
+      <div className="w-full h-1.5 bg-muted rounded-full overflow-hidden mb-4">
+        <div className={`h-full rounded-full transition-all ${barCor}`} style={{ width: `${carga}%` }} />
+      </div>
+
+      <div className="flex flex-wrap gap-1.5 mb-4">
+        {grupo.urgentes > 0 && (
+          <span className="text-[11px] font-semibold px-2 py-0.5 rounded-full bg-rose-500/10 text-rose-600 dark:text-rose-400 flex items-center gap-1">
+            <span className="h-1.5 w-1.5 rounded-full bg-rose-500 animate-pulse" />{grupo.urgentes} urgente{grupo.urgentes !== 1 ? 's' : ''}
+          </span>
+        )}
+        {grupo.normais > 0 && <span className="text-[11px] font-semibold px-2 py-0.5 rounded-full bg-amber-500/10 text-amber-600 dark:text-amber-400">{grupo.normais} normal{grupo.normais !== 1 ? 'is' : ''}</span>}
+        {grupo.baixas > 0 && <span className="text-[11px] font-semibold px-2 py-0.5 rounded-full bg-muted text-muted-foreground">{grupo.baixas} baixa{grupo.baixas !== 1 ? 's' : ''}</span>}
+      </div>
+
+      <div className="space-y-1">
+        {mostra.map(it => {
+          const st = getStatusMeta(it.status);
+          return (
+            <button key={it.id} onClick={() => onOpen(it)}
+              className="w-full text-left flex items-center gap-2.5 p-2 rounded-lg hover:bg-muted/60 transition-colors">
+              <span className={`h-1.5 w-1.5 rounded-full shrink-0 ${dotUrg(it)}`} />
+              <p className="text-[13px] truncate flex-1">{it.titulo}</p>
+              <Badge className={`text-[9px] px-1.5 py-0 ${st.color}`}>{st.label}</Badge>
+              <span className="text-[11px] text-muted-foreground shrink-0 w-8 text-right">{tempoAtras(it.created_at)}</span>
+            </button>
+          );
+        })}
+      </div>
+      {grupo.demandas.length > 3 && (
+        <button onClick={() => setAberto(a => !a)} className="w-full mt-2 text-[12px] font-semibold text-primary hover:opacity-80 py-1.5">
+          {aberto ? 'Ver menos' : `Ver todas (${grupo.demandas.length}) →`}
+        </button>
+      )}
+    </Card>
+  );
+}
+
+
+
+
+
+const STATUS_PENDENTE_SOLICITANTE = new Set([
+  'aguardando_aprovacao_origem', 'aguardando_merito', 'pendente', 'em_analise',
+  'aguardando_ajuste', 'em_cotacao', 'aguardando_aprovacao_financeira', 'sobrestada',
+]);
+function PainelPorSolicitante({ items, onOpen }) {
+
+
+  const ativos = useMemo(
+    () => (items || []).filter(i => STATUS_PENDENTE_SOLICITANTE.has(i.status)),
+    [items]);
+  const grupos = useMemo(() => {
+    const map = new Map();
+    for (const it of ativos) {
+      const key = it.solicitante_id || it.solicitante?.id || `nome:${(it.solicitante_nome || it.solicitante?.name || 'desconhecido').toLowerCase()}`;
+      if (!map.has(key)) {
+        map.set(key, { key, nome: it.solicitante?.name || it.solicitante_nome || 'Desconhecido', email: it.solicitante?.email || '', demandas: [] });
+      }
+      map.get(key).demandas.push(it);
+    }
+    const arr = [...map.values()];
+    arr.forEach(g => {
+      g.urgentes = g.demandas.filter(ehUrgente).length;
+      g.normais = g.demandas.filter(d => !ehUrgente(d) && d.urgencia !== 'baixa').length;
+      g.baixas = g.demandas.filter(d => d.urgencia === 'baixa').length;
+      g.demandas.sort((a, b) => (Number(ehUrgente(b)) - Number(ehUrgente(a))) || (new Date(b.created_at) - new Date(a.created_at)));
+    });
+    arr.sort((a, b) => (b.urgentes - a.urgentes) || (b.demandas.length - a.demandas.length) || a.nome.localeCompare(b.nome));
+    return arr;
+  }, [ativos]);
+
+  const maxCarga = Math.max(1, ...grupos.map(g => g.demandas.length));
+  const urgentesGlobais = useMemo(
+    () => ativos.filter(ehUrgente).sort((a, b) => new Date(b.created_at) - new Date(a.created_at)),
+    [ativos]
+  );
+  const totalSla = ativos.filter(i => { const s = getSlaBadge(i); return !!s && s.color.includes('rose'); }).length;
+
+  if (ativos.length === 0) {
+    return <Card className="p-8 text-center text-muted-foreground">Nenhuma solicitação pendente para os filtros atuais. 🎉</Card>;
+  }
+
+  return (
+    <div className="space-y-5">
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        <StatMini label="Solicitações pendentes" valor={ativos.length} />
+        <StatMini label="Solicitantes" valor={grupos.length} />
+        <StatMini label="Urgentes" valor={urgentesGlobais.length} tom="rose" />
+        <StatMini label="SLA atrasado" valor={totalSla} tom="amber" />
+      </div>
+
+      <div className="grid grid-cols-1 xl:grid-cols-[1fr_320px] gap-5">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          {grupos.map(g => <SolicitanteCard key={g.key} grupo={g} maxCarga={maxCarga} onOpen={onOpen} />)}
+        </div>
+
+        <div>
+          <Card className="p-5 xl:sticky xl:top-4">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-sm font-bold flex items-center gap-1.5">
+                <span className="h-2 w-2 rounded-full bg-rose-500 animate-pulse" /> Urgentes agora
+              </h3>
+              <Badge className="bg-rose-500/15 text-rose-700 dark:text-rose-400">{urgentesGlobais.length}</Badge>
+            </div>
+            {urgentesGlobais.length === 0 ? (
+              <p className="text-sm text-muted-foreground py-4 text-center">Nenhuma urgente. 🎉</p>
+            ) : (
+              <div className="space-y-2 max-h-[60vh] overflow-y-auto pr-1">
+                {urgentesGlobais.map(it => (
+                  <button key={it.id} onClick={() => onOpen(it)}
+                    className="w-full text-left flex items-start gap-2.5 p-2.5 rounded-lg border border-rose-500/20 bg-rose-500/5 hover:bg-rose-500/10 transition-colors">
+                    <span className={`mt-1 h-1.5 w-1.5 rounded-full shrink-0 ${dotUrg(it)}`} />
+                    <div className="min-w-0">
+                      <p className="text-[13px] font-medium leading-snug line-clamp-2">{it.titulo}</p>
+                      <p className="text-[11px] text-muted-foreground mt-0.5 truncate">
+                        {it.solicitante?.name || it.solicitante_nome || 'Desconhecido'} · há {tempoAtras(it.created_at)}
+                      </p>
+                    </div>
+                  </button>
+                ))}
+              </div>
+            )}
+          </Card>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
+
+
+
+function CardMacro({ item, canAgir, concluido = false, rejeitado = false, onStatusChange, onClick }) {
+  const cat = getCatMeta(item.categoria);
+  const accent = catAccent(item.categoria);
+  const date = new Date(item.created_at).toLocaleDateString('pt-BR', { day: '2-digit', month: 'short' });
+  const sla = getSlaBadge(item);
+  const st = getStatusMeta(item.status);
+  const solic = item.solicitante?.name || 'Desconhecido';
+  const valor = Number(item.valor_estimado);
+  const money = valor > 0 ? valor.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' }) : null;
+
+
+
+
+
+
+
+  const posAprov = ['compras', 'servico'].includes(item.categoria)
+    && (!!item.aprovado_financeiro_em || !!item.financeiro_dispensado_em);
+  const ehAguardandoCompra = posAprov && item.status === 'pendente' && item.area_responsavel === 'logistica_compras';
+  const ehAguardandoPagamento = posAprov && item.status === 'em_atendimento' && item.area_responsavel === 'financeiro';
+
+
+
+  const pagavelFin = prontaParaPagar(item);
+  const soPagando = CATEGORIAS_SO_CONCLUEM_PAGANDO.includes(item.categoria);
+  const acao = !canAgir ? null
+    : pagavelFin ? { label: 'Registrar pagamento', abrir: true }
+    : ehAguardandoCompra ? { label: 'Marcar como comprado', to: 'aguardando_entrega' }
+    : ehAguardandoPagamento ? { label: 'Marcar como pago', to: 'aguardando_entrega' }
+    : item.status === 'aguardando_entrega' ? { label: 'Confirmar entrega', to: 'concluido', icon: CheckCircle2 }
+    : item.status === 'pendente' ? { label: 'Analisar', to: 'em_analise', icon: ArrowRight }
+    : item.status === 'em_analise' ? { label: 'Aprovar', to: 'aprovado' }
+    : item.status === 'aprovado' && !soPagando ? { label: 'Concluir', to: 'concluido', icon: CheckCircle2 }
+    : null;
+  const podeRejeitar = canAgir && item.status === 'em_analise';
+
+  return (
+    <div
+      onClick={onClick}
+      className="rounded-xl border border-border/60 cursor-pointer transition-all hover:shadow-md hover:border-border"
+      style={{ background: 'var(--cbrio-card)', borderLeft: `3px solid ${accent}` }}
+    >
+      <div className="p-3">
+        <div className="flex items-center justify-between gap-2">
+          <span className="inline-flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground truncate">
+            <span className="h-1.5 w-1.5 rounded-full shrink-0" style={{ background: accent }} />
+            {cat.label}
+          </span>
+          <div className="flex items-center gap-1.5 shrink-0">
+            <span className="text-[10px] text-muted-foreground tabular-nums">{date}</span>
+            {sla && <span className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${sla.color}`}>{sla.label}</span>}
+          </div>
+        </div>
+        <p className={`text-sm font-semibold leading-snug mt-1.5 mb-2 line-clamp-2 ${concluido ? 'text-muted-foreground' : 'text-foreground'}`}>
+          {item.numero_sequencial != null && (
+            <span className="text-muted-foreground font-normal">#{item.numero_sequencial} · </span>
+          )}
+          {item.titulo}
+        </p>
+        <div className="flex items-center justify-between gap-2">
+          <span className="inline-flex items-center gap-1.5 min-w-0">
+            <span className="h-5 w-5 rounded-full bg-muted text-[9px] font-semibold text-muted-foreground inline-flex items-center justify-center shrink-0">{iniciais(solic)}</span>
+            <span className="text-[11px] text-muted-foreground truncate max-w-[120px]">{solic}</span>
+            {item.compartilhar_area === false && <Lock className="h-2.5 w-2.5 text-muted-foreground shrink-0" title="Privada" />}
+          </span>
+          <div className="flex items-center gap-1.5 shrink-0">
+            {money && <span className={`text-[11px] font-semibold tabular-nums ${concluido ? 'text-muted-foreground' : 'text-foreground'}`}>{money}</span>}
+            {rejeitado ? (
+              <XCircle className="h-3.5 w-3.5 text-rose-500 shrink-0" />
+            ) : concluido ? (
+              <CheckCircle2 className="h-3.5 w-3.5 text-emerald-500 shrink-0" />
+            ) : st ? (
+              <span className={`text-[10px] px-1.5 py-0.5 rounded shrink-0 ${st.color}`}>{st.label}</span>
+            ) : null}
+          </div>
+        </div>
+        {acao && (
+          <div className="mt-2.5 flex gap-1.5">
+            <Button size="sm" className="h-7 text-xs flex-1 bg-primary hover:bg-primary/90 text-primary-foreground"
+              onClick={e => { e.stopPropagation(); if (acao.abrir) onClick?.(); else onStatusChange(item.id, acao.to); }}>
+              {acao.label}{acao.icon && <acao.icon className="h-3 w-3 ml-1" />}
+            </Button>
+            {podeRejeitar && (
+              <Button size="sm" variant="outline" className="h-7 text-xs px-2 text-rose-600 border-rose-300 dark:border-rose-500/40"
+                onClick={e => { e.stopPropagation(); onStatusChange(item.id, 'rejeitado'); }}>
+                Rejeitar
+              </Button>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function SolicitacaoCard({ item, isAdmin, onStatusChange, onClick, draggable }) {
+  const cat = getCatMeta(item.categoria);
+  const urg = getUrgMeta(item.urgencia);
+  const solicitante = item.solicitante?.name || 'Desconhecido';
+  const date = new Date(item.created_at).toLocaleDateString('pt-BR', { day: '2-digit', month: 'short' });
+  const sla = getSlaBadge(item);
+  const st = getStatusMeta(item.status);
+  const aguardandoFin = item.status === 'aguardando_aprovacao_financeira';
+
+
+  const mostrarStatus = !['pendente', 'em_analise', 'concluido', 'rejeitado', 'aguardando_aprovacao_financeira'].includes(item.status);
+
+  return (
+    <Card
+      className={`p-3 cursor-pointer hover:shadow-md transition-shadow border-l-4 ${draggable ? 'active:opacity-60 active:scale-[0.97]' : ''}`}
+      style={{ borderLeftColor: item.urgencia === 'critica' ? 'var(--destructive)' : item.urgencia === 'alta' ? '#f59e0b' : 'transparent' }}
+      onClick={onClick}
+      draggable={draggable}
+      onDragStart={e => { e.dataTransfer.setData('text/plain', item.id); e.dataTransfer.effectAllowed = 'move'; }}
+    >
+      <div className="flex items-start justify-between gap-2 mb-2">
+        <Badge className={`text-[10px] px-1.5 py-0.5 ${cat.color}`}>{cat.label}</Badge>
+        <span className="text-[10px] text-muted-foreground whitespace-nowrap">{date}</span>
+      </div>
+      <p className="text-sm font-medium text-foreground line-clamp-2 mb-1.5">
+        {item.numero_sequencial != null && (
+          <span className="text-muted-foreground font-normal">#{item.numero_sequencial} · </span>
+        )}
+        {item.titulo}
+      </p>
+      <div className="flex items-center justify-between gap-1.5 flex-wrap">
+        <span className="text-[11px] text-muted-foreground truncate max-w-[160px] inline-flex items-center gap-1">
+          {solicitante}
+          {item.compartilhar_area === false && (
+            <span className="inline-flex items-center gap-0.5 text-[9px] text-muted-foreground" title="Privada · só você e quem atende">
+              <Lock className="h-2.5 w-2.5" /> privada
+            </span>
+          )}
+        </span>
+        <div className="flex items-center gap-1">
+          {mostrarStatus && <Badge className={`text-[10px] px-1.5 py-0.5 ${st.color}`}>{st.label}</Badge>}
+          {sla && (
+            <Badge className={`text-[10px] px-1.5 py-0.5 gap-0.5 ${sla.color}`}>
+              <Clock className="h-2.5 w-2.5" /> {sla.label}
+            </Badge>
+          )}
+          {item.urgencia && item.urgencia !== 'normal' && (
+            <Badge className={`text-[10px] px-1.5 py-0.5 ${urg.color}`}>{urg.label}</Badge>
+          )}
+        </div>
+      </div>
+      {aguardandoFin && (
+
+
+        item.pode_aprovar_alcada ? (
+          <div className="mt-2 flex items-center gap-1 text-[10px] text-emerald-700 dark:text-emerald-400 bg-emerald-500/10 border border-emerald-500/30 rounded px-2 py-1">
+            <CheckCircle2 className="h-3 w-3 shrink-0" /> Você pode aprovar · dentro da sua alçada
+          </div>
+        ) : (
+          <div className="mt-2 flex items-center gap-1 text-[10px] text-amber-700 dark:text-amber-400 bg-amber-500/10 border border-amber-500/30 rounded px-2 py-1">
+            <Clock className="h-3 w-3 shrink-0" /> Aguardando aprovação do financeiro
+          </div>
+        )
+      )}
+      {item.status === 'aguardando_aprovacao_origem' && (() => {
+        const pend = (Array.isArray(item.aprovacao_pendente_de) && item.aprovacao_pendente_de.length
+          ? item.aprovacao_pendente_de
+          : (Array.isArray(item.aprovacao_origem_aprovadores) ? item.aprovacao_origem_aprovadores : [])).filter(Boolean);
+        return (
+          <div className="mt-2 flex items-center gap-1 text-[10px] text-violet-700 dark:text-violet-400 bg-violet-500/10 border border-violet-500/30 rounded px-2 py-1">
+            <Clock className="h-3 w-3 shrink-0" />
+            <span>Aguardando aprovação{pend.length ? ` de ${pend.join(' ou ')}` : ''}</span>
+          </div>
+        );
+      })()}
+      {isAdmin && item.status === 'pendente' && (
+        <div className="flex gap-1.5 mt-2 pt-2 border-t border-border">
+          <Button size="sm" variant="outline" className="h-6 text-[10px] flex-1" onClick={e => { e.stopPropagation(); onStatusChange(item.id, 'em_analise'); }}>
+            Analisar <ArrowRight className="h-3 w-3 ml-1" />
+          </Button>
+        </div>
+      )}
+      {isAdmin && item.status === 'em_analise' && (
+        <div className="flex gap-1.5 mt-2 pt-2 border-t border-border">
+          <Button size="sm" variant="outline" className="h-6 text-[10px] flex-1 text-green-600" onClick={e => { e.stopPropagation(); onStatusChange(item.id, 'aprovado'); }}>Aprovar</Button>
+          <Button size="sm" variant="outline" className="h-6 text-[10px] flex-1 text-red-600" onClick={e => { e.stopPropagation(); onStatusChange(item.id, 'rejeitado'); }}>Rejeitar</Button>
+        </div>
+      )}
+      {isAdmin && item.status === 'aprovado' && !CATEGORIAS_SO_CONCLUEM_PAGANDO.includes(item.categoria) && (
+        <div className="flex gap-1.5 mt-2 pt-2 border-t border-border">
+          <Button size="sm" variant="outline" className="h-6 text-[10px] flex-1" onClick={e => { e.stopPropagation(); onStatusChange(item.id, 'concluido'); }}>
+            Concluir <CheckCircle2 className="h-3 w-3 ml-1" />
+          </Button>
+        </div>
+      )}
+    </Card>
+  );
+}
+
+
+const ML_STATUS_FLOW = [
+  { key: 'pending',         label: 'Pedido recebido',  emoji: '📋' },
+  { key: 'handling',        label: 'Preparando envio', emoji: '📦' },
+  { key: 'ready_to_ship',   label: 'Pronto p/ envio',  emoji: '📮' },
+  { key: 'shipped',         label: 'Saiu para entrega',emoji: '🚚' },
+  { key: 'delivered',       label: 'Entregue',         emoji: '✅' },
+];
+const ML_STATUS_META = {
+  pending:          { label: 'Pedido recebido',     emoji: '📋', color: 'bg-blue-500/15 text-blue-700 dark:text-blue-400' },
+  handling:         { label: 'Preparando envio',    emoji: '📦', color: 'bg-amber-500/15 text-amber-700 dark:text-amber-400' },
+  ready_to_ship:    { label: 'Pronto p/ envio',     emoji: '📮', color: 'bg-amber-500/15 text-amber-700 dark:text-amber-400' },
+  shipped:          { label: 'Saiu p/ entrega',     emoji: '🚚', color: 'bg-orange-500/15 text-orange-700 dark:text-orange-400' },
+  in_transit:       { label: 'A caminho',           emoji: '🚚', color: 'bg-orange-500/15 text-orange-700 dark:text-orange-400' },
+  out_for_delivery: { label: 'Saiu para entrega',   emoji: '🛵', color: 'bg-orange-500/15 text-orange-700 dark:text-orange-400' },
+  delivered:        { label: 'Entregue',            emoji: '✅', color: 'bg-green-500/15 text-green-700 dark:text-green-400' },
+  not_delivered:    { label: 'Tentativa frustrada', emoji: '⚠️', color: 'bg-red-500/15 text-red-700 dark:text-red-400' },
+  cancelled:        { label: 'Cancelado',           emoji: '❌', color: 'bg-red-500/15 text-red-700 dark:text-red-400' },
+};
+
+function statusIndex(status) {
+  const i = ML_STATUS_FLOW.findIndex(s => s.key === status);
+  if (i >= 0) return i;
+
+  if (status === 'in_transit' || status === 'out_for_delivery') return 3.5;
+  return -1;
+}
+
+function MLTrackingBlock({ item, canEdit, onChanged }) {
+  const [mlInput, setMlInput] = useState('');
+  const [linking, setLinking] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+  const [unlinking, setUnlinking] = useState(false);
+  const [eventos, setEventos] = useState([]);
+  const [showInput, setShowInput] = useState(false);
+
+  const hasLink = !!item.ml_order_id;
+  const status = item.ml_last_status;
+  const meta = ML_STATUS_META[status] || null;
+  const idx = statusIndex(status);
+
+  useEffect(() => {
+    if (!hasLink) { setEventos([]); return; }
+    api.mlTimeline(item.id)
+      .then(r => setEventos(r.eventos || []))
+      .catch(() => setEventos([]));
+  }, [item.id, hasLink, item.ml_last_status_changed_at]);
+
+  async function vincular() {
+    if (!mlInput.trim()) return;
+    setLinking(true);
+    try {
+      await api.vincularML(item.id, mlInput.trim());
+      toast.success('Pedido vinculado! Você e o solicitante recebem as atualizações automaticamente.');
+      setShowInput(false);
+      setMlInput('');
+      onChanged?.();
+    } catch (e) {
+      toast.error(e.message || 'Erro ao vincular pedido');
+    } finally {
+      setLinking(false);
+    }
+  }
+
+  async function refresh() {
+    setRefreshing(true);
+    try {
+      await api.atualizarML(item.id);
+      toast.success('Status atualizado do Mercado Livre');
+      onChanged?.();
+    } catch (e) {
+      toast.error(e.message || 'Erro ao atualizar');
+    } finally {
+      setRefreshing(false);
+    }
+  }
+
+  async function unlink() {
+    if (!confirm('Tem certeza que quer desvincular o pedido do Mercado Livre? O tracking será removido.')) return;
+    setUnlinking(true);
+    try {
+      await api.desvincularML(item.id);
+      toast.success('Pedido desvinculado');
+      onChanged?.();
+    } catch (e) {
+      toast.error(e.message || 'Erro ao desvincular');
+    } finally {
+      setUnlinking(false);
+    }
+  }
+
+  return (
+    <div className="space-y-3 pt-3 border-t border-border">
+      <div className="flex items-center justify-between gap-2">
+        <p className="text-sm font-semibold text-foreground flex items-center gap-2">
+          <span>🛒</span> Pedido no Mercado Livre
+        </p>
+        {hasLink && canEdit && (
+          <div className="flex gap-2">
+            <Button size="sm" variant="outline" onClick={refresh} disabled={refreshing}>
+              {refreshing ? 'Atualizando...' : 'Atualizar'}
+            </Button>
+            <Button size="sm" variant="ghost" onClick={unlink} disabled={unlinking}
+              className="text-red-500 hover:text-red-700">
+              Desvincular
+            </Button>
+          </div>
+        )}
+      </div>
+
+      {!hasLink && (
+        <div>
+          {!showInput ? (
+            canEdit ? (
+              <Button size="sm" variant="outline" onClick={() => setShowInput(true)}>
+                Vincular pedido do ML
+              </Button>
+            ) : (
+              <p className="text-xs text-muted-foreground italic">
+                Aguardando o comprador vincular o pedido.
+              </p>
+            )
+          ) : (
+            <div className="space-y-2">
+              <Label className="text-xs text-muted-foreground">
+                Cole a URL ou o número do pedido do Mercado Livre
+              </Label>
+              <div className="flex gap-2">
+                <Input
+                  value={mlInput}
+                  onChange={e => setMlInput(e.target.value)}
+                  placeholder="ex: 2000012345678 ou link completo"
+                  className="text-sm"
+                  autoFocus
+                />
+                <Button size="sm" onClick={vincular} disabled={linking || !mlInput.trim()}>
+                  {linking ? 'Vinculando...' : 'Vincular'}
+                </Button>
+                <Button size="sm" variant="ghost" onClick={() => { setShowInput(false); setMlInput(''); }}>
+                  Cancelar
+                </Button>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                O solicitante e você passarão a receber atualizações automáticas (in-app + WhatsApp se configurado).
+              </p>
+            </div>
+          )}
+        </div>
+      )}
+
+      {hasLink && (
+        <div className="space-y-3">
+          {                         }
+          <div className="grid grid-cols-2 gap-2 text-sm">
+            {item.ml_item_title && (
+              <div className="col-span-2">
+                <span className="text-muted-foreground text-xs">Item</span>
+                <p className="font-medium line-clamp-2">{item.ml_item_title}</p>
+              </div>
+            )}
+            {item.ml_total_amount != null && (
+              <div>
+                <span className="text-muted-foreground text-xs">Valor</span>
+                <p className="font-medium">R$ {Number(item.ml_total_amount).toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</p>
+              </div>
+            )}
+            {item.ml_tracking_number && (
+              <div>
+                <span className="text-muted-foreground text-xs">Rastreio</span>
+                <p className="font-medium font-mono text-xs">{item.ml_tracking_number}</p>
+              </div>
+            )}
+            {meta && (
+              <div className="col-span-2">
+                <span className="text-muted-foreground text-xs">Status atual</span>
+                <p><Badge className={meta.color}>{meta.emoji} {meta.label}</Badge></p>
+              </div>
+            )}
+          </div>
+
+          {                              }
+          <div className="flex items-center justify-between gap-1 pt-2">
+            {ML_STATUS_FLOW.map((step, i) => {
+              const reached = idx >= i;
+              const current = idx >= i && idx < i + 1;
+              return (
+                <div key={step.key} className="flex-1 flex flex-col items-center text-center">
+                  <div
+                    className={`w-8 h-8 rounded-full flex items-center justify-center text-sm transition-colors
+                      ${reached ? 'bg-primary text-primary-foreground' : 'bg-muted text-muted-foreground'}
+                      ${current ? 'ring-2 ring-primary ring-offset-2 ring-offset-background' : ''}`}
+                  >
+                    {reached ? step.emoji : i + 1}
+                  </div>
+                  <span className={`text-[10px] mt-1 leading-tight ${reached ? 'text-foreground' : 'text-muted-foreground'}`}>
+                    {step.label}
+                  </span>
+                  {i < ML_STATUS_FLOW.length - 1 && (
+                    <div className={`h-0.5 w-full mt-[-22px] ${idx > i ? 'bg-primary' : 'bg-border'}`}
+                      style={{ position: 'relative', top: -16, zIndex: -1 }} />
+                  )}
+                </div>
+              );
+            })}
+          </div>
+
+          {                          }
+          {eventos.length > 0 && (
+            <div className="pt-2 border-t border-border">
+              <p className="text-xs font-semibold text-muted-foreground mb-2">Histórico</p>
+              <ul className="space-y-1.5">
+                {eventos.slice().reverse().map(ev => {
+                  const m = ML_STATUS_META[ev.status] || { label: ev.status, emoji: '•' };
+                  return (
+                    <li key={ev.id} className="flex items-start gap-2 text-xs">
+                      <span className="mt-0.5">{m.emoji}</span>
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="font-medium">{m.label}</span>
+                          <span className="text-muted-foreground text-[10px]">
+                            {new Date(ev.ocorrido_em).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}
+                          </span>
+                        </div>
+                        {ev.descricao && ev.descricao !== m.label && (
+                          <p className="text-muted-foreground line-clamp-1">{ev.descricao}</p>
+                        )}
+                      </div>
+                    </li>
+                  );
+                })}
+              </ul>
+            </div>
+          )}
+
+          {                           }
+          <a
+            href={`https://www.mercadolivre.com.br/pedidos/${item.ml_order_id}/detalhe`}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-xs text-primary hover:underline inline-flex items-center gap-1"
+          >
+            Ver pedido completo no Mercado Livre →
+          </a>
+        </div>
+      )}
+    </div>
+  );
+}
+
+
+
+
+
+function ComboboxContabil({ items, value, onChange, placeholder = 'Selecione…', emptyLabel = '— nenhum —', permiteVazio = true, invalido = false }) {
+  const [busca, setBusca] = useState('');
+  const [aberto, setAberto] = useState(false);
+  const sel = items.find(i => i.id === value);
+  const q = busca.trim().toLowerCase();
+  const filtrados = (q
+    ? items.filter(i => (i.codigo || '').toLowerCase().includes(q) || (i.nome || '').toLowerCase().includes(q))
+    : items).slice(0, 200);
+
+  const escolher = (id) => { onChange(id); setBusca(''); setAberto(false); };
+
+  return (
+    <div className="relative">
+      <div className="relative">
+        <input
+          type="text"
+          value={aberto ? busca : (sel ? `${sel.codigo} · ${sel.nome}` : '')}
+          onChange={e => { setBusca(e.target.value); setAberto(true); }}
+          onFocus={e => { setAberto(true); setBusca(''); e.target.select(); }}
+          onBlur={() => setTimeout(() => setAberto(false), 150)}
+          placeholder={placeholder}
+          className={`w-full pl-2 pr-14 py-2 text-sm rounded-md bg-background border ${invalido ? 'border-rose-400' : 'border-border'} outline-none focus:ring-1 focus:ring-primary`}
+        />
+        {value && permiteVazio && (
+          <button type="button" title="Limpar"
+            onMouseDown={e => { e.preventDefault(); escolher(''); }}
+            className="absolute right-7 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground p-0.5">
+            <X className="h-3.5 w-3.5" />
+          </button>
+        )}
+        <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground pointer-events-none" />
+      </div>
+      {aberto && (
+        <div className="absolute top-full left-0 right-0 mt-1 z-[1200] rounded-md border border-border shadow-lg max-h-72 overflow-y-auto"
+          style={{ background: 'var(--cbrio-card)' }}>
+          {permiteVazio && (
+            <button type="button"
+              onMouseDown={e => { e.preventDefault(); escolher(''); }}
+              className={`block w-full text-left px-3 py-2 text-xs italic border-b border-border ${!value ? 'bg-primary/10' : 'hover:bg-muted/50'} text-muted-foreground`}>
+              {emptyLabel}
+            </button>
+          )}
+          {filtrados.length === 0 ? (
+            <div className="px-3 py-3 text-xs text-muted-foreground text-center">Nenhum resultado pra "{busca}"</div>
+          ) : filtrados.map(i => (
+            <button type="button" key={i.id}
+              onMouseDown={e => { e.preventDefault(); escolher(i.id); }}
+              className={`block w-full text-left px-3 py-2 text-sm ${i.id === value ? 'bg-primary/10' : 'hover:bg-muted/50'}`}>
+              <span className="font-mono text-xs text-muted-foreground mr-2">{i.codigo}</span>
+              <span className="text-foreground">{i.nome}</span>
+            </button>
+          ))}
+          {items.length > 200 && !q && (
+            <div className="px-3 py-2 text-[11px] italic text-muted-foreground text-center border-t border-border">
+              Mostrando 200 de {items.length} · digite pra buscar
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+
+
+
+
+
+
+function CotacaoBlock({ item, canCotar, onChanged }) {
+
+
+  const podeEditar = canCotar
+    && !item.aprovado_financeiro_em
+    && !['concluido', 'cancelado', 'rejeitado', 'avaliado'].includes(item.status);
+  const fmtBRL = (n) => `R$ ${Number(n).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+
+  const [cotacoes, setCotacoes] = useState([]);
+  const [carregando, setCarregando] = useState(true);
+  const [enviando, setEnviando] = useState(false);
+  const [salvando, setSalvando] = useState(false);
+  const [editId, setEditId] = useState(null);
+  const [form, setForm] = useState({ fornecedor: '', valor: '', prazo: '', link: '', observacao: '' });
+
+
+
+
+  const [anexoFile, setAnexoFile] = useState(null);
+  const [anexoUrlAtual, setAnexoUrlAtual] = useState('');
+  const anexoInputRef = useRef(null);
+
+  const [planos, setPlanos] = useState([]);
+  const [centros, setCentros] = useState([]);
+  const [planoId, setPlanoId] = useState(item.plano_contas_id || '');
+  const [centroId, setCentroId] = useState(item.centro_custo_id || '');
+  const [nfUrl, setNfUrl] = useState(item.nota_fiscal_url || '');
+  const [escaneando, setEscaneando] = useState(false);
+
+  async function recarregar() {
+    try {
+      const rows = await api.listarCotacoes(item.id);
+      setCotacoes(Array.isArray(rows) ? rows : []);
+    } catch (e) {                                                   }
+    finally { setCarregando(false); }
+  }
+  useEffect(() => { recarregar(); /* eslint-disable-next-line */ }, [item.id]);
+  useEffect(() => {
+    api.classificacaoAux().then(d => {
+      setPlanos(d?.planos || []); setCentros(d?.centros || []);
+    }).catch(() => {});
+  }, []);
+
+  async function escanearNf(file) {
+    if (!file) return;
+    setEscaneando(true);
+    try {
+      const r = await api.escanearNotaFiscal(item.id, file);
+      if (r?.url) setNfUrl(r.url);
+      const ex = r?.extracao, sg = r?.sugestao;
+      if (ex) {
+        setForm(f => ({
+          ...f,
+          fornecedor: f.fornecedor || ex.emitente_nome || '',
+          valor: f.valor || (ex.valor_total != null ? String(ex.valor_total) : ''),
+        }));
+      }
+      if (sg?.plano_contas_id) setPlanoId(sg.plano_contas_id);
+      if (sg?.centro_custo_id) setCentroId(sg.centro_custo_id);
+      toast.success(ex ? 'Nota lida — confira os campos sugeridos.' : 'Nota anexada (não consegui ler automaticamente).');
+      onChanged?.();
+    } catch (e) { toast.error(e.message || 'Erro ao ler a nota fiscal.'); }
+    finally { setEscaneando(false); }
+  }
+
+  function resetForm() {
+    setForm({ fornecedor: '', valor: '', prazo: '', link: '', observacao: '' });
+    setEditId(null);
+    setAnexoFile(null);
+    setAnexoUrlAtual('');
+    if (anexoInputRef.current) anexoInputRef.current.value = '';
+  }
+
+  async function salvar() {
+    const nome = form.fornecedor.trim();
+    const v = Number(form.valor);
+    if (!nome) { toast.error('Informe o fornecedor.'); return; }
+    if (form.valor === '' || Number.isNaN(v) || v < 0) { toast.error('Informe o valor da cotação.'); return; }
+
+
+    if (anexoFile) {
+      const ok = validarAnexos([anexoFile], { max: 1 });
+      if (!ok.ok) { toast.error(ok.erro); return; }
+    }
+    setSalvando(true);
+    try {
+      let anexo_url = anexoUrlAtual || undefined;
+      if (anexoFile && supabase) {
+        const path = caminhoDeUpload('orcamentos', anexoFile.name);
+        const { error: upErr } = await supabase.storage
+          .from('solicitacoes').upload(path, anexoFile, { upsert: false });
+        if (upErr) throw new Error('Erro ao enviar o orçamento: ' + upErr.message);
+        anexo_url = supabase.storage.from('solicitacoes').getPublicUrl(path).data.publicUrl;
+      }
+      const payload = {
+        fornecedor: nome, valor: v,
+        prazo: form.prazo.trim() || undefined,
+        link: form.link.trim() || undefined,
+        observacao: form.observacao.trim() || undefined,
+        ...(anexo_url ? { anexo_url } : {}),
+      };
+      if (editId) { await api.editarCotacao(editId, payload); toast.success('Cotação atualizada.'); }
+      else { await api.adicionarCotacao(item.id, payload); toast.success('Cotação adicionada.'); }
+      resetForm();
+      await recarregar();
+    } catch (e) { toast.error(e.message || 'Erro ao salvar cotação'); }
+    finally { setSalvando(false); }
+  }
+
+  function iniciarEdicao(c) {
+    setEditId(c.id);
+    setForm({ fornecedor: c.fornecedor || '', valor: c.valor ?? '', prazo: c.prazo || '', link: c.link || '', observacao: c.observacao || '' });
+    setAnexoFile(null);
+    setAnexoUrlAtual(c.anexo_url || '');
+    if (anexoInputRef.current) anexoInputRef.current.value = '';
+  }
+
+  async function remover(c) {
+    if (!window.confirm(`Remover a cotação de ${c.fornecedor}?`)) return;
+    try { await api.removerCotacao(c.id); toast.success('Cotação removida.'); if (editId === c.id) resetForm(); await recarregar(); }
+    catch (e) { toast.error(e.message || 'Erro ao remover'); }
+  }
+
+  async function marcarSugerida(c) {
+    try { await api.sugerirCotacao(item.id, c.id); await recarregar(); }
+    catch (e) { toast.error(e.message || 'Erro ao marcar sugerida'); }
+  }
+
+  async function enviarFinanceiro(comEmail = false, forcarFinanceiro = false) {
+
+
+
+
+
+
+
+
+
+
+
+    const payload = {
+      plano_contas_id: planoId || undefined,
+      centro_custo_id: centroId || undefined,
+      enviar_email: comEmail,
+      forcar_financeiro: (comEmail || forcarFinanceiro) ? true : undefined,
+    };
+    if (!cotacoes.length) {
+      const v = Number(form.valor);
+      if (form.valor === '' || Number.isNaN(v) || v < 0) { toast.error('Informe o valor pra enviar ao financeiro.'); return; }
+      Object.assign(payload, {
+        valor: v,
+        fornecedor: form.fornecedor.trim() || undefined,
+        observacao: form.observacao.trim() || undefined,
+        prazo: form.prazo.trim() || undefined,
+        link: form.link.trim() || undefined,
+      });
+    }
+    const enviouInline = !cotacoes.length;
+    setEnviando(true);
+    try {
+      const r = await api.enviarCotacoesFinanceiro(item.id, payload);
+
+      if (r?.destino === 'compra_direta') {
+        toast.success('Liberado pra compra — dentro do limite, não precisa do financeiro. Compre e marque como comprado.');
+      } else if (!comEmail) {
+        toast.success('Enviado ao financeiro — o responsável financeiro vai aprovar na fila do sistema.');
+      } else if (r?.email_ok) {
+        toast.success('E-mail enviado ao financeiro.');
+      } else {
+        toast.warning(r?.motivo ? `Está no financeiro pelo sistema, mas o e-mail não saiu — ${r.motivo}` : 'Está no financeiro pelo sistema, mas o e-mail não saiu.');
+      }
+      if (enviouInline) resetForm();
+      onChanged?.();
+      await recarregar();
+    } catch (e) { toast.error(e.message || 'Erro ao enviar ao financeiro'); }
+    finally { setEnviando(false); }
+  }
+
+
+  const inlineLegado = !cotacoes.length && item.valor_cotado != null;
+  const jaEnviado = !!item.cotacoes_email_em;
+
+  return (
+    <div className="space-y-3 pt-3 border-t border-border">
+      <p className="text-sm font-semibold text-foreground">Cotações</p>
+
+      {carregando ? (
+        <p className="text-xs text-muted-foreground">Carregando cotações...</p>
+      ) : inlineLegado ? (
+        <div className="grid grid-cols-2 gap-4 text-sm rounded-md border border-border p-3">
+          <div><span className="text-muted-foreground">Valor cotado</span><p className="font-medium">{fmtBRL(item.valor_cotado)}</p></div>
+          {item.cotacao_fornecedor && <div><span className="text-muted-foreground">Fornecedor</span><p className="font-medium">{item.cotacao_fornecedor}</p></div>}
+          {item.cotacao_observacao && <div className="col-span-2"><span className="text-muted-foreground">Observação</span><p className="text-sm whitespace-pre-wrap">{item.cotacao_observacao}</p></div>}
+        </div>
+      ) : cotacoes.length ? (
+        <div className="space-y-2">
+          {cotacoes.map(c => (
+            <div key={c.id} className={`rounded-md border p-2.5 text-sm ${c.sugerida ? 'border-primary bg-primary/5' : 'border-border'}`}>
+              <div className="flex items-start justify-between gap-2">
+                <div className="min-w-0">
+                  <div className="flex items-center gap-1.5 flex-wrap">
+                    <button
+                      type="button"
+                      title={c.sugerida ? 'Sugerida' : 'Marcar como sugerida'}
+                      disabled={!podeEditar}
+                      onClick={() => podeEditar && marcarSugerida(c)}
+                      className={`inline-flex ${podeEditar ? 'cursor-pointer' : 'cursor-default'}`}
+                    >
+                      <Star className={`h-4 w-4 ${c.sugerida ? 'text-primary fill-primary' : 'text-muted-foreground'}`} />
+                    </button>
+                    <span className="font-medium truncate">{c.fornecedor}</span>
+                    <span className="font-semibold">· {fmtBRL(c.valor)}</span>
+                    {c.prazo && <span className="text-xs text-muted-foreground">· {c.prazo}</span>}
+                  </div>
+                  {c.link && (
+                    <a href={c.link} target="_blank" rel="noopener noreferrer" className="text-xs text-primary hover:underline break-all">{c.link}</a>
+                  )}
+                  {
+                                                                                   }
+                  {c.anexo_url && (
+                    <a href={c.anexo_url} target="_blank" rel="noopener noreferrer"
+                       title={nomeDoArquivo(c.anexo_url)}
+                       className="inline-flex items-center gap-1 mt-0.5 rounded border border-border bg-muted/40 px-1.5 py-0.5 text-[11px] text-foreground hover:border-primary/50 max-w-[240px]">
+                      <FileText className="h-3 w-3 shrink-0 text-muted-foreground" />
+                      <span className="truncate">{nomeDoArquivo(c.anexo_url)}</span>
+                    </a>
+                  )}
+                  {c.observacao && <p className="text-xs text-muted-foreground whitespace-pre-wrap mt-0.5">{c.observacao}</p>}
+                </div>
+                {podeEditar && (
+                  <div className="flex items-center gap-1 shrink-0">
+                    <Button size="icon" variant="ghost" className="h-7 w-7" onClick={() => iniciarEdicao(c)}><Pencil className="h-3.5 w-3.5" /></Button>
+                    <Button size="icon" variant="ghost" className="h-7 w-7 text-destructive" onClick={() => remover(c)}><Trash2 className="h-3.5 w-3.5" /></Button>
+                  </div>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <p className="text-xs text-muted-foreground">Nenhuma cotação registrada ainda.</p>
+      )}
+
+      {podeEditar && (
+        <div className="space-y-2 rounded-md border border-dashed border-border p-3">
+          <p className="text-xs font-medium text-foreground">{editId ? 'Editar cotação' : 'Adicionar cotação'}</p>
+          <div className="grid grid-cols-2 gap-2">
+            <div>
+              <Label className="text-xs">Fornecedor *</Label>
+              <Input value={form.fornecedor} onChange={e => setForm(f => ({ ...f, fornecedor: e.target.value }))} placeholder="Nome do fornecedor" />
+            </div>
+            <div>
+              <Label className="text-xs">Valor (R$) *</Label>
+              <Input type="number" step="0.01" min="0" value={form.valor} onChange={e => setForm(f => ({ ...f, valor: e.target.value }))} placeholder="0,00" />
+            </div>
+            <div>
+              <Label className="text-xs">Prazo</Label>
+              <Input value={form.prazo} onChange={e => setForm(f => ({ ...f, prazo: e.target.value }))} placeholder="ex.: 5 dias úteis" />
+            </div>
+            <div>
+              <Label className="text-xs">Link</Label>
+              <Input value={form.link} onChange={e => setForm(f => ({ ...f, link: e.target.value }))} placeholder="https://..." />
+            </div>
+          </div>
+          <div>
+            <Label className="text-xs">Observação</Label>
+            <Textarea rows={2} value={form.observacao} onChange={e => setForm(f => ({ ...f, observacao: e.target.value }))} placeholder="Condições, forma de pagamento, garantia..." />
+          </div>
+          <div>
+            <Label className="text-xs">Orçamento do fornecedor (PDF ou imagem)</Label>
+            <div className="flex flex-wrap items-center gap-2">
+              <Button type="button" size="sm" variant="outline" onClick={() => anexoInputRef.current?.click()}>
+                <Upload className="h-3.5 w-3.5 mr-1.5" />
+                {anexoFile || anexoUrlAtual ? 'Trocar arquivo' : 'Anexar arquivo'}
+              </Button>
+              {anexoFile ? (
+                <span className="inline-flex items-center gap-1 text-xs text-foreground max-w-[240px]">
+                  <FileText className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                  <span className="truncate">{anexoFile.name}</span>
+                  <button type="button" className="text-muted-foreground hover:text-red-500"
+                    onClick={() => { setAnexoFile(null); if (anexoInputRef.current) anexoInputRef.current.value = ''; }}>
+                    <X className="h-3.5 w-3.5" />
+                  </button>
+                </span>
+              ) : anexoUrlAtual ? (
+                <a href={anexoUrlAtual} target="_blank" rel="noopener noreferrer"
+                   className="inline-flex items-center gap-1 text-xs text-primary hover:underline max-w-[240px]">
+                  <FileText className="h-3.5 w-3.5 shrink-0" />
+                  <span className="truncate">{nomeDoArquivo(anexoUrlAtual)}</span>
+                </a>
+              ) : (
+                <span className="text-[11px] text-muted-foreground">até {LIMITE_ARQUIVO_MB} MB</span>
+              )}
+              <input ref={anexoInputRef} type="file" className="hidden" accept={ACCEPT_ANEXOS}
+                onChange={e => { const f = e.target.files[0]; if (f) setAnexoFile(f); }} />
+            </div>
+          </div>
+          <div className="flex justify-end gap-2">
+            {editId && <Button size="sm" variant="outline" onClick={resetForm} disabled={salvando}>Cancelar</Button>}
+            <Button size="sm" onClick={salvar} disabled={salvando}>{salvando ? 'Salvando...' : editId ? 'Salvar' : 'Adicionar'}</Button>
+          </div>
+        </div>
+      )}
+
+      {podeEditar && ['compras', 'servico'].includes(item.categoria) && (
+        <div className="space-y-2 rounded-md border border-dashed border-border p-3">
+          <p className="text-xs font-medium text-foreground">Classificação contábil + nota fiscal</p>
+          <div className="flex items-center gap-2 flex-wrap">
+            <label className="text-xs px-3 py-1.5 rounded-md border border-border cursor-pointer hover:bg-muted/40">
+              {escaneando ? 'Lendo a nota…' : (nfUrl ? 'Trocar nota fiscal' : 'Anexar nota fiscal (a IA lê)')}
+              <input type="file" accept="image/*,application/pdf" className="hidden" disabled={escaneando}
+                onChange={e => { const f = e.target.files?.[0]; if (f) escanearNf(f); e.target.value = ''; }} />
+            </label>
+            {nfUrl && <a href={nfUrl} target="_blank" rel="noopener noreferrer" className="text-xs text-primary hover:underline">Ver nota anexada</a>}
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+            <div>
+              <Label className="text-xs">Plano de contas</Label>
+              <ComboboxContabil items={planos} value={planoId} onChange={setPlanoId} placeholder="Buscar plano de contas…" emptyLabel="— sem plano de contas —" />
+            </div>
+            <div>
+              <Label className="text-xs">Centro de custo</Label>
+              <ComboboxContabil items={centros} value={centroId} onChange={setCentroId} placeholder="Buscar centro de custo…" emptyLabel="— sem centro de custo —" />
+            </div>
+          </div>
+          <p className="text-[11px] text-muted-foreground">Anexe a nota e a IA sugere o plano de contas, o fornecedor e o valor pra você confirmar. Salvo ao enviar ao financeiro.</p>
+        </div>
+      )}
+
+      {podeEditar && (() => {
+        const vNum = Number(form.valor);
+        const valorInlineValido = !cotacoes.length && form.valor !== '' && !Number.isNaN(vNum) && vNum >= 0;
+        const podeEnviar = cotacoes.length > 0 || valorInlineValido;
+
+
+
+
+
+        const LIMITE_COMPRA_DIRETA = 1000;
+        const refValor = cotacoes.length
+          ? Number((cotacoes.find(c => c.sugerida)
+              || [...cotacoes].sort((a, b) => (Number(a.valor) || 0) - (Number(b.valor) || 0))[0])?.valor)
+          : vNum;
+
+        const etapaQueDispensa = ['compras', 'servico'].includes(item.categoria)
+          && item.status === 'em_cotacao';
+        const dispensaProvavel = etapaQueDispensa
+          && podeEnviar
+          && Number.isFinite(refValor) && refValor >= 0 && refValor <= LIMITE_COMPRA_DIRETA;
+
+
+
+
+
+
+        const explicarRegra = etapaQueDispensa && !podeEnviar;
+
+        return (
+          <div className="space-y-1.5">
+            <Button
+              onClick={() => enviarFinanceiro(false)}
+              disabled={enviando || !podeEnviar}
+              className="w-full bg-teal-600 hover:bg-teal-700 text-white"
+            >
+              <ArrowRight className="h-4 w-4 mr-2" />
+              {enviando ? 'Enviando...'
+                : dispensaProvavel ? 'Registrar cotação e liberar pra compra'
+                : jaEnviado ? 'Reenviar ao financeiro' : 'Enviar ao financeiro'}
+            </Button>
+            {dispensaProvavel && (
+              <p className="text-[11px] text-muted-foreground text-center">
+                Até {LIMITE_COMPRA_DIRETA.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })} você
+                compra direto, sem passar pelo financeiro. O financeiro é avisado.
+              </p>
+            )}
+            {                                                                    }
+            {dispensaProvavel && (
+              <button
+                type="button"
+                onClick={() => enviarFinanceiro(false, true)}
+                disabled={enviando}
+                className="w-full text-[11px] text-muted-foreground hover:text-foreground inline-flex items-center justify-center gap-1 py-1 disabled:opacity-50"
+              >
+                <ArrowRight className="h-3 w-3" /> Prefiro enviar ao financeiro mesmo assim
+              </button>
+            )}
+            {                                                         }
+            <button
+              type="button"
+              onClick={() => enviarFinanceiro(true)}
+              disabled={enviando || !podeEnviar}
+              className="w-full text-[11px] text-muted-foreground hover:text-foreground inline-flex items-center justify-center gap-1 py-1 disabled:opacity-50"
+            >
+              <Mail className="h-3 w-3" /> {jaEnviado ? 'Reenviar avisando por e-mail' : 'Enviar ao financeiro avisando por e-mail'}
+            </button>
+            {jaEnviado && (
+              <p className="text-[11px] text-muted-foreground text-center">
+                Enviado em {new Date(item.cotacoes_email_em).toLocaleString('pt-BR')}
+              </p>
+            )}
+            {!podeEnviar && (
+              explicarRegra ? (
+                <p className="text-[11px] text-muted-foreground text-center">
+                  Informe o <strong>valor cotado</strong> acima pra seguir. Até{' '}
+                  {LIMITE_COMPRA_DIRETA.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })} você
+                  libera a compra direto, sem passar pelo financeiro.
+                </p>
+              ) : (
+                <p className="text-[11px] text-muted-foreground text-center">Informe o valor acima e clique no botão pra seguir.</p>
+              )
+            )}
+          </div>
+        );
+      })()}
+    </div>
+  );
+}
+
+
+
+
+function SobrestarBlock({ item, onChanged }) {
+  const [aberto, setAberto] = useState(false);
+  const [motivo, setMotivo] = useState('');
+  const [revisao, setRevisao] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+  const sobrestada = item.status === 'sobrestada';
+  const podeSobrestar = ['pendente', 'em_analise', 'em_atendimento'].includes(item.status);
+
+  async function sobrestar() {
+    if (motivo.trim().length < 5) {
+      toast.error('Informe o motivo da espera (mínimo 5 caracteres).');
+      return;
+    }
+    setSubmitting(true);
+    try {
+      await api.sobrestar(item.id, { motivo: motivo.trim(), revisao: revisao || undefined });
+      toast.success('Solicitação sobrestada (em espera).');
+      setAberto(false); setMotivo(''); setRevisao('');
+      onChanged?.();
+    } catch (e) { toast.error(e.message || 'Erro ao sobrestar'); }
+    finally { setSubmitting(false); }
+  }
+
+  async function retomar() {
+    setSubmitting(true);
+    try {
+      await api.retomar(item.id);
+      toast.success('Solicitação retomada · voltou pra fila.');
+      onChanged?.();
+    } catch (e) { toast.error(e.message || 'Erro ao retomar'); }
+    finally { setSubmitting(false); }
+  }
+
+  if (sobrestada) {
+    const revisaoFmt = fmtDiaMes(item.sobrestada_revisao);
+    return (
+      <div className="flex items-center justify-between gap-3 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2">
+        <div className="text-xs text-amber-700 dark:text-amber-400 min-w-0">
+          <span className="font-semibold">Em espera (sobrestada)</span>
+          {item.sobrestada_motivo && <> · {item.sobrestada_motivo}</>}
+          {revisaoFmt && <> · revisão em {revisaoFmt}</>}
+        </div>
+        <Button size="sm" variant="outline" onClick={retomar} disabled={submitting} className="shrink-0">
+          {submitting ? 'Retomando...' : 'Retomar'}
+        </Button>
+      </div>
+    );
+  }
+
+  if (!podeSobrestar) return null;
+
+  if (!aberto) {
+    return (
+      <div>
+        <Button size="sm" variant="outline" onClick={() => setAberto(true)}
+          className="text-amber-600 hover:bg-amber-50 dark:hover:bg-amber-950/30">
+          <Clock className="h-4 w-4 mr-1" /> Sobrestar (em espera)
+        </Button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-2 p-3 rounded-lg border border-amber-500/30 bg-amber-500/5">
+      <p className="text-sm font-medium text-foreground">Sobrestar (em espera)</p>
+      <p className="text-xs text-muted-foreground">
+        O pedido sai da fila até ser retomado. O motivo fica visível pro solicitante.
+      </p>
+      <div className="space-y-2">
+        <Label className="text-xs">Motivo *</Label>
+        <Textarea rows={2} value={motivo} onChange={e => setMotivo(e.target.value)}
+          placeholder="Por que este pedido vai esperar?" />
+      </div>
+      <div className="space-y-2">
+        <Label className="text-xs">Data de revisão (opcional)</Label>
+        <DatePicker value={revisao} onChange={v => setRevisao(v)} />
+      </div>
+      <div className="flex gap-2 justify-end">
+        <Button size="sm" variant="outline" onClick={() => { setAberto(false); setMotivo(''); setRevisao(''); }}>
+          Cancelar
+        </Button>
+        <Button size="sm" onClick={sobrestar} disabled={motivo.trim().length < 5 || submitting}
+          className="bg-amber-600 hover:bg-amber-700 text-white">
+          {submitting ? 'Sobrestando...' : 'Confirmar espera'}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+
+
+
+
+const FORMAS_PAGAMENTO_ALCADA = [
+  { v: 'cartao_credito',        label: 'Cartão de crédito · eu mesmo compro' },
+  { v: 'pix',                   label: 'PIX · o financeiro paga' },
+  { v: 'boleto',                label: 'Boleto · o financeiro paga' },
+  { v: 'transferencia_bancaria', label: 'Transferência · o financeiro paga' },
+  { v: 'dinheiro',              label: 'Dinheiro · o financeiro paga' },
+];
+
+function AprovarNaAlcadaBloco({ item, onAprovado }) {
+  const [forma, setForma] = useState('');
+  const [obs, setObs] = useState('');
+  const [salvando, setSalvando] = useState(false);
+  const [erro, setErro] = useState(null);
+
+  const valor = Number(item.valor_cotado);
+  const valorFmt = Number.isFinite(valor)
+    ? valor.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })
+    : '—';
+
+  async function aprovar() {
+    if (!forma) { setErro('Escolha a forma de pagamento.'); return; }
+    setSalvando(true); setErro(null);
+    try {
+      await api.aprovarNaAlcada(item.id, { forma_pagamento: forma, observacao: obs.trim() || undefined });
+      playSuccessSound();
+      toast.success('Compra aprovada · seguiu pro atendimento.');
+      onAprovado?.();
+    } catch (e) {
+      setErro(e.message || 'Não foi possível aprovar.');
+    } finally {
+      setSalvando(false);
+    }
+  }
+
+  return (
+    <div className="p-3 rounded-lg border border-emerald-500/40 bg-emerald-500/10 space-y-3">
+      <div className="flex items-start gap-2 text-sm text-emerald-800 dark:text-emerald-300">
+        <CheckCircle2 className="h-4 w-4 shrink-0 mt-0.5" />
+        <div>
+          <span className="font-medium">Você pode aprovar esta compra sem o financeiro.</span>
+          <p className="text-xs mt-0.5 opacity-90">
+            Cotação de <strong>{valorFmt}</strong>, dentro da sua alçada. Ao aprovar, ela segue direto pra
+            execução.
+          </p>
+        </div>
+      </div>
+
+      <div className="space-y-1">
+        <Label className="block text-xs">Forma de pagamento *</Label>
+        <Select value={forma} onValueChange={setForma}>
+          <SelectTrigger className="h-9"><SelectValue placeholder="Como vai ser pago?" /></SelectTrigger>
+          <SelectContent className="z-[1200]">
+            {FORMAS_PAGAMENTO_ALCADA.map(f => (
+              <SelectItem key={f.v} value={f.v}>{f.label}</SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        <p className="text-[11px] text-muted-foreground">
+          Só no cartão a compra volta pra você. Nas outras formas, o financeiro ainda executa o pagamento —
+          ele só não precisa mais aprovar.
+        </p>
+      </div>
+
+      <Textarea
+        rows={2}
+        placeholder="Observação (opcional)"
+        value={obs}
+        onChange={e => setObs(e.target.value)}
+        className="text-sm"
+      />
+
+      {erro && <p className="text-xs text-destructive">{erro}</p>}
+
+      <Button size="sm" onClick={aprovar} disabled={salvando}>
+        {salvando ? 'Aprovando…' : 'Aprovar compra'}
+      </Button>
+    </div>
+  );
+}
+
+
+
+
+
+
+function RegistroRhFeriasBloco({ item, podeRegistrar, onRefresh }) {
+  const [carregando, setCarregando] = useState(true);
+  const [vinculo, setVinculo] = useState(null);
+  const [mostrarForm, setMostrarForm] = useState(false);
+  const [tipo, setTipo] = useState('ferias');
+  const [dataInicio, setDataInicio] = useState('');
+  const [dataFim, setDataFim] = useState('');
+  const [obs, setObs] = useState('');
+  const [salvando, setSalvando] = useState(false);
+  const [erro, setErro] = useState(null);
+
+  useEffect(() => {
+    let vivo = true;
+    setCarregando(true);
+    rhApi.ferias.porSolicitacao(item.id)
+      .then(v => { if (vivo) setVinculo(v || null); })
+      .catch(() => { if (vivo) setVinculo(null); })
+      .finally(() => { if (vivo) setCarregando(false); });
+    return () => { vivo = false; };
+  }, [item.id]);
+
+  async function registrar() {
+    if (!tipo || !dataInicio || !dataFim) { setErro('Tipo, data início e data fim são obrigatórios.'); return; }
+    setSalvando(true); setErro(null);
+    try {
+      const criado = await rhApi.ferias.registrarDeSolicitacao(item.id, {
+        tipo, data_inicio: dataInicio, data_fim: dataFim, observacoes: obs.trim() || undefined,
+      });
+      setVinculo(criado);
+      setMostrarForm(false);
+      toast.success('Registrado no RH · aparece na aba Férias/Licenças.');
+      onRefresh?.();
+    } catch (e) {
+      setErro(e.message || 'Não foi possível registrar.');
+    } finally {
+      setSalvando(false);
+    }
+  }
+
+  if (carregando) return null;
+
+  if (vinculo) {
+    const tipoInfo = TIPO_FERIAS[vinculo.tipo] || vinculo.tipo;
+    const statusInfo = FERIAS_STATUS[vinculo.status] || { label: vinculo.status, color: undefined, bg: undefined };
+    return (
+      <div className="p-3 rounded-lg border border-border bg-muted/20 space-y-1">
+        <p className="text-xs text-muted-foreground">Registro no RH</p>
+        <div className="flex flex-wrap items-center gap-2 text-sm">
+          <Badge style={{ color: statusInfo.color, backgroundColor: statusInfo.bg }}>{statusInfo.label}</Badge>
+          <span className="font-medium">{tipoInfo}</span>
+          <span className="text-muted-foreground">
+            {new Date(vinculo.data_inicio + 'T12:00:00').toLocaleDateString('pt-BR')} a {new Date(vinculo.data_fim + 'T12:00:00').toLocaleDateString('pt-BR')}
+          </span>
+        </div>
+        <p className="text-[11px] text-muted-foreground">
+          A aprovação/rejeição no módulo RH atualiza esta Solicitação automaticamente.
+        </p>
+      </div>
+    );
+  }
+
+  if (!podeRegistrar) return null;
+
+  return (
+    <div className="p-3 rounded-lg border border-cyan-500/40 bg-cyan-500/10 space-y-3">
+      <div className="flex items-start justify-between gap-2">
+        <div className="text-sm text-cyan-900 dark:text-cyan-300">
+          <span className="font-medium">Ainda não há registro no RH.</span>
+          <p className="text-xs mt-0.5 opacity-90">Registre pra que apareça na aba Férias/Licenças e a aprovação feche o loop aqui.</p>
+        </div>
+        {!mostrarForm && (
+          <Button size="sm" variant="outline" onClick={() => setMostrarForm(true)}>Registrar no RH</Button>
+        )}
+      </div>
+
+      {mostrarForm && (
+        <div className="space-y-2">
+          <div className="space-y-1">
+            <Label className="text-xs">Tipo *</Label>
+            <Select value={tipo} onValueChange={setTipo}>
+              <SelectTrigger className="h-9"><SelectValue /></SelectTrigger>
+              <SelectContent className="z-[1200]">
+                {Object.entries(TIPO_FERIAS).map(([v, label]) => (
+                  <SelectItem key={v} value={v}>{label}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          <div className="grid grid-cols-2 gap-2">
+            <div className="space-y-1">
+              <Label className="text-xs">Data início *</Label>
+              <DatePicker value={dataInicio} onChange={setDataInicio} />
+            </div>
+            <div className="space-y-1">
+              <Label className="text-xs">Data fim *</Label>
+              <DatePicker value={dataFim} onChange={setDataFim} />
+            </div>
+          </div>
+          <Textarea rows={2} placeholder="Observação (opcional)" value={obs} onChange={e => setObs(e.target.value)} className="text-sm" />
+          {erro && <p className="text-xs text-destructive">{erro}</p>}
+          <div className="flex gap-2 justify-end">
+            <Button size="sm" variant="ghost" onClick={() => { setMostrarForm(false); setErro(null); }}>Cancelar</Button>
+            <Button size="sm" onClick={registrar} disabled={salvando}>{salvando ? 'Registrando…' : 'Registrar'}</Button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+
+
+
+function PagamentoRegistrado({ item }) {
+  const [abrindo, setAbrindo] = useState(false);
+  const [msg, setMsg] = useState(null);
+  const dia = item.pago_em ? new Date(String(item.pago_em).slice(0, 10) + 'T12:00:00').toLocaleDateString('pt-BR') : null;
+  const abrir = async () => {
+    setMsg(null);
+    const aba = window.open('', '_blank');
+    setAbrindo(true);
+    try {
+      const r = await api.comprovantePagamento(item.id);
+      const url = r?.comprovante?.url;
+      if (url && aba) { aba.opener = null; aba.location.href = url; }
+      else {
+        aba?.close();
+        setMsg(r?.comprovante ? 'Não foi possível gerar o link do comprovante. Tente de novo.' : 'Pagamento registrado sem comprovante (em dinheiro).');
+      }
+    } catch (e) {
+      aba?.close();
+      setMsg(e?.status === 403 ? 'Você não tem permissão para ver este comprovante.' : (e?.message || 'Erro ao abrir o comprovante.'));
+    } finally { setAbrindo(false); }
+  };
+  return (
+    <div className="rounded-md border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-xs">
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-emerald-700 dark:text-emerald-400">
+        <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
+        <span>Pago{dia ? ` em ${dia}` : ''}{item.pagamento_forma ? ` via ${rotuloForma(item.pagamento_forma)}` : ''}</span>
+        <button type="button" onClick={abrir} disabled={abrindo} className="font-medium text-primary hover:underline disabled:opacity-60">
+          {abrindo ? 'Abrindo…' : 'Ver comprovante'}
+        </button>
+      </div>
+      {msg && <div className="mt-1 text-muted-foreground">{msg}</div>}
+    </div>
+  );
+}
+
+function DetailDialog({ item, onClose, isAdmin, corrigeFinanceiro = false, corrigeCategorias = [], currentUserId, onStatusChange, onNpsSubmit, onItemRefresh, asSheet = false }) {
+  const { getAccessLevel } = useAuth();
+  const [actionPending, setActionPending] = useState(null);
+  const [obsText, setObsText] = useState('');
+  const [atenderEstoque, setAtenderEstoque] = useState(false);
+  const [converterCompra, setConverterCompra] = useState(false);
+  const [lancarFin, setLancarFin] = useState(false);
+  const [registrarPag, setRegistrarPag] = useState(false);
+
+
+
+  const [corrigindo, setCorrigindo] = useState(false);
+  const [compAtual, setCompAtual] = useState(null);
+
+
+  useEffect(() => { setCorrigindo(false); setCompAtual(null); }, [item?.id]);
+
+  if (!item) return null;
+
+  const Root = asSheet ? Sheet : Dialog;
+  const Content = asSheet ? SheetContent : DialogContent;
+  const HeaderW = asSheet ? SheetHeader : DialogHeader;
+  const TitleW = asSheet ? SheetTitle : DialogTitle;
+  const contentProps = asSheet
+    ? { side: 'right', className: 'w-full sm:max-w-xl flex flex-col p-4 sm:p-6' }
+    : { className: 'sm:max-w-lg max-h-[90vh] flex flex-col' };
+  const cat = getCatMeta(item.categoria);
+  const urg = getUrgMeta(item.urgencia);
+  const st = getStatusMeta(item.status);
+
+  const ACTION_LABELS = {
+    em_analise: 'Analisar',
+    aprovado: 'Aprovar',
+    rejeitado: 'Rejeitar',
+    concluido: 'Concluir',
+    aguardando_entrega: 'Confirmar',
+  };
+
+
+
+
+
+  function actionLabel(target) {
+    if (item.status === 'pendente') {
+      if (target === 'aprovado') return 'Iniciar atendimento';
+      if (target === 'rejeitado') return 'Recusar atendimento';
+    }
+    return ACTION_LABELS[target];
+  }
+
+  function confirmAction() {
+    if (!actionPending) return;
+    onStatusChange(item.id, actionPending, obsText.trim() || undefined);
+    setActionPending(null);
+    setObsText('');
+    onClose();
+  }
+
+  function cancelAction() {
+    setActionPending(null);
+    setObsText('');
+  }
+
+  return (
+    <Root open={!!item} onOpenChange={v => { if (!v) { cancelAction(); onClose(); } }}>
+      <Content {...contentProps}>
+        <HeaderW>
+          <TitleW className="flex items-center gap-2">
+            <Badge className={cat.color}>{cat.label}</Badge>
+            {item.numero_sequencial != null && (
+              <span className="text-muted-foreground font-normal">#{item.numero_sequencial}</span>
+            )}
+            {item.titulo}
+          </TitleW>
+        </HeaderW>
+        <div className="space-y-4 mt-2 flex-1 overflow-y-auto min-h-0">
+          {                                                                }
+          {item.pode_aprovar_alcada && (
+            <AprovarNaAlcadaBloco
+              item={item}
+              onAprovado={() => { onItemRefresh?.(); onClose(); }}
+            />
+          )}
+
+          {
+                                                                       }
+          {['ferias', 'licenca'].includes(item.categoria) && (
+            <RegistroRhFeriasBloco
+              item={item}
+              podeRegistrar={isAdmin || getAccessLevel(['rh']) >= 3}
+              onRefresh={onItemRefresh}
+            />
+          )}
+
+          {                                                                     }
+          {item.status === 'aguardando_ajuste' && item.solicitante_id === currentUserId && (
+            <div className="flex flex-wrap items-center gap-2 justify-between p-3 rounded-lg border border-amber-500/40 bg-amber-500/10">
+              <div className="flex items-center gap-2 text-sm text-amber-800 dark:text-amber-300">
+                <Pencil className="h-4 w-4 shrink-0" />
+                <span className="font-medium">Esta solicitação foi devolvida pra você ajustar.</span>
+              </div>
+              <Button size="sm" onClick={() => {
+                document.getElementById('editar-devolvida')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+              }}>
+                Editar e reenviar
+              </Button>
+            </div>
+          )}
+
+          {                                                                           }
+          {item.status === 'aguardando_aprovacao_origem' && item.solicitante_id === currentUserId && (
+            <div className="flex flex-wrap items-center gap-2 justify-between p-3 rounded-lg border border-violet-500/40 bg-violet-500/10">
+              <div className="flex items-center gap-2 text-sm text-violet-800 dark:text-violet-300">
+                <Pencil className="h-4 w-4 shrink-0" />
+                <span className="font-medium">Ainda não foi aprovada · esqueceu algo? Dá pra editar e anexar documento.</span>
+              </div>
+              <Button size="sm" onClick={() => {
+                document.getElementById('editar-antes-aprovacao')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+              }}>
+                Editar solicitação
+              </Button>
+            </div>
+          )}
+
+          {                                                                         }
+          <TrackerSolicitacao item={item} />
+
+          {                    }
+          <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Detalhes</p>
+          <div className="grid grid-cols-2 gap-x-4 gap-y-3 text-sm">
+            <div>
+              <span className="block text-xs text-muted-foreground mb-0.5">Solicitante</span>
+              <p className="font-medium">{item.solicitante?.name || '—'}</p>
+            </div>
+            <div>
+              <span className="block text-xs text-muted-foreground mb-0.5">Urgência</span>
+              <p><Badge className={urg.color}>{urg.label}</Badge></p>
+            </div>
+            <div>
+              <span className="block text-xs text-muted-foreground mb-0.5">Situação</span>
+              <p><Badge className={st.color}>{st.label}</Badge></p>
+            </div>
+            <div>
+              <span className="block text-xs text-muted-foreground mb-0.5">Criada em</span>
+              <p className="font-medium">{new Date(item.created_at).toLocaleDateString('pt-BR')}</p>
+            </div>
+            <div>
+              <span className="block text-xs text-muted-foreground mb-0.5">Visibilidade</span>
+              <p className="font-medium">{item.compartilhar_area ? 'Compartilhada com a área' : 'Só você e quem atende'}</p>
+            </div>
+            {item.valor_estimado != null && (
+              <div>
+                <span className="block text-xs text-muted-foreground mb-0.5">Valor estimado</span>
+                <p className="font-medium">R$ {Number(item.valor_estimado).toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</p>
+              </div>
+            )}
+            {item.responsavel?.name && (
+              <div>
+                <span className="block text-xs text-muted-foreground mb-0.5">Responsável</span>
+                <p className="font-medium">{item.responsavel.name}</p>
+              </div>
+            )}
+            {item.eh_planejado === true && (
+              <div>
+                <span className="block text-xs text-muted-foreground mb-0.5">Planejamento</span>
+                <p className="mt-0.5"><Badge className="bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border border-emerald-500/30">Planejado</Badge></p>
+              </div>
+            )}
+          </div>
+          {item.descricao && (
+            <div>
+              <span className="text-sm text-muted-foreground">Descrição</span>
+              <p className="text-sm mt-1 whitespace-pre-wrap">{item.descricao}</p>
+            </div>
+          )}
+          {item.justificativa && (
+            <div>
+              <span className="text-sm text-muted-foreground">Justificativa</span>
+              <p className="text-sm mt-1 whitespace-pre-wrap">{item.justificativa}</p>
+            </div>
+          )}
+          {item.observacoes && (
+            <div>
+              <span className="text-sm text-muted-foreground">Observações</span>
+              <p className="text-sm mt-1 whitespace-pre-wrap">{item.observacoes}</p>
+            </div>
+          )}
+
+          {                                                       }
+          {item.categoria === 'compras' && (
+            <MLTrackingBlock
+              item={item}
+              canEdit={isAdmin
+                || item.solicitante_id === currentUserId
+                || item.responsavel_id === currentUserId}
+              onChanged={() => onItemRefresh?.()}
+            />
+          )}
+
+          {                        }
+          {item.categoria === 'reembolso' && (item.forma_pagamento || item.documento_url) && (
+            <div className="space-y-3 pt-3 border-t border-border">
+              <p className="text-sm font-semibold text-foreground">Dados de reembolso</p>
+              {item.forma_pagamento && (
+                <div className="grid grid-cols-2 gap-4 text-sm">
+                  <div>
+                    <span className="text-muted-foreground">Forma de pagamento</span>
+                    <p className="font-medium">{item.forma_pagamento === 'pix' ? 'PIX' : 'Transferência Bancária'}</p>
+                  </div>
+                  {item.forma_pagamento === 'pix' && item.chave_pix && (
+                    <div>
+                      <span className="text-muted-foreground">Chave PIX</span>
+                      <p className="font-medium font-mono">{item.chave_pix}</p>
+                    </div>
+                  )}
+                  {item.forma_pagamento === 'transferencia_bancaria' && (
+                    <>
+                      {item.banco && <div><span className="text-muted-foreground">Banco</span><p className="font-medium">{item.banco}</p></div>}
+                      {item.agencia && <div><span className="text-muted-foreground">Agência</span><p className="font-medium">{item.agencia}</p></div>}
+                      {item.conta && <div><span className="text-muted-foreground">Conta</span><p className="font-medium">{item.conta}</p></div>}
+                    </>
+                  )}
+                </div>
+              )}
+              {item.documento_url && (
+                <a href={item.documento_url} target="_blank" rel="noopener noreferrer"
+                  className="inline-flex items-center gap-2 text-sm text-primary hover:underline">
+                  <FileText className="h-4 w-4" /> Ver comprovante
+                </a>
+              )}
+            </div>
+          )}
+
+          {
+
+                                                 }
+          {item.documento_url && !['reembolso', 'pagamento'].includes(item.categoria) && (
+            <div className="pt-3 border-t border-border">
+              <a href={item.documento_url} target="_blank" rel="noopener noreferrer"
+                className="inline-flex items-center gap-2 text-sm text-primary hover:underline">
+                <FileText className="h-4 w-4" /> Ver documento anexado
+              </a>
+            </div>
+          )}
+
+          {
+
+                                                                      }
+          {Array.isArray(item.imagens_url) && item.imagens_url.length > 0 && (
+            <div className="space-y-2 pt-3 border-t border-border">
+              <p className="text-sm font-semibold text-foreground">Anexos</p>
+              <div className="flex flex-wrap gap-2">
+                {item.imagens_url.map((url, i) => (ehImagem(url) ? (
+                  <a key={i} href={url} target="_blank" rel="noopener noreferrer" title="Abrir imagem em tamanho real">
+                    <img src={url} alt={`Anexo ${i + 1}`} className="h-24 w-24 rounded-md object-cover border border-border hover:opacity-80 transition-opacity" />
+                  </a>
+                ) : (
+                  <a key={i} href={url} target="_blank" rel="noopener noreferrer"
+                    title={nomeDoArquivo(url)}
+                    className="h-24 w-36 rounded-md border border-border bg-muted/40 px-2 flex flex-col items-center justify-center gap-1 hover:border-primary/50 transition-colors">
+                    <FileText className="h-6 w-6 text-muted-foreground" />
+                    <span className="text-[10px] leading-tight text-center text-foreground line-clamp-2 break-all">
+                      {nomeDoArquivo(url)}
+                    </span>
+                    <span className="text-[9px] text-muted-foreground">{rotuloTipo(url)}</span>
+                  </a>
+                )))}
+              </div>
+            </div>
+          )}
+
+          {                                                                        }
+          {item.categoria === 'compras' && ((item.solicitacao_itens?.length) || item.itens || item.link_referencia || item.favorecido_nome) && (
+            <div className="space-y-2 pt-3 border-t border-border">
+              <p className="text-sm font-semibold text-foreground">Detalhes da compra</p>
+              {item.solicitacao_itens?.length ? (
+                <div className="space-y-1.5">
+                  <span className="text-xs text-muted-foreground">{item.solicitacao_itens.length} {item.solicitacao_itens.length === 1 ? 'item' : 'itens'}</span>
+                  {[...item.solicitacao_itens].sort((a, b) => (a.ordem ?? 0) - (b.ordem ?? 0)).map(it => (
+                    <div key={it.id} className="flex items-center gap-2.5 rounded-md border border-border bg-muted/30 p-2">
+                      {it.imagem_url ? (
+                        <a href={it.imagem_url} target="_blank" rel="noopener noreferrer" className="shrink-0">
+                          <img src={it.imagem_url} alt="" className="h-12 w-12 rounded object-cover border border-border" />
+                        </a>
+                      ) : (
+                        <div className="h-12 w-12 rounded bg-muted flex items-center justify-center shrink-0">
+                          <ImageIcon className="h-4 w-4 text-muted-foreground" />
+                        </div>
+                      )}
+                      <div className="flex-1 min-w-0">
+                        <p className="text-sm font-medium truncate">
+                          <span className="text-muted-foreground">{Number(it.quantidade) || 1}x</span> {it.descricao}
+                        </p>
+                        <div className="flex items-center gap-3 text-xs text-muted-foreground">
+                          {it.valor_estimado != null && (
+                            <span>R$ {Number(it.valor_estimado).toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</span>
+                          )}
+                          {it.link_referencia && it.link_referencia.startsWith('http') && (
+                            <a href={it.link_referencia} target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">Ver referência →</a>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                item.itens && (
+                  <div><span className="text-xs text-muted-foreground">Itens</span><p className="text-sm whitespace-pre-wrap">{item.itens}</p></div>
+                )
+              )}
+              {item.favorecido_nome && (
+                <div><span className="text-xs text-muted-foreground">Fornecedor sugerido</span><p className="text-sm">{item.favorecido_nome}</p></div>
+              )}
+              {!item.solicitacao_itens?.length && item.link_referencia && (
+                item.link_referencia.startsWith('http')
+                  ? <a href={item.link_referencia} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 text-sm text-primary hover:underline">Ver referência →</a>
+                  : <div><span className="text-xs text-muted-foreground">Referência</span><p className="text-sm">{item.link_referencia}</p></div>
+              )}
+            </div>
+          )}
+
+          {                                                                  }
+          {item.categoria === 'reserva_espaco' && (item.espaco_solicitado || item.data_uso || item.itens) && (
+            <div className="space-y-2 pt-3 border-t border-border">
+              <p className="text-sm font-semibold text-foreground">Detalhes da reserva</p>
+              <div className="grid grid-cols-2 gap-4 text-sm">
+                {item.espaco_solicitado && (<div><span className="text-muted-foreground">Espaço</span><p className="font-medium">{item.espaco_solicitado}</p></div>)}
+                {item.data_uso && (<div><span className="text-muted-foreground">Data</span><p className="font-medium">{new Date(item.data_uso + 'T00:00:00').toLocaleDateString('pt-BR')}{item.horario_inicio ? ` · ${item.horario_inicio}${item.horario_fim ? `–${item.horario_fim}` : ''}` : ''}</p></div>)}
+                {item.qtde_pessoas != null && (<div><span className="text-muted-foreground">Pessoas</span><p className="font-medium">{item.qtde_pessoas}</p></div>)}
+              </div>
+              {item.itens && (
+                <div><span className="text-xs text-muted-foreground">Material / arrumação</span><p className="text-sm whitespace-pre-wrap">{item.itens}</p></div>
+              )}
+            </div>
+          )}
+
+          {                        }
+          {item.categoria === 'pagamento' && (item.favorecido_nome || item.forma_pagamento || item.documento_url) && (
+            <div className="space-y-2 pt-3 border-t border-border">
+              <p className="text-sm font-semibold text-foreground">Dados do pagamento</p>
+              <div className="grid grid-cols-2 gap-4 text-sm">
+                {item.favorecido_nome && (<div><span className="text-muted-foreground">Favorecido</span><p className="font-medium">{item.favorecido_nome}</p></div>)}
+                {item.favorecido_documento && (<div><span className="text-muted-foreground">CNPJ/CPF</span><p className="font-medium font-mono">{item.favorecido_documento}</p></div>)}
+                {item.forma_pagamento && (<div><span className="text-muted-foreground">Forma</span><p className="font-medium">{item.forma_pagamento === 'boleto' ? 'Boleto' : item.forma_pagamento === 'pix' ? 'PIX' : 'Transferência'}</p></div>)}
+                {item.data_necessaria && (<div><span className="text-muted-foreground">Vencimento</span><p className="font-medium">{new Date(item.data_necessaria).toLocaleDateString('pt-BR')}</p></div>)}
+                {item.forma_pagamento === 'pix' && item.chave_pix && (<div><span className="text-muted-foreground">Chave PIX</span><p className="font-medium font-mono">{item.chave_pix}</p></div>)}
+                {item.forma_pagamento === 'transferencia_bancaria' && (<>
+                  {item.banco && <div><span className="text-muted-foreground">Banco</span><p className="font-medium">{item.banco}</p></div>}
+                  {item.agencia && <div><span className="text-muted-foreground">Agência</span><p className="font-medium">{item.agencia}</p></div>}
+                  {item.conta && <div><span className="text-muted-foreground">Conta</span><p className="font-medium">{item.conta}</p></div>}
+                </>)}
+              </div>
+              {item.recorrente && (
+                <Badge className="bg-emerald-500/15 text-emerald-700 dark:text-emerald-400">⟳ Recorrente{item.recorrencia ? ` · ${item.recorrencia}` : ''}</Badge>
+              )}
+              {item.documento_url && (
+                <a href={item.documento_url} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-2 text-sm text-primary hover:underline">
+                  <FileText className="h-4 w-4" /> Ver documento (boleto / NF)
+                </a>
+              )}
+            </div>
+          )}
+
+          {                                                                                         }
+          {['compras', 'servico'].includes(item.categoria) && (item.status === 'em_cotacao' || item.valor_cotado != null) && (
+            <CotacaoBlock item={item} canCotar={isAdmin} onChanged={() => onItemRefresh?.()} />
+          )}
+
+          {
+
+                                                                              }
+          {isAdmin && !actionPending && (() => {
+
+
+
+
+
+
+
+
+
+
+
+            const PORTOES_FLUXO = ['aguardando_aprovacao_origem', 'aguardando_merito', 'sobrestada', 'em_cotacao', 'aguardando_aprovacao_financeira'];
+            const podeAprovar = !['concluido', 'cancelado', 'rejeitado', 'avaliado', 'aprovado', 'aguardando_ajuste', ...PORTOES_FLUXO].includes(item.status);
+            const podeRejeitar = !['concluido', 'cancelado', 'rejeitado', 'avaliado', 'aguardando_ajuste', ...PORTOES_FLUXO].includes(item.status);
+
+            const podeEstoque = ['compras', 'servico', 'infraestrutura', 'outro'].includes(item.categoria)
+              && !['concluido', 'cancelado', 'rejeitado', 'avaliado', ...PORTOES_FLUXO].includes(item.status);
+
+
+
+            const ehCompraServico = ['compras', 'servico'].includes(item.categoria);
+
+            const posAprov = ehCompraServico
+              && (!!item.aprovado_financeiro_em || !!item.financeiro_dispensado_em);
+            const ehAguardandoCompra = posAprov && item.status === 'pendente' && item.area_responsavel === 'logistica_compras';
+            const ehAguardandoPagamento = posAprov && item.status === 'em_atendimento' && item.area_responsavel === 'financeiro';
+            const ehAguardandoEntrega = item.status === 'aguardando_entrega';
+
+
+
+            const pagavelFin = prontaParaPagar(item);
+            const soPagando = CATEGORIAS_SO_CONCLUEM_PAGANDO.includes(item.categoria);
+            const fluxoCompra = ehAguardandoCompra || ehAguardandoPagamento || ehAguardandoEntrega || pagavelFin;
+            const temAcoes = podeAprovar || podeRejeitar || item.status === 'pendente' || item.status === 'aprovado' || podeEstoque || fluxoCompra;
+            if (!temAcoes) return null;
+            return (
+              <div className="pt-3 border-t border-border space-y-2">
+                <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Ações</p>
+                <div className="flex flex-wrap gap-2">
+                  {ehAguardandoCompra && <Button size="sm" className="bg-teal-600 hover:bg-teal-700" onClick={() => setActionPending('aguardando_entrega')}>Marcar como comprado</Button>}
+                  {pagavelFin && !registrarPag && <Button size="sm" className="bg-teal-600 hover:bg-teal-700" onClick={() => setRegistrarPag(true)}>Registrar pagamento</Button>}
+                  {ehAguardandoPagamento && !pagavelFin && <Button size="sm" className="bg-teal-600 hover:bg-teal-700" onClick={() => setActionPending('aguardando_entrega')}>Marcar como pago</Button>}
+                  {ehAguardandoEntrega && <Button size="sm" className="bg-emerald-600 hover:bg-emerald-700" onClick={() => setActionPending('concluido')}>Confirmar entrega</Button>}
+                  {!fluxoCompra && podeAprovar && (
+                    <Button size="sm" className="bg-green-600 hover:bg-green-700" onClick={() => setActionPending('aprovado')}>{actionLabel('aprovado')}</Button>
+                  )}
+                  {!fluxoCompra && item.status === 'aprovado' && !soPagando && <Button size="sm" className="bg-green-600 hover:bg-green-700" onClick={() => setActionPending('concluido')}>Concluir</Button>}
+                  {!fluxoCompra && item.status === 'aprovado' && soPagando && !item.pago_em && (
+                    <span className="self-center text-xs text-muted-foreground">Concluída pelo financeiro ao registrar o pagamento.</span>
+                  )}
+                  {!fluxoCompra && item.status === 'pendente' && <Button size="sm" variant="outline" onClick={() => setActionPending('em_analise')}>Analisar</Button>}
+                  {!fluxoCompra && podeEstoque && <Button size="sm" variant="outline" onClick={() => setAtenderEstoque(true)}>Atender pelo estoque</Button>}
+                  {['marketing', 'producao'].includes(item.categoria) && (
+                    <Button size="sm" variant="outline" className="text-orange-600 border-orange-300 hover:bg-orange-50 dark:hover:bg-orange-950/30" onClick={() => setConverterCompra(true)}>Isto é uma compra</Button>
+                  )}
+                  {['compras', 'servico'].includes(item.categoria) && item.aprovado_financeiro_em && !item.fin_transacao_id && (
+                    <Button size="sm" variant="outline" className="text-teal-700 border-teal-300 hover:bg-teal-50 dark:hover:bg-teal-950/30" onClick={() => setLancarFin(true)}>Lançar no financeiro</Button>
+                  )}
+                  {item.fin_transacao_id && (
+                    <span className="inline-flex items-center gap-1 text-xs text-emerald-600 self-center font-medium">✓ Lançado{item.fin_vinculo_status === 'conciliado' ? ' · conciliado' : ' · pendente'}</span>
+                  )}
+                  {podeRejeitar && (
+                    <Button size="sm" variant="destructive" onClick={() => setActionPending('rejeitado')}>{actionLabel('rejeitado')}</Button>
+                  )}
+                </div>
+              </div>
+            );
+          })()}
+
+          {isAdmin && registrarPag && prontaParaPagar(item) && (
+            <div className="space-y-2">
+              <ConcluirPagamento
+                solicitacao={paraConcluirPagamento(item, currentUserId)}
+                onConcluido={(r) => {
+                  setRegistrarPag(false);
+                  playSuccessSound();
+                  toast.success(r?.solicitacao?.status === 'aguardando_entrega' ? 'Pagamento registrado · a compra segue para a entrega.' : 'Pagamento registrado e solicitação concluída.');
+                  (Array.isArray(r?.avisos) ? r.avisos : []).forEach(a => toast.warning(a, { duration: 9000 }));
+                  onItemRefresh?.();
+                }}
+              />
+              <Button size="sm" variant="ghost" className="w-full" onClick={() => setRegistrarPag(false)}>Cancelar</Button>
+            </div>
+          )}
+
+          {item.pago_em && <PagamentoRegistrado item={item} />}
+
+          {
+
+                                                                                         }
+          {(() => {
+            const corrigivel = podeCorrigir(item, {
+              atendeArea: corrigeFinanceiro && (!corrigeCategorias.length || corrigeCategorias.includes(item.categoria)),
+              usuarioId: currentUserId,
+            });
+            if (!corrigivel) return null;
+            const conferirComprovante = async () => {
+              setCompAtual(null);
+              setCorrigindo(true);
+              try {
+                const r = await api.comprovantePagamento(item.id);
+                setCompAtual(!!r?.comprovante);
+              } catch { setCompAtual('erro'); }
+            };
+            if (actionPending) return null;
+            if (!corrigindo) {
+              return (
+                <Button size="sm" variant="outline" className="w-full" onClick={conferirComprovante}>
+                  <Pencil className="h-3.5 w-3.5 mr-1.5" /> Corrigir solicitação
+                </Button>
+              );
+            }
+            if (compAtual === null) return <div className="py-3 text-center text-xs text-muted-foreground">Carregando…</div>;
+            if (compAtual === 'erro') {
+              return (
+                <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-xs text-rose-600 dark:text-rose-400">
+                  <span>Não foi possível conferir o comprovante atual desta solicitação.</span>
+                  <div className="flex gap-2">
+                    <Button size="sm" variant="ghost" onClick={() => setCorrigindo(false)}>Fechar</Button>
+                    <Button size="sm" variant="outline" onClick={conferirComprovante}>Tentar de novo</Button>
+                  </div>
+                </div>
+              );
+            }
+            return (
+              <CorrigirSolicitacao
+                item={item}
+                temComprovanteAtual={compAtual}
+                onCancelar={() => setCorrigindo(false)}
+                onSalvo={(r) => {
+                  setCorrigindo(false);
+                  toast.success('Correção salva · o solicitante foi avisado.');
+                  (Array.isArray(r?.avisos) ? r.avisos : []).forEach(a => toast.warning(a, { duration: 9000 }));
+                  onItemRefresh?.();
+                }}
+              />
+            );
+          })()}
+
+          {                                                                          }
+          {isAdmin && !actionPending && (
+            <SobrestarBlock item={item} onChanged={() => onItemRefresh?.()} />
+          )}
+          {atenderEstoque && (
+            <AtenderEstoqueModal
+              solicitacao={item}
+              onClose={() => setAtenderEstoque(false)}
+              onDone={() => { setAtenderEstoque(false); onItemRefresh?.(); onClose(); }}
+            />
+          )}
+
+          {converterCompra && (
+            <ConverterEmCompraModal
+              solicitacao={item}
+              onClose={() => setConverterCompra(false)}
+              onDone={() => { setConverterCompra(false); onItemRefresh?.(); onClose(); }}
+            />
+          )}
+
+          {lancarFin && (
+            <LancarFinanceiroModal
+              solicitacao={item}
+              onClose={() => setLancarFin(false)}
+              onDone={() => { setLancarFin(false); onItemRefresh?.(); }}
+            />
+          )}
+
+          {                                                                                     }
+          {!actionPending && (
+            <SolicitacaoHistorico
+              item={item}
+              isAdmin={isAdmin}
+              currentUserId={currentUserId}
+              onChanged={() => onItemRefresh?.()}
+            />
+          )}
+
+          {                                                                                        }
+          {item.categoria === 'marketing' && item.solicitante_id === currentUserId && (
+            item.marketing_campanha
+              ? <MarketingCampanhaBlock campanha={item.marketing_campanha} onChanged={() => onItemRefresh?.()} />
+              : item.marketing_card
+                ? <MarketingCardBlock card={item.marketing_card} onChanged={() => onItemRefresh?.()} />
+                : null
+          )}
+
+          {                                                                  }
+          {item.status === 'concluido'
+            && currentUserId
+            && item.solicitante_id === currentUserId
+            && onNpsSubmit && (
+              <NpsBlock item={item} onSubmit={onNpsSubmit} />
+          )}
+
+          {actionPending && (
+            <div className="space-y-3 pt-2 border-t border-border">
+              <p className="text-sm font-medium text-foreground">
+                Confirmar ação: <span className="text-primary">{actionLabel(actionPending)}</span>
+              </p>
+              <div className="space-y-2">
+                <Label className="text-sm">Comentário (opcional · fica no histórico)</Label>
+                <Textarea
+                  value={obsText}
+                  onChange={e => setObsText(e.target.value)}
+                  placeholder="Comentário sobre esta decisão (aparece na linha do tempo)..."
+                  rows={3}
+                />
+              </div>
+              <div className="flex gap-2 justify-end">
+                <Button size="sm" variant="outline" onClick={cancelAction}>Cancelar</Button>
+                <Button size="sm" onClick={confirmAction}>{actionLabel(actionPending)}</Button>
+              </div>
+            </div>
+          )}
+        </div>
+      </Content>
+    </Root>
+  );
+}
+
+
+
+
+
+const EST_ENTREGAVEL_LABEL = {
+  triagem: 'Em triagem', backlog: 'Na fila', fila: 'Na fila', pesquisa: 'Pesquisa',
+  producao: 'Em produção', em_producao: 'Em produção', revisao: 'Em revisão',
+  aguardando_solicitante: 'Em revisão', concluido: 'Concluído',
+};
+function MarketingCampanhaBlock({ campanha, onChanged }) {
+  const ents = campanha.entregaveis || [];
+  const feitos = ents.filter(e => e.estado === 'concluido').length;
+  const pct = ents.length ? Math.round((feitos / ents.length) * 100) : 0;
+  const tudoPronto = ents.length > 0 && feitos === ents.length;
+  const jaRevisou = ents.some(e => e.tem_revisao);
+  const fmt = (iso) => iso ? new Date(iso).toLocaleDateString('pt-BR') : null;
+  const emTriagem = campanha.status === 'triagem';
+  const concluida = campanha.status === 'concluida';
+
+  const podeAprovar = tudoPronto && campanha.status === 'ativa';
+
+  const [revisaoOpen, setRevisaoOpen] = useState(false);
+  const [motivo, setMotivo] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+
+  async function aprovar() {
+    setSubmitting(true);
+    try {
+      await marketingApi.campanhas.aprovar(campanha.id);
+      toast.success('Demanda aprovada · obrigado! Agora avalie pelo NPS.');
+      onChanged?.();
+    } catch (e) { toast.error(e.message || 'Erro ao aprovar'); }
+    finally { setSubmitting(false); }
+  }
+  async function revisar() {
+    if (motivo.trim().length < 5) { toast.error('Conte o que precisa ajustar (mín. 5 caracteres)'); return; }
+    setSubmitting(true);
+    try {
+      await marketingApi.campanhas.revisar(campanha.id, motivo.trim());
+      toast.success('Pedido de revisão enviado · a equipe vai ajustar.');
+      setRevisaoOpen(false); setMotivo('');
+      onChanged?.();
+    } catch (e) { toast.error(e.message || 'Erro ao pedir revisão'); }
+    finally { setSubmitting(false); }
+  }
+
+  return (
+    <div className="space-y-3 pt-3 border-t border-border">
+      <p className="text-sm font-semibold text-foreground flex items-center gap-2">
+        <FileText className="h-4 w-4 text-pink-500" /> Sua demanda Marketing
+      </p>
+      <div className="flex flex-wrap items-center gap-2 text-xs">
+        <Badge className={
+          concluida ? 'bg-emerald-500/15 text-emerald-700' :
+          emTriagem ? 'bg-pink-500/15 text-pink-700' :
+          tudoPronto ? 'bg-emerald-500/15 text-emerald-700' : 'bg-blue-500/15 text-blue-700'
+        }>
+          {concluida ? 'Concluída · aprovada' :
+           emTriagem ? 'Em triagem · a equipe vai avaliar e planejar' :
+           tudoPronto ? 'Tudo pronto · aguardando sua aprovação' : 'Em produção'}
+        </Badge>
+        {fmt(campanha.prazo_entrega) && (
+          <span className="text-muted-foreground">Entrega prevista: {fmt(campanha.prazo_entrega)}</span>
+        )}
+      </div>
+
+      {ents.length > 0 ? (
+        <div className="space-y-1.5">
+          <div className="flex items-center gap-2">
+            <div className="h-1.5 flex-1 rounded-full bg-muted overflow-hidden">
+              <div className={`h-full ${pct === 100 ? 'bg-emerald-500' : 'bg-primary'}`} style={{ width: `${pct}%` }} />
+            </div>
+            <span className="text-[11px] text-muted-foreground shrink-0">{feitos}/{ents.length} prontos</span>
+          </div>
+          {ents.map(e => (
+            <div key={e.id} className="bg-muted/30 rounded px-2 py-1.5 space-y-1">
+              <div className="flex items-center justify-between gap-2 text-xs">
+                <span className="truncate flex-1 flex items-center gap-1.5">
+                  {e.estado === 'concluido' && <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600 shrink-0" />}
+                  {e.titulo}
+                </span>
+                <span className="text-muted-foreground shrink-0">{EST_ENTREGAVEL_LABEL[e.estado] || e.estado}</span>
+              </div>
+
+              {
+
+
+                                                                       }
+              {(e.arquivos || []).map(a => (
+                <a
+                  key={a.id}
+                  href={marketingApi.entregaveis.download(a.id)}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="flex items-center gap-2 text-xs bg-card border border-border/60 rounded px-2 py-1.5 hover:bg-accent/50 transition-colors"
+                >
+                  <FileText className="h-3.5 w-3.5 text-primary shrink-0" />
+                  <span className="truncate flex-1">{a.nome_arquivo}</span>
+                  {a.tamanho_bytes > 0 && (
+                    <span className="text-muted-foreground text-[10px] shrink-0 tabular-nums">
+                      {Math.round(a.tamanho_bytes / 1024)} KB
+                    </span>
+                  )}
+                  <Download className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+                </a>
+              ))}
+
+              {
+
+                                                  }
+              {e.estado === 'concluido' && (e.arquivos || []).length === 0 && (
+                <p className="text-[10px] text-muted-foreground italic">
+                  Concluído sem arquivo anexado · fale com a equipe se precisar do material.
+                </p>
+              )}
+            </div>
+          ))}
+        </div>
+      ) : (
+        <p className="text-xs text-muted-foreground italic">A equipe ainda vai definir os entregáveis desta demanda.</p>
+      )}
+
+      {                                                           }
+      {podeAprovar && !revisaoOpen && (
+        <div className="flex gap-2 pt-1">
+          <Button size="sm" onClick={aprovar} disabled={submitting} className="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white">
+            <CheckCircle2 className="h-4 w-4 mr-1" /> Aprovar entrega
+          </Button>
+          {!jaRevisou && (
+            <Button size="sm" variant="outline" onClick={() => setRevisaoOpen(true)} className="flex-1 text-amber-600 hover:bg-amber-50 dark:hover:bg-amber-950/30">
+              ⟳ Pedir revisão (1x)
+            </Button>
+          )}
+        </div>
+      )}
+      {revisaoOpen && (
+        <div className="space-y-2 p-3 bg-amber-500/10 border border-amber-500/30 rounded">
+          <Label className="text-xs">O que precisa ajustar? *</Label>
+          <Textarea value={motivo} onChange={e => setMotivo(e.target.value)} rows={2} placeholder="Atenção · só 1 revisão. A equipe vai refazer o que você apontar." />
+          <div className="flex gap-2 justify-end">
+            <Button size="sm" variant="outline" onClick={() => { setRevisaoOpen(false); setMotivo(''); }}>Cancelar</Button>
+            <Button size="sm" onClick={revisar} disabled={submitting}>Enviar revisão</Button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+
+
+
+function MarketingCardBlock({ card, onChanged }) {
+  const [entregaveis, setEntregaveis] = useState([]);
+  const [posicao, setPosicao] = useState(null);
+  const [loading, setLoading] = useState(true);
+
+
+  const [erroArquivos, setErroArquivos] = useState(null);
+  const [revisaoOpen, setRevisaoOpen] = useState(false);
+  const [motivo, setMotivo] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+
+  useEffect(() => {
+    if (!card?.id) return;
+    setLoading(true);
+    setErroArquivos(null);
+    Promise.all([
+      marketingApi.entregaveis.list(card.id).catch(e => ({ __erro: e?.message || 'falhou' })),
+      marketingApi.fila.posicao(card.id).catch(() => null),
+    ]).then(([ent, pos]) => {
+      if (ent && ent.__erro) { setEntregaveis([]); setErroArquivos(ent.__erro); }
+      else setEntregaveis(ent || []);
+      setPosicao(pos);
+    }).finally(() => setLoading(false));
+  }, [card?.id]);
+
+  async function aprovar() {
+    setSubmitting(true);
+    try {
+      await marketingApi.aprovarEntrega(card.id);
+      toast.success('Entrega aprovada · agora avalie pelo NPS');
+      onChanged?.();
+    } catch (e) {
+      toast.error(e.message || 'Erro ao aprovar entrega');
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  async function sugerirRevisao() {
+    if (motivo.trim().length < 5) { toast.error('Motivo precisa ter pelo menos 5 caracteres'); return; }
+    setSubmitting(true);
+    try {
+      await marketingApi.sugerirRevisao(card.id, motivo.trim());
+      toast.success('Revisão enviada · card volta pro fim da fila');
+      setRevisaoOpen(false);
+      setMotivo('');
+      onChanged?.();
+    } catch (e) {
+      toast.error(e.message || 'Erro ao sugerir revisão');
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  if (!card) return null;
+
+  const podeRevisar = card.estado === 'aguardando_solicitante' && !card.tem_revisao;
+  const podeAprovar = card.estado === 'aguardando_solicitante';
+
+  return (
+    <div className="space-y-3 pt-3 border-t border-border">
+      <p className="text-sm font-semibold text-foreground flex items-center gap-2">
+        <FileText className="h-4 w-4 text-pink-500" />
+        Sua demanda Marketing
+      </p>
+
+      {                    }
+      <div className="flex flex-wrap items-center gap-2 text-xs">
+        <span className="text-muted-foreground">Status:</span>
+        <Badge className={
+          card.estado === 'concluido' ? 'bg-emerald-500/15 text-emerald-700' :
+          card.estado === 'aguardando_solicitante' ? 'bg-violet-500/15 text-violet-700' :
+          card.estado === 'em_producao' ? 'bg-blue-500/15 text-blue-700' :
+          'bg-amber-500/15 text-amber-700'
+        }>
+          {card.estado === 'fila' ? 'Na fila' :
+           card.estado === 'em_producao' ? 'Em produção' :
+           card.estado === 'aguardando_solicitante' ? 'Aguardando sua revisão' :
+           'Concluído'}
+        </Badge>
+        {card.tem_revisao && (
+          <Badge className="bg-amber-500/15 text-amber-700">⟳ Já teve revisão (1x)</Badge>
+        )}
+        {card.prazo_confirmado && (
+          <span className="text-muted-foreground">
+            Prazo: {new Date(card.prazo_confirmado).toLocaleDateString('pt-BR')}
+          </span>
+        )}
+        {posicao && posicao.posicao != null && (
+          <Badge className="bg-primary/10 text-primary">
+            Fila #{posicao.posicao} de {posicao.total}
+          </Badge>
+        )}
+      </div>
+
+      {                                    }
+      {loading ? (
+        <p className="text-xs text-muted-foreground">Carregando arquivos...</p>
+      ) : erroArquivos ? (
+        <p className="text-xs text-amber-700 dark:text-amber-400">
+          Não foi possível carregar os arquivos desta entrega ({erroArquivos}). Recarregue a página
+          ou avise a equipe — isto não significa que não há arquivo.
+        </p>
+      ) : entregaveis.length > 0 ? (
+        <div className="space-y-1">
+          <p className="text-xs font-medium text-foreground">Arquivos ({entregaveis.length})</p>
+          {entregaveis.map(e => (
+            <a
+              key={e.id}
+              href={marketingApi.entregaveis.download(e.id)}
+              target="_blank"
+              rel="noreferrer"
+              className="flex items-center gap-2 text-xs bg-muted/30 rounded px-2 py-1.5 hover:bg-muted/50 transition-colors"
+            >
+              <FileText className="h-3.5 w-3.5 text-primary shrink-0" />
+              <span className="truncate flex-1">{e.nome_arquivo}</span>
+              {e.tamanho_bytes && <span className="text-muted-foreground text-[10px]">{Math.round(e.tamanho_bytes/1024)}KB</span>}
+            </a>
+          ))}
+        </div>
+      ) : card.estado === 'aguardando_solicitante' ? (
+        <p className="text-xs text-muted-foreground italic">Equipe finalizou · preview ainda não anexado.</p>
+      ) : null}
+
+      {                                                       }
+      {podeAprovar && !revisaoOpen && (
+        <div className="flex gap-2 pt-2">
+          <Button
+            size="sm"
+            onClick={aprovar}
+            disabled={submitting}
+            className="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white"
+          >
+            <CheckCircle2 className="h-4 w-4 mr-1" /> Aprovar entrega
+          </Button>
+          {podeRevisar && (
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => setRevisaoOpen(true)}
+              className="flex-1 text-amber-600 hover:bg-amber-50 dark:hover:bg-amber-950/30"
+            >
+              ⟳ Sugerir revisão (1x)
+            </Button>
+          )}
+        </div>
+      )}
+
+      {revisaoOpen && (
+        <div className="space-y-2 p-3 bg-amber-500/10 border border-amber-500/30 rounded">
+          <Label className="text-xs">Motivo da revisão *</Label>
+          <Textarea
+            value={motivo}
+            onChange={e => setMotivo(e.target.value)}
+            rows={2}
+            placeholder="Atenção · só 1 revisão. Card volta pro fim da fila."
+          />
+          <div className="flex gap-2">
+            <Button size="sm" variant="outline" onClick={() => { setRevisaoOpen(false); setMotivo(''); }}>
+              Cancelar
+            </Button>
+            <Button size="sm" onClick={sugerirRevisao} disabled={motivo.trim().length < 5 || submitting}>
+              {submitting ? 'Enviando...' : 'Confirmar revisão'}
+            </Button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function NpsBlock({ item, onSubmit }) {
+  const [nota, setNota] = useState(item.nps_nota ?? null);
+  const [comentario, setComentario] = useState(item.nps_comentario || '');
+  const [submitting, setSubmitting] = useState(false);
+  const jaAvaliou = item.nps_nota != null;
+
+  if (jaAvaliou) {
+    return (
+      <div className="space-y-2 pt-3 border-t border-border">
+        <p className="text-sm font-semibold flex items-center gap-2 text-foreground">
+          <Star className="h-4 w-4 text-primary fill-primary" />
+          Sua avaliação
+        </p>
+        <p className="text-2xl font-bold text-primary">{item.nps_nota}/10</p>
+        {item.nps_comentario && (
+          <p className="text-sm text-muted-foreground italic">"{item.nps_comentario}"</p>
+        )}
+      </div>
+    );
+  }
+
+  async function handleSubmit() {
+    if (nota == null) {
+      toast.error('Selecione uma nota de 0 a 10');
+      return;
+    }
+    setSubmitting(true);
+    try {
+      await onSubmit(item.id, nota, comentario.trim() || null);
+    } catch {
+
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <div className="space-y-3 pt-3 border-t border-border">
+      <div>
+        <p className="text-sm font-semibold flex items-center gap-2 text-foreground">
+          <Star className="h-4 w-4 text-primary" />
+          Como você avalia o atendimento?
+        </p>
+        <p className="text-xs text-muted-foreground mt-1">
+          0 = muito ruim · 10 = excelente
+        </p>
+      </div>
+      <div className="flex flex-wrap gap-1">
+        {[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map(n => (
+          <button
+            key={n}
+            type="button"
+            onClick={() => setNota(n)}
+            className={`w-9 h-9 rounded-md border text-sm font-medium transition ${
+              nota === n
+                ? 'bg-primary text-primary-foreground border-primary'
+                : 'bg-background border-border hover:border-primary'
+            }`}
+          >
+            {n}
+          </button>
+        ))}
+      </div>
+      <Textarea
+        value={comentario}
+        onChange={e => setComentario(e.target.value)}
+        placeholder="Deixe um comentário (opcional)..."
+        rows={2}
+      />
+      <Button size="sm" onClick={handleSubmit} disabled={submitting} className="w-full">
+        {submitting ? 'Enviando...' : 'Enviar avaliação'}
+      </Button>
+    </div>
+  );
+}
+
+
+
+
+
+
+
+const MOTIVOS_PROBLEMA = [
+  { value: 'descricao', label: 'Descrição' },
+  { value: 'escopo', label: 'Escopo' },
+  { value: 'data', label: 'Data' },
+  { value: 'cancelamento', label: 'Cancelamento' },
+];
+const MOTIVO_LABEL = { descricao: 'Descrição', escopo: 'Escopo', data: 'Data', cancelamento: 'Cancelamento', resposta: 'Resposta', edicao: 'Edição' };
+
+
+
+function TermometroRefeitas() {
+  const [d, setD] = useState(null);
+  useEffect(() => {
+    let alive = true;
+    api.diagnosticoRefeitas(90).then(r => { if (alive) setD(r); }).catch(() => {});
+    return () => { alive = false; };
+  }, []);
+  if (!d || !d.total_periodo) return null;
+  const pct = d.pct_refeitas;
+  const cor = pct >= 25 ? '#f43f5e' : pct >= 12 ? '#f59e0b' : '#00B39D';
+  return (
+    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 mb-4 text-xs text-muted-foreground">
+      <span className="inline-flex items-center gap-1.5">
+        <span className="h-2 w-2 rounded-full" style={{ background: cor }} />
+        Termômetro · 90 dias · não punitivo
+      </span>
+      <span className="text-muted-foreground/40">—</span>
+      <span><span className="font-bold" style={{ color: cor }}>{pct}%</span> precisaram de ajuste ({d.refeitas} de {d.total_periodo})</span>
+      {d.devolucoes > 0 && <span>· {d.devolucoes} devolvida(s) pela área</span>}
+    </div>
+  );
+}
+
+
+
+function AtenderEstoqueModal({ solicitacao, onClose, onDone }) {
+  const [produtos, setProdutos] = useState([]);
+  const [busca, setBusca] = useState('');
+  const [sel, setSel] = useState('');
+  const [qtd, setQtd] = useState('');
+  const [fila, setFila] = useState([]);
+  const [obs, setObs] = useState('');
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    api.estoqueProdutos().then(d => { if (alive) setProdutos(Array.isArray(d) ? d : []); }).catch(() => {});
+    return () => { alive = false; };
+  }, []);
+
+  const prodMap = useMemo(() => Object.fromEntries(produtos.map(p => [p.id, p])), [produtos]);
+  const filtrados = useMemo(() => {
+    const t = busca.trim().toLowerCase();
+    return (t ? produtos.filter(p => p.nome.toLowerCase().includes(t)) : produtos).slice(0, 100);
+  }, [produtos, busca]);
+
+  function adicionar() {
+    const p = prodMap[sel]; const q = Number(qtd);
+    if (!p) { toast.error('Escolha um produto.'); return; }
+    if (!q || q <= 0) { toast.error('Quantidade inválida.'); return; }
+    setFila(f => [...f, { produto_id: p.id, nome: p.nome, quantidade: q, saldo: p.saldo }]);
+    setSel(''); setQtd('');
+  }
+  async function confirmar() {
+    if (!fila.length) { toast.error('Adicione ao menos um item.'); return; }
+    setSaving(true);
+    try {
+      await api.atenderEstoque(solicitacao.id, fila.map(f => ({ produto_id: f.produto_id, quantidade: f.quantidade })), obs.trim() || null);
+      toast.success('Baixa registrada · solicitação concluída.');
+      onDone();
+    } catch (e) { toast.error(e.message || 'Erro ao atender pelo estoque'); }
+    finally { setSaving(false); }
+  }
+
+  return (
+    <Dialog open onOpenChange={v => { if (!v) onClose(); }}>
+      <DialogContent className="sm:max-w-md">
+        <DialogHeader><DialogTitle>Atender pelo estoque</DialogTitle></DialogHeader>
+        <div className="space-y-3">
+          <p className="text-sm text-muted-foreground">Dá baixa no estoque dos itens que já temos e conclui <span className="font-medium">{solicitacao.titulo}</span>.</p>
+          <Input placeholder="Buscar produto..." value={busca} onChange={e => setBusca(e.target.value)} />
+          <div className="flex gap-2 items-center">
+            <select className="flex h-9 flex-1 min-w-0 rounded-md border border-input bg-background px-2 text-sm" value={sel} onChange={e => setSel(e.target.value)}>
+              <option value="">Selecione o produto...</option>
+              {filtrados.map(p => <option key={p.id} value={p.id}>{p.nome} (saldo {p.saldo})</option>)}
+            </select>
+            <Input type="number" min="0" step="any" className="w-20" placeholder="Qtd" value={qtd} onChange={e => setQtd(e.target.value)} />
+            <Button type="button" size="sm" variant="outline" onClick={adicionar}>+</Button>
+          </div>
+          {fila.length > 0 && (
+            <div className="space-y-1 rounded-md border border-border p-2">
+              {fila.map((f, i) => (
+                <div key={i} className="flex items-center justify-between text-sm">
+                  <span>{f.nome} · <span className="font-medium">{f.quantidade}</span>{f.quantidade > f.saldo ? <span className="text-amber-600"> (saldo {f.saldo}!)</span> : ''}</span>
+                  <button type="button" className="text-red-600 text-xs" onClick={() => setFila(x => x.filter((_, j) => j !== i))}>remover</button>
+                </div>
+              ))}
+            </div>
+          )}
+          <Input placeholder="Observação (opcional)" value={obs} onChange={e => setObs(e.target.value)} />
+          <div className="flex justify-end gap-2 pt-1">
+            <Button variant="outline" size="sm" onClick={onClose}>Cancelar</Button>
+            <Button size="sm" onClick={confirmar} disabled={saving || !fila.length}>{saving ? 'Baixando...' : 'Dar baixa e concluir'}</Button>
+          </div>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+
+
+
+function ConverterEmCompraModal({ solicitacao, onClose, onDone }) {
+  const [itens, setItens] = useState([{ descricao: '', quantidade: '1', valor_estimado: '', valor_tipo: 'total', link_referencia: '' }]);
+  const [favorecido, setFavorecido] = useState('');
+  const [planejado, setPlanejado] = useState(false);
+  const [dataNec, setDataNec] = useState('');
+  const [justificativa, setJustificativa] = useState('');
+  const [saving, setSaving] = useState(false);
+
+  const total = itens.reduce((acc, it) => {
+    const v = parseFloat(it.valor_estimado); const q = parseFloat(it.quantidade) > 0 ? parseFloat(it.quantidade) : 1;
+    if (!isFinite(v)) return acc;
+    return acc + (it.valor_tipo === 'unitario' ? v * q : v);
+  }, 0);
+  const setItem = (i, patch) => setItens(arr => arr.map((it, idx) => idx === i ? { ...it, ...patch } : it));
+  const addItem = () => setItens(arr => [...arr, { descricao: '', quantidade: '1', valor_estimado: '', valor_tipo: 'total', link_referencia: '' }]);
+  const rmItem = (i) => setItens(arr => arr.length > 1 ? arr.filter((_, idx) => idx !== i) : arr);
+
+  async function converter() {
+    const validos = itens.filter(it => it.descricao.trim());
+    if (!validos.length) { toast.error('Descreva ao menos um item da compra.'); return; }
+    setSaving(true);
+    try {
+      await api.converterEmCompra(solicitacao.id, {
+        itens_lista: validos.map(it => ({
+          descricao: it.descricao.trim(),
+          quantidade: it.quantidade,
+          valor_estimado: it.valor_estimado === '' ? null : it.valor_estimado,
+          valor_tipo: it.valor_tipo,
+          link_referencia: it.link_referencia.trim() || undefined,
+        })),
+        favorecido_nome: favorecido.trim() || undefined,
+        eh_planejado: planejado,
+        data_necessaria: dataNec || undefined,
+        justificativa: justificativa.trim() || undefined,
+      });
+      toast.success('Virou compra — seguiu pra equipe de Logística.');
+      onDone();
+    } catch (e) { toast.error(e.message || 'Erro ao converter em compra'); }
+    finally { setSaving(false); }
+  }
+
+  return (
+    <Dialog open onOpenChange={v => { if (!v) onClose(); }}>
+      <DialogContent className="sm:max-w-lg max-h-[90vh] flex flex-col">
+        <DialogHeader><DialogTitle>Isto é uma compra</DialogTitle></DialogHeader>
+        <div className="space-y-3 overflow-y-auto min-h-0 flex-1">
+          <p className="text-sm text-muted-foreground">Especifique o que precisa ser comprado. O pedido <span className="font-medium">{solicitacao.titulo}</span> vira uma compra e segue pra equipe de Logística (cotação → financeiro), sem abrir outra solicitação.</p>
+
+          <div className="space-y-2">
+            {itens.map((it, i) => (
+              <div key={i} className="rounded-md border border-border p-2.5 space-y-2">
+                <div className="flex gap-2">
+                  <Input className="flex-1" placeholder="O que comprar" value={it.descricao} onChange={e => setItem(i, { descricao: e.target.value })} />
+                  {itens.length > 1 && <Button size="icon" variant="ghost" className="h-9 w-9 text-destructive" onClick={() => rmItem(i)}><Trash2 className="h-4 w-4" /></Button>}
+                </div>
+                <div className="grid grid-cols-3 gap-2">
+                  <div><Label className="text-xs">Qtd</Label><Input type="number" min="1" value={it.quantidade} onChange={e => setItem(i, { quantidade: e.target.value })} /></div>
+                  <div><Label className="text-xs">Valor (R$)</Label><Input type="number" step="0.01" min="0" value={it.valor_estimado} onChange={e => setItem(i, { valor_estimado: e.target.value })} placeholder="0,00" /></div>
+                  <div>
+                    <Label className="text-xs">Tipo</Label>
+                    <select value={it.valor_tipo} onChange={e => setItem(i, { valor_tipo: e.target.value })}
+                      className="w-full h-9 px-2 text-sm rounded-md border border-border bg-background">
+                      <option value="total">R$ total</option>
+                      <option value="unitario">R$ por unid.</option>
+                    </select>
+                  </div>
+                </div>
+                <Input placeholder="Link (opcional)" value={it.link_referencia} onChange={e => setItem(i, { link_referencia: e.target.value })} />
+              </div>
+            ))}
+            <Button size="sm" variant="outline" onClick={addItem} className="w-full">+ Adicionar item</Button>
+          </div>
+
+          <div className="grid grid-cols-2 gap-2">
+            <div><Label className="text-xs">Fornecedor sugerido</Label><Input value={favorecido} onChange={e => setFavorecido(e.target.value)} placeholder="opcional" /></div>
+            <div><Label className="text-xs">Data necessária</Label><DatePicker value={dataNec} onChange={v => setDataNec(v)} /></div>
+          </div>
+
+          <label className="flex items-start gap-2 text-sm cursor-pointer">
+            <input type="checkbox" checked={planejado} onChange={e => setPlanejado(e.target.checked)} className="mt-1" />
+            <span>Compra <b>planejada</b> (já prevista no orçamento da área). <span className="text-muted-foreground">Muda a régua de aprovação por valor.</span></span>
+          </label>
+
+          <div><Label className="text-xs">Observação (opcional)</Label>
+            <Textarea rows={2} value={justificativa} onChange={e => setJustificativa(e.target.value)} placeholder="Detalhes da compra..." /></div>
+
+          <div className="text-sm text-right text-muted-foreground">Total estimado: <b className="text-foreground">R$ {total.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</b></div>
+        </div>
+        <div className="flex justify-end gap-2 pt-2 border-t border-border">
+          <Button variant="outline" onClick={onClose} disabled={saving}>Cancelar</Button>
+          <Button onClick={converter} disabled={saving} className="bg-orange-600 hover:bg-orange-700 text-white">{saving ? 'Convertendo…' : 'Virar compra'}</Button>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+
+function LancarFinanceiroModal({ solicitacao, onClose, onDone }) {
+  const [planos, setPlanos] = useState([]);
+  const [centros, setCentros] = useState([]);
+  const [contas, setContas] = useState([]);
+  const [planoId, setPlanoId] = useState(solicitacao.plano_contas_id || '');
+  const [centroId, setCentroId] = useState(solicitacao.centro_custo_id || '');
+  const [contaId, setContaId] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [precisaConta, setPrecisaConta] = useState(false);
+  const valor = Number(solicitacao.valor_cotado ?? solicitacao.valor_estimado) || 0;
+
+  useEffect(() => {
+    api.classificacaoAux().then(d => { setPlanos(d?.planos || []); setCentros(d?.centros || []); setContas(d?.contas || []); }).catch(() => {});
+  }, []);
+
+  async function lancar() {
+    if (!planoId) { toast.error('Escolha o plano de contas.'); return; }
+    setSaving(true);
+    try {
+      const r = await api.lancarFinanceiro(solicitacao.id, { plano_contas_id: planoId, centro_custo_id: centroId || undefined, conta_id: contaId || undefined });
+      toast.success(r?.conciliada ? 'Lançado e conciliado com o extrato.' : 'Lançado no financeiro (pendente de conciliação).');
+      onDone();
+    } catch (e) {
+      if (e?.precisaConta || /conta banc/i.test(e?.message || '')) { setPrecisaConta(true); toast.error('Não achei o débito no extrato — escolha a conta bancária e lance de novo.'); }
+      else toast.error(e.message || 'Erro ao lançar no financeiro');
+    } finally { setSaving(false); }
+  }
+
+  return (
+    <Dialog open onOpenChange={v => { if (!v) onClose(); }}>
+      <DialogContent className="sm:max-w-md">
+        <DialogHeader><DialogTitle>Lançar no financeiro</DialogTitle></DialogHeader>
+        <div className="space-y-3">
+          <p className="text-sm text-muted-foreground">Cria a despesa de <span className="font-medium">{solicitacao.titulo}</span> ({valor.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })}) e concilia com o extrato automaticamente se o débito existir.</p>
+          <div><Label className="text-xs">Plano de contas *</Label>
+            <ComboboxContabil items={planos} value={planoId} onChange={setPlanoId} placeholder="Buscar plano de contas…" permiteVazio={false} invalido={!planoId} />
+          </div>
+          <div><Label className="text-xs">Centro de custo</Label>
+            <ComboboxContabil items={centros} value={centroId} onChange={setCentroId} placeholder="Buscar centro de custo…" emptyLabel="— sem centro de custo —" />
+          </div>
+          <div><Label className="text-xs">Conta bancária {precisaConta ? '(necessária · não achei no extrato)' : '(só se não houver débito no extrato)'}</Label>
+            <select value={contaId} onChange={e => setContaId(e.target.value)} className={`w-full px-2 py-2 text-sm rounded-md bg-background border ${precisaConta && !contaId ? 'border-rose-400' : 'border-border'}`}>
+              <option value="">— conciliar pelo extrato —</option>
+              {contas.map(c => <option key={c.id} value={c.id}>{c.nome}{c.banco ? ` · ${c.banco}` : ''}</option>)}
+            </select></div>
+        </div>
+        <div className="flex justify-end gap-2 pt-3 border-t border-border mt-3">
+          <Button variant="outline" onClick={onClose} disabled={saving}>Cancelar</Button>
+          <Button onClick={lancar} disabled={saving || !planoId} className="bg-teal-600 hover:bg-teal-700 text-white">{saving ? 'Lançando…' : 'Lançar'}</Button>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+
+function valorAlteracao(campo, v) {
+  if (v == null || v === '') return '(vazio)';
+  if (campo === 'pago_valor') {
+    const n = Number(v);
+    return Number.isFinite(n) ? n.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' }) : String(v);
+  }
+  if (campo === 'pagamento_forma') return rotuloForma(v);
+  if (campo === 'pagamento_data') {
+    const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(v));
+    return m ? `${m[3]}/${m[2]}/${m[1]}` : String(v);
+  }
+  const t = String(v);
+  return t.length > 80 ? `${t.slice(0, 80)}…` : t;
+}
+
+function SolicitacaoHistorico({ item, isAdmin, currentUserId, onChanged }) {
+  const [linha, setLinha] = useState([]);
+  const [aberto, setAberto] = useState(false);
+  const [motivo, setMotivo] = useState('descricao');
+  const [comentario, setComentario] = useState('');
+  const [resposta, setResposta] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+
+  const [retirarAberto, setRetirarAberto] = useState(false);
+  const [retirarComentario, setRetirarComentario] = useState('');
+
+  const [editarAberto, setEditarAberto] = useState(false);
+  const [docFile, setDocFile] = useState(null);
+  const [edit, setEdit] = useState({
+    titulo: item.titulo || '', descricao: item.descricao || '',
+    justificativa: item.justificativa || '', data_necessaria: item.data_necessaria || '',
+    valor_estimado: item.valor_estimado != null ? String(item.valor_estimado) : '',
+  });
+
+  const ehCompras = ['compras', 'servico'].includes(item.categoria);
+  const [itens, setItens] = useState(() =>
+    (Array.isArray(item.solicitacao_itens) ? [...item.solicitacao_itens] : [])
+      .sort((a, b) => (a.ordem ?? 0) - (b.ordem ?? 0))
+      .map(it => ({
+        descricao: it.descricao || '',
+        quantidade: String(it.quantidade ?? 1),
+        valor_estimado: it.valor_estimado != null ? String(it.valor_estimado) : '',
+        valor_tipo: 'total',
+        link_referencia: it.link_referencia || '',
+      })));
+  const setItemLinha = (i, patch) => setItens(arr => arr.map((it, j) => (j === i ? { ...it, ...patch } : it)));
+  const addItemLinha = () => setItens(arr => [...arr, { descricao: '', quantidade: '1', valor_estimado: '', valor_tipo: 'total', link_referencia: '' }]);
+  const delItemLinha = (i) => setItens(arr => arr.filter((_, j) => j !== i));
+  const totalItens = itens.reduce((acc, it) => {
+    const v = Number(it.valor_estimado); const q = Number(it.quantidade) || 1;
+    if (!isFinite(v) || !it.valor_estimado) return acc;
+    return acc + (it.valor_tipo === 'unitario' ? v * q : v);
+  }, 0);
+
+  const isSolicitante = item.solicitante_id === currentUserId;
+  const emAjuste = item.status === 'aguardando_ajuste';
+  const encerrada = ['concluido', 'cancelado', 'rejeitado', 'avaliado'].includes(item.status);
+
+  const aguardaOrigem = item.status === 'aguardando_aprovacao_origem' || ['pendente', 'triagem'].includes(item.aprovacao_origem_status);
+  const podeRelatar = (isSolicitante || isAdmin) && !encerrada && !emAjuste && !aguardaOrigem;
+
+
+  const emAprovacao = item.status === 'aguardando_aprovacao_origem';
+  const podeEditarAntes = (isSolicitante || isAdmin) && emAprovacao;
+
+  useEffect(() => {
+    let alive = true;
+    api.timeline(item.id).then(d => { if (alive) setLinha(Array.isArray(d) ? d : []); }).catch(() => {});
+    return () => { alive = false; };
+
+  }, [item.id, item.status, item.vezes_refeita, item.updated_at]);
+
+  async function enviarProblema() {
+    if (motivo !== 'cancelamento' && comentario.trim().length < 3) {
+      toast.error('Conte rapidamente o que precisa ajustar.');
+      return;
+    }
+    setSubmitting(true);
+    try {
+      await api.relatarProblema(item.id, motivo, comentario.trim() || null);
+      toast.success(motivo === 'cancelamento' ? 'Solicitação cancelada.' : 'Enviado · foi para ajuste.');
+      setAberto(false); setComentario('');
+      onChanged?.();
+    } catch (e) { toast.error(e.message || 'Erro ao relatar problema'); }
+    finally { setSubmitting(false); }
+  }
+
+  async function reenviar() {
+    if (!edit.titulo.trim()) { toast.error('O título não pode ficar vazio.'); return; }
+    if (resposta.trim().length < 3) { toast.error('Descreva sua resposta ao ajuste pedido.'); return; }
+    setSubmitting(true);
+    try {
+      await api.reenviar(item.id, {
+        titulo: edit.titulo.trim(), descricao: edit.descricao,
+        justificativa: edit.justificativa, data_necessaria: edit.data_necessaria || null,
+        resposta: resposta.trim(),
+        ...(ehCompras ? {
+          itens_lista: itens
+            .filter(it => String(it.descricao || '').trim())
+            .map(it => ({
+              descricao: it.descricao, quantidade: Number(it.quantidade) || 1,
+              valor_estimado: it.valor_estimado, valor_tipo: it.valor_tipo,
+              link_referencia: it.link_referencia || null,
+            })),
+        } : {}),
+      });
+      toast.success('Reenviada · voltou para a fila.');
+      setResposta('');
+      onChanged?.();
+    } catch (e) { toast.error(e.message || 'Erro ao reenviar'); }
+    finally { setSubmitting(false); }
+  }
+
+
+  async function salvarEdicao() {
+    if (!edit.titulo.trim()) { toast.error('O título não pode ficar vazio.'); return; }
+    setSubmitting(true);
+    try {
+      let documento_url;
+      if (docFile) {
+        const ext = (docFile.name.split('.').pop() || 'pdf').toLowerCase();
+        const path = `comprovantes/${Date.now()}-${Math.random().toString(36).slice(2)}.${ext}`;
+        const { error: upErr } = await supabase.storage
+          .from('solicitacoes')
+          .upload(path, docFile, { upsert: false });
+        if (upErr) throw new Error('Erro ao enviar o documento: ' + upErr.message);
+        documento_url = supabase.storage.from('solicitacoes').getPublicUrl(path).data.publicUrl;
+      }
+      await api.editar(item.id, {
+        titulo: edit.titulo.trim(), descricao: edit.descricao,
+        justificativa: edit.justificativa, data_necessaria: edit.data_necessaria || null,
+        ...(!ehCompras && edit.valor_estimado !== '' ? { valor_estimado: edit.valor_estimado } : {}),
+        ...(documento_url ? { documento_url } : {}),
+        ...(ehCompras ? {
+          itens_lista: itens
+            .filter(it => String(it.descricao || '').trim())
+            .map(it => ({
+              descricao: it.descricao, quantidade: Number(it.quantidade) || 1,
+              valor_estimado: it.valor_estimado, valor_tipo: it.valor_tipo,
+              link_referencia: it.link_referencia || null,
+            })),
+        } : {}),
+      });
+      toast.success('Solicitação atualizada · o aprovador foi avisado.');
+      setDocFile(null); setEditarAberto(false);
+      api.timeline(item.id).then(d => setLinha(Array.isArray(d) ? d : [])).catch(() => {});
+      onChanged?.();
+    } catch (e) { toast.error(e.message || 'Erro ao salvar edição'); }
+    finally { setSubmitting(false); }
+  }
+
+
+
+  const ultimoAjuste = [...linha].reverse().find(l => l.tipo === 'ajuste' && !['cancelamento', 'resposta', 'edicao'].includes(l.motivo));
+
+  const ajusteMaisRecente = [...linha].reverse().find(l => l.tipo === 'ajuste');
+  const podeRetirar = podeRetirarAjusteTela({ sol: item, ultimoAjuste: ajusteMaisRecente, atendeArea: !!isAdmin, usuarioId: currentUserId });
+
+  async function retirarAjuste() {
+    if (retirarComentario.trim().length < 3) { toast.error('Diga em poucas palavras por que está retirando o pedido de ajuste.'); return; }
+    setSubmitting(true);
+    try {
+      await api.retirarAjuste(item.id, retirarComentario.trim());
+      toast.success('Pedido de ajuste retirado · a solicitação voltou para a fila.');
+      setRetirarAberto(false); setRetirarComentario('');
+      onChanged?.();
+    } catch (e) { toast.error(e.message || 'Erro ao retirar o pedido de ajuste'); }
+    finally { setSubmitting(false); }
+  }
+
+
+
+  const camposBasicos = (
+    <>
+      <div className="space-y-2">
+        <Label className="text-xs">Título</Label>
+        <Input value={edit.titulo} onChange={e => setEdit(s => ({ ...s, titulo: e.target.value }))} />
+      </div>
+      <div className="space-y-2">
+        <Label className="text-xs">Descrição</Label>
+        <Textarea rows={2} value={edit.descricao} onChange={e => setEdit(s => ({ ...s, descricao: e.target.value }))} />
+      </div>
+      <div className="space-y-2">
+        <Label className="text-xs">Justificativa</Label>
+        <Textarea rows={2} value={edit.justificativa} onChange={e => setEdit(s => ({ ...s, justificativa: e.target.value }))} />
+      </div>
+      <div className="space-y-2">
+        <Label className="text-xs">Data necessária</Label>
+        <DatePicker value={edit.data_necessaria ? String(edit.data_necessaria).slice(0, 10) : ''}
+          onChange={v => setEdit(s => ({ ...s, data_necessaria: v }))} />
+      </div>
+    </>
+  );
+  const itensEditor = ehCompras && (
+    <div className="space-y-2">
+      <div className="flex items-center justify-between">
+        <Label className="text-xs">Itens do pedido</Label>
+        {totalItens > 0 && (
+          <span className="text-[11px] text-muted-foreground">
+            Total: {totalItens.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })}
+          </span>
+        )}
+      </div>
+      <div className="space-y-2">
+        {itens.map((it, i) => (
+          <div key={i} className="rounded-md border border-border bg-background p-2 space-y-1.5">
+            <div className="flex gap-1.5">
+              <Input className="flex-1" placeholder="Descrição do item" value={it.descricao}
+                onChange={e => setItemLinha(i, { descricao: e.target.value })} />
+              <button type="button" className="text-red-600 text-xs px-1 shrink-0" onClick={() => delItemLinha(i)} title="Remover item">✕</button>
+            </div>
+            <div className="flex flex-wrap gap-1.5 items-center">
+              <Input type="number" min="1" step="1" className="w-16" placeholder="Qtd" value={it.quantidade}
+                onChange={e => setItemLinha(i, { quantidade: e.target.value })} />
+              <Input type="number" min="0" step="any" className="w-28" placeholder="Valor (R$)" value={it.valor_estimado}
+                onChange={e => setItemLinha(i, { valor_estimado: e.target.value })} />
+              <select className="h-9 rounded-md border border-input bg-background px-2 text-xs" value={it.valor_tipo}
+                onChange={e => setItemLinha(i, { valor_tipo: e.target.value })}>
+                <option value="total">R$ total</option>
+                <option value="unitario">R$ por unid.</option>
+              </select>
+            </div>
+            <Input className="text-xs" placeholder="Link de referência (opcional)" value={it.link_referencia}
+              onChange={e => setItemLinha(i, { link_referencia: e.target.value })} />
+          </div>
+        ))}
+        <Button type="button" size="sm" variant="outline" onClick={addItemLinha} className="w-full">+ Adicionar item</Button>
+      </div>
+    </div>
+  );
+
+  return (
+    <div className="space-y-3 pt-3 border-t border-border">
+      {item.vezes_refeita > 0 && (
+        <p className="text-[11px] text-amber-600 dark:text-amber-400">
+          Esta solicitação foi ajustada {item.vezes_refeita}× durante o processo.
+        </p>
+      )}
+      {
+                                                                          }
+      {podeEditarAntes && (
+        editarAberto ? (
+          <div id="editar-antes-aprovacao" className="space-y-3 p-3 rounded-lg border border-violet-500/30 bg-violet-500/5">
+            <p className="text-sm font-semibold text-violet-700 dark:text-violet-400">Editar solicitação · ainda aguardando aprovação</p>
+            <p className="text-xs text-muted-foreground">
+              Corrija os dados ou anexe o documento que faltou enquanto o diretor não aprova.
+              A edição fica registrada na linha do tempo e o aprovador é avisado.
+            </p>
+            {camposBasicos}
+            {!ehCompras && (
+              <div className="space-y-2">
+                <Label className="text-xs">{item.categoria === 'reembolso' ? 'Valor (exato da nota)' : 'Valor estimado (R$)'}</Label>
+                <Input type="number" min="0" step="0.01" value={edit.valor_estimado}
+                  onChange={e => setEdit(s => ({ ...s, valor_estimado: e.target.value }))} />
+              </div>
+            )}
+            {itensEditor}
+            <div className="space-y-2">
+              <Label className="text-xs">Documento / comprovante {item.documento_url ? '· substituir o atual' : '· anexar'}</Label>
+              {item.documento_url && !docFile && (
+                <a href={item.documento_url} target="_blank" rel="noopener noreferrer"
+                  className="inline-flex items-center gap-2 text-xs text-primary hover:underline">
+                  <FileText className="h-3.5 w-3.5" /> Ver documento atual
+                </a>
+              )}
+              <DocDropzone file={docFile} onFile={setDocFile} onClear={() => setDocFile(null)} />
+            </div>
+            <div className="flex gap-2 justify-end">
+              <Button size="sm" variant="outline" onClick={() => { setEditarAberto(false); setDocFile(null); }}>Cancelar</Button>
+              <Button size="sm" onClick={salvarEdicao} disabled={submitting}>
+                {submitting ? 'Salvando...' : 'Salvar alterações'}
+              </Button>
+            </div>
+          </div>
+        ) : (
+          <div id="editar-antes-aprovacao" className="flex flex-wrap items-center gap-2 justify-between p-3 rounded-lg border border-violet-500/40 bg-violet-500/10">
+            <div className="flex items-center gap-2 text-sm text-violet-800 dark:text-violet-300">
+              <Pencil className="h-4 w-4 shrink-0" />
+              <span className="font-medium">Aguardando aprovação · você ainda pode editar este pedido.</span>
+            </div>
+            <Button size="sm" variant="outline" onClick={() => setEditarAberto(true)}>Editar solicitação</Button>
+          </div>
+        )
+      )}
+
+      {emAjuste && isSolicitante && (
+        <div id="editar-devolvida" className="space-y-3 p-3 rounded-lg border border-amber-500/30 bg-amber-500/5">
+          <p className="text-sm font-semibold text-amber-700 dark:text-amber-400">Ajuste solicitado · corrija e reenvie</p>
+          {ultimoAjuste && (
+            <p className="text-xs text-muted-foreground">
+              Pedido em <span className="font-medium">{MOTIVO_LABEL[ultimoAjuste.motivo]}</span>
+              {ultimoAjuste.comentario ? `: ${ultimoAjuste.comentario}` : ''}
+            </p>
+          )}
+          {camposBasicos}
+
+          {itensEditor}
+
+          <div className="space-y-2">
+            <Label className="text-xs">Sua resposta <span className="text-red-500">*</span></Label>
+            <Textarea rows={2} value={resposta} onChange={e => setResposta(e.target.value)}
+              placeholder="Responda ao que a área pediu (fica registrado na linha do tempo)" />
+          </div>
+          <Button size="sm" onClick={reenviar} disabled={submitting} className="w-full">
+            {submitting ? 'Reenviando...' : 'Reenviar solicitação'}
+          </Button>
+        </div>
+      )}
+
+      {podeRetirar && (
+        retirarAberto ? (
+          <div className="space-y-2 p-3 rounded-lg border border-amber-500/30 bg-amber-500/5">
+            <p className="text-sm font-medium text-foreground">Retirar pedido de ajuste</p>
+            <p className="text-xs text-muted-foreground">
+              A solicitação sai da fila do solicitante e volta para <span className="font-medium">{getStatusMeta(item.status_antes_ajuste).label}</span>.
+              Ninguém aprova nem paga nada por aqui: depois, siga o fluxo normal.
+            </p>
+            <Textarea rows={2} value={retirarComentario} onChange={e => setRetirarComentario(e.target.value)}
+              placeholder="Ex.: pedi ajuste por engano, o pagamento já foi feito" />
+            <div className="flex gap-2 justify-end">
+              <Button size="sm" variant="outline" onClick={() => { setRetirarAberto(false); setRetirarComentario(''); }}>Fechar</Button>
+              <Button size="sm" onClick={retirarAjuste} disabled={submitting}>
+                {submitting ? 'Retirando...' : 'Retirar pedido de ajuste'}
+              </Button>
+            </div>
+          </div>
+        ) : (
+          <div className="flex flex-wrap items-center gap-2 justify-between p-3 rounded-lg border border-amber-500/40 bg-amber-500/10">
+            <span className="text-xs text-amber-800 dark:text-amber-300">
+              A área pediu ajuste ao solicitante. Se foi engano, retire o pedido.
+            </span>
+            <Button size="sm" variant="outline" onClick={() => setRetirarAberto(true)}>Retirar pedido de ajuste</Button>
+          </div>
+        )
+      )}
+
+      {podeRelatar && (
+        aberto ? (
+          <div className="space-y-2 p-3 rounded-lg border border-border bg-muted/30">
+            <p className="text-sm font-medium text-foreground">Relatar problema</p>
+            <p className="text-xs text-muted-foreground">
+              {isSolicitante ? 'Precisa alterar ou cancelar este pedido?' : 'Devolver para o solicitante ajustar (não conta contra o SLA da área).'}
+            </p>
+            <div className="flex flex-wrap gap-1.5">
+              {MOTIVOS_PROBLEMA.map(m => (
+                <button key={m.value} type="button" onClick={() => setMotivo(m.value)}
+                  className={`px-2.5 py-1 rounded-md border text-xs transition ${motivo === m.value ? 'bg-primary text-primary-foreground border-primary' : 'bg-background border-border hover:border-primary'}`}>
+                  {m.label}
+                </button>
+              ))}
+            </div>
+            <Textarea rows={2} value={comentario} onChange={e => setComentario(e.target.value)}
+              placeholder={motivo === 'cancelamento' ? 'Motivo do cancelamento (opcional)' : 'O que precisa mudar?'} />
+            <div className="flex gap-2 justify-end">
+              <Button size="sm" variant="outline" onClick={() => { setAberto(false); setComentario(''); }}>Fechar</Button>
+              <Button size="sm" onClick={enviarProblema} disabled={submitting}
+                className={motivo === 'cancelamento' ? 'bg-red-600 hover:bg-red-700 text-white' : ''}>
+                {submitting ? 'Enviando...' : (motivo === 'cancelamento' ? 'Cancelar solicitação' : 'Enviar')}
+              </Button>
+            </div>
+          </div>
+        ) : (
+          <Button size="sm" variant="outline" onClick={() => setAberto(true)}>Relatar problema</Button>
+        )
+      )}
+
+      {linha.length > 0 && (
+        <div>
+          <p className="text-xs font-semibold text-muted-foreground mb-2 flex items-center gap-1.5">
+            <Clock className="h-3.5 w-3.5" /> Linha do tempo
+          </p>
+          <ul className="space-y-2">
+            {linha.map((l, i) => (
+              <li key={i} className="flex items-start gap-2 text-xs">
+                <span className="mt-0.5">{l.tipo === 'ajuste' ? (l.motivo === 'cancelamento' ? '✖' : '✏️') : '•'}</span>
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="font-medium">
+                      {l.tipo === 'ajuste'
+                        ? (l.motivo === 'resposta'
+                            ? (l.lado === 'responsavel' ? 'Pedido de ajuste retirado pela área' : 'Resposta do solicitante')
+                            : l.motivo === 'edicao'
+                              ? (l.lado === 'responsavel' ? 'Corrigida depois do pagamento' : 'Editada pelo solicitante (antes da aprovação)')
+                              : `${l.lado === 'responsavel' ? 'Devolução' : 'Ajuste pedido'} · ${MOTIVO_LABEL[l.motivo] || l.motivo}`)
+                        : getStatusMeta(l.status_novo).label}
+                    </span>
+                    <span className="text-muted-foreground text-[10px] whitespace-nowrap">
+                      {new Date(l.em).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}
+                    </span>
+                  </div>
+                  {(l.comentario || l.observacao) && <p className="text-muted-foreground">{l.comentario || l.observacao}</p>}
+                  {l.alteracoes && typeof l.alteracoes === 'object' && Object.keys(l.alteracoes).length > 0 && (
+                    <ul className="mt-1 space-y-0.5 text-[11px] text-muted-foreground">
+                      {Object.entries(l.alteracoes).map(([campo, d]) => (
+                        <li key={campo}>
+                          <span className="font-medium text-foreground">{ROTULO_CAMPO[campo] || campo}:</span>{' '}
+                          {campo === 'comprovante'
+                            ? `novo arquivo${d?.depois ? ` (${d.depois})` : ''}`
+                            : <>{valorAlteracao(campo, d?.antes)} → {valorAlteracao(campo, d?.depois)}</>}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                  {l.ator && <p className="text-muted-foreground text-[10px]">por {l.ator}</p>}
+                </div>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </div>
+  );
+}

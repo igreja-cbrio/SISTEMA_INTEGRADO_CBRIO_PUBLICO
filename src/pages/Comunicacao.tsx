@@ -1,0 +1,828 @@
+
+
+
+
+
+import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useSearchParams } from 'react-router-dom';
+import { useAuth } from '../contexts/AuthContext';
+import { comunicacao } from '../api';
+import { Tabs, TabsList, TabsTrigger, TabsContent } from '../components/ui/tabs';
+import { Card } from '../components/ui/card';
+import { Button } from '../components/ui/button';
+import { Input } from '../components/ui/input';
+import { DatePicker } from '@/components/ui/date-picker';
+import { Badge } from '../components/ui/badge';
+import {
+  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
+} from '../components/ui/select';
+import { toast } from 'sonner';
+import {
+  Loader2, BarChart3, Inbox, Send, CalendarClock, FileText, Phone, Users,
+  Bot, AlertTriangle, RefreshCw, Plus, Trash2, Pencil, Power, Save, X, MessageSquare, Repeat,
+  Settings, Coins, BookUser, Sparkles,
+} from 'lucide-react';
+import { Switch } from '../components/ui/switch';
+import Conversas from './Conversas';
+import { WhatsappBotConfig } from './admin/Whatsapp';
+import ConversasSetores from './admin/ConversasSetores';
+import ContatosTab from '../components/comunicacao/ContatosTab';
+import BotIaAreas from '../components/comunicacao/BotIaAreas';
+import EquipeAtendimento from '../components/comunicacao/EquipeAtendimento';
+import DashboardComunicacao from '../components/comunicacao/DashboardComunicacao';
+import Agendados, { type Agendamento } from '../components/comunicacao/Agendados';
+import NovoEnvioModal from '../components/comunicacao/NovoEnvioModal';
+import { Conexao, TesteTemplate, MenuRespondeSozinho } from '../components/comunicacao/ConfiguracoesPecas';
+
+const C = { primary: '#00B39D' };
+
+
+function fmtData(iso?: string | null) {
+  if (!iso) return '—';
+  try { return new Date(iso).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', year: '2-digit', hour: '2-digit', minute: '2-digit' }); }
+  catch { return String(iso); }
+}
+function Spinner() { return <div className="flex justify-center p-10"><Loader2 className="h-5 w-5 animate-spin text-primary" /></div>; }
+function ErroBox({ msg, onRetry }: { msg: string; onRetry: () => void }) {
+  return (
+    <div style={{ margin: 16, padding: 16, background: '#FCEBEB', border: '1px dashed #F09595', borderRadius: 8, textAlign: 'center' }}>
+      <div style={{ fontSize: 13, fontWeight: 600, color: '#501313', marginBottom: 4 }}>Não foi possível carregar</div>
+      <div style={{ fontSize: 11, color: '#791F1F', marginBottom: 10 }}>{msg}</div>
+      <button onClick={onRetry} style={{ background: '#E24B4A', color: '#fff', border: 'none', borderRadius: 6, padding: '6px 14px', fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>Tentar de novo</button>
+    </div>
+  );
+}
+
+
+type Resumo = { dias: number; total: number; enviados: number; pendentes: number; erros: number; entregues: number; lidos: number; falhos_meta: number; orfaos?: number; respostas?: number };
+
+
+
+
+
+
+function Dashboard({ podeNvl5 }: { podeNvl5: boolean }) { return <DashboardComunicacao podeEditarTarifas={podeNvl5} />; }
+
+
+
+
+
+
+type Envio = {
+  id: string; telefone: string; tipo?: string; template?: string; texto?: string;
+  contexto?: string; status: string; tentativas?: number; delivered_at?: string;
+  read_at?: string; failed_at?: string; criado_em?: string;
+  erro?: string | null; erro_status?: string | null;
+};
+const LIMIT = 100;
+function SeloStatus({ e }: { e: Envio }) {
+  const selos: React.ReactNode[] = [];
+  if (e.failed_at) selos.push(<Badge key="f" variant="destructive">falhou</Badge>);
+  if (e.read_at) selos.push(<Badge key="r" style={{ background: '#7c3aed', color: '#fff' }}>lido</Badge>);
+  else if (e.delivered_at) selos.push(<Badge key="d" style={{ background: '#0ea5e9', color: '#fff' }}>entregue</Badge>);
+  const cor = e.status === 'enviado' ? { background: C.primary, color: '#fff' }
+    : e.status === 'erro' ? undefined
+    : e.status === 'pendente' ? { background: '#d97706', color: '#fff' } : undefined;
+  selos.unshift(<Badge key="s" variant={e.status === 'erro' ? 'destructive' : 'secondary'} style={cor}>{e.status}</Badge>);
+  return <div className="flex flex-wrap gap-1">{selos}</div>;
+}
+function HistoricoEnvios({ podeReenviar }: { podeReenviar: boolean }) {
+  const [filtros, setFiltros] = useState({ status: '', contexto: '', telefone: '', de: '', ate: '' });
+  const [aplicados, setAplicados] = useState(filtros);
+  const [offset, setOffset] = useState(0);
+  const [dados, setDados] = useState<{ envios: Envio[]; total: number } | null>(null);
+  const [erro, setErro] = useState(false);
+  const [orfaos, setOrfaos] = useState(0);
+  const [reenvId, setReenvId] = useState<string | null>(null);
+  const [telCorrigido, setTelCorrigido] = useState('');
+
+  const carregar = useCallback(() => {
+    setErro(false); setDados(null);
+    const params: Record<string, unknown> = { limit: LIMIT, offset };
+    Object.entries(aplicados).forEach(([k, v]) => { if (v) params[k] = k === 'status' && v === '_all' ? '' : v; });
+    comunicacao.envios.list(params).then((r) => setDados(r)).catch(() => setErro(true));
+    comunicacao.envios.resumo(30).then((r: Resumo & { orfaos?: number }) => setOrfaos(r?.orfaos || 0)).catch(() => {});
+  }, [aplicados, offset]);
+  useEffect(() => { carregar(); }, [carregar]);
+
+  function aplicar() { setOffset(0); setAplicados(filtros); }
+
+  async function reenviar(id: string) {
+    try {
+      await comunicacao.erros.reenviar(id, telCorrigido.replace(/\D/g, '') || undefined);
+      toast.success('Reenfileirado — o cron reprocessa em breve.');
+      setReenvId(null); setTelCorrigido(''); carregar();
+    } catch (e: unknown) { toast.error((e as Error)?.message || 'Erro ao reenviar'); }
+  }
+  const total = dados?.total || 0;
+  const pagina = Math.floor(offset / LIMIT) + 1;
+  const totalPaginas = Math.max(1, Math.ceil(total / LIMIT));
+
+  return (
+    <div className="space-y-3">
+      <Card className="p-3">
+        <div className="grid grid-cols-2 gap-2 md:grid-cols-6">
+          <Select value={filtros.status || '_all'} onValueChange={(v) => setFiltros((f) => ({ ...f, status: v === '_all' ? '' : v }))}>
+            <SelectTrigger className="h-9"><SelectValue placeholder="Status" /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value="_all">Todos status</SelectItem>
+              <SelectItem value="pendente">Pendente</SelectItem>
+              <SelectItem value="enviado">Enviado</SelectItem>
+              <SelectItem value="erro">Erro (fila desistiu)</SelectItem>
+              <SelectItem value="falha_meta">Falha Meta (não entregue)</SelectItem>
+            </SelectContent>
+          </Select>
+          <Input className="h-9" placeholder="Contexto" value={filtros.contexto} onChange={(e) => setFiltros((f) => ({ ...f, contexto: e.target.value }))} />
+          <Input className="h-9" placeholder="Telefone" value={filtros.telefone} onChange={(e) => setFiltros((f) => ({ ...f, telefone: e.target.value }))} />
+          <DatePicker className="h-9" value={filtros.de} onChange={(v) => setFiltros((f) => ({ ...f, de: v }))} />
+          <DatePicker className="h-9" value={filtros.ate} onChange={(v) => setFiltros((f) => ({ ...f, ate: v }))} />
+          <Button className="h-9" onClick={aplicar}>Filtrar</Button>
+        </div>
+      </Card>
+      {orfaos > 0 && (
+        <Card className="flex items-center gap-2 p-3 text-sm">
+          <AlertTriangle className="h-4 w-4 text-amber-500" />
+          <span className="font-medium">{orfaos}</span>
+          <span className="text-muted-foreground">recibos da Meta sem envio correspondente (órfãos · 30 dias)</span>
+        </Card>
+      )}
+      {erro ? <ErroBox msg="Falha ao listar os envios." onRetry={carregar} />
+        : !dados ? <Spinner />
+        : (
+          <Card className="overflow-hidden p-0">
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b border-border text-[11px] uppercase tracking-wide text-muted-foreground">
+                    <th className="px-3 py-2.5 text-left font-medium">Data</th>
+                    <th className="px-3 py-2.5 text-left font-medium">Telefone</th>
+                    <th className="px-3 py-2.5 text-left font-medium">Tipo</th>
+                    <th className="px-3 py-2.5 text-left font-medium">Template / texto</th>
+                    <th className="px-3 py-2.5 text-left font-medium">Contexto</th>
+                    <th className="px-3 py-2.5 text-left font-medium">Status</th>
+                    <th className="px-3 py-2.5 text-center font-medium">Tent.</th>
+                    <th className="px-3 py-2.5 text-right font-medium"></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {dados.envios.length === 0 ? (
+                    <tr><td colSpan={8} className="py-10 text-center text-sm text-muted-foreground">Nenhum envio encontrado.</td></tr>
+                  ) : dados.envios.map((e) => (
+                    <tr key={e.id} className="border-b border-border/60 hover:bg-muted/40">
+                      <td className="whitespace-nowrap px-3 py-2 text-xs">{fmtData(e.criado_em)}</td>
+                      <td className="px-3 py-2 tabular-nums">{e.telefone}</td>
+                      <td className="px-3 py-2 text-xs">{e.tipo || '—'}</td>
+                      <td className="max-w-[280px] truncate px-3 py-2" title={e.template || e.texto}>{e.template || e.texto || '—'}</td>
+                      <td className="px-3 py-2 text-xs text-muted-foreground">{e.contexto || '—'}</td>
+                      {                                                                               }
+                      <td className="px-3 py-2" title={e.erro || e.erro_status || undefined}><SeloStatus e={e} /></td>
+                      <td className="px-3 py-2 text-center tabular-nums">{e.tentativas ?? 0}</td>
+                      <td className="px-3 py-2 text-right">
+                        {e.status === 'erro' && (reenvId === e.id ? (
+                          <div className="flex items-center justify-end gap-1">
+                            <Input className="h-8 w-36" placeholder="telefone (opcional)" value={telCorrigido} onChange={(ev) => setTelCorrigido(ev.target.value)} />
+                            <Button size="sm" onClick={() => reenviar(e.id)}>Enviar</Button>
+                            <button onClick={() => { setReenvId(null); setTelCorrigido(''); }} className="p-1 text-muted-foreground hover:text-destructive"><X className="h-4 w-4" /></button>
+                          </div>
+                        ) : (
+                          <Button size="sm" variant="outline" disabled={!podeReenviar} onClick={() => { setReenvId(e.id); setTelCorrigido(''); }} className="gap-1">
+                            <Send className="h-3.5 w-3.5" />Reenviar
+                          </Button>
+                        ))}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <div className="flex items-center justify-between border-t border-border px-3 py-2 text-xs text-muted-foreground">
+              <span>{total} envios · página {pagina}/{totalPaginas}</span>
+              <div className="flex gap-2">
+                <Button variant="outline" size="sm" disabled={offset === 0} onClick={() => setOffset((o) => Math.max(0, o - LIMIT))}>Anterior</Button>
+                <Button variant="outline" size="sm" disabled={offset + LIMIT >= total} onClick={() => setOffset((o) => o + LIMIT)}>Próxima</Button>
+              </div>
+            </div>
+          </Card>
+        )}
+    </div>
+  );
+}
+
+
+
+
+
+
+
+const DIAS_SEMANA = ['Domingo', 'Segunda', 'Terça', 'Quarta', 'Quinta', 'Sexta', 'Sábado'];
+type VistaEnvios = 'enviados' | 'agendados' | 'automaticos';
+const DESCRICAO_VISTA: Record<VistaEnvios, string> = {
+  enviados: 'Tudo que saiu (ou tentou sair) pela fila, de todos os módulos — o status diz se foi, e a falha tem o Reenviar na linha.',
+  agendados: 'Envios com data ou recorrência que você cria e edita, mais o histórico do que já saiu por aqui.',
+  automaticos: 'O que o sistema manda sozinho por gatilho — leitura; cada um é operado no módulo dono.',
+};
+function Envios({ podeReenviar, podeEscrever, podeExcluir, vistaInicial }: {
+  podeReenviar: boolean; podeEscrever: boolean; podeExcluir: boolean; vistaInicial?: VistaEnvios;
+}) {
+  const [vista, setVista] = useState<VistaEnvios>(vistaInicial || 'enviados');
+  const [modal, setModal] = useState<{ aberto: boolean; editar: Agendamento | null }>({ aberto: false, editar: null });
+  const [refresh, setRefresh] = useState(0);
+  useEffect(() => { if (vistaInicial) setVista(vistaInicial); }, [vistaInicial]);
+  return (
+    <div className="space-y-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <Button size="sm" variant={vista === 'enviados' ? 'default' : 'outline'} className="gap-1.5" onClick={() => setVista('enviados')}><Send className="h-3.5 w-3.5" />Enviados</Button>
+          <Button size="sm" variant={vista === 'agendados' ? 'default' : 'outline'} className="gap-1.5" onClick={() => setVista('agendados')}><CalendarClock className="h-3.5 w-3.5" />Agendados</Button>
+          <Button size="sm" variant={vista === 'automaticos' ? 'default' : 'outline'} className="gap-1.5" onClick={() => setVista('automaticos')}><Repeat className="h-3.5 w-3.5" />Automáticos</Button>
+        </div>
+        <Button size="sm" className="gap-1.5" disabled={!podeEscrever} title={podeEscrever ? 'Enviar agora, agendar ou repetir' : 'Exige nível 3 no módulo'} onClick={() => setModal({ aberto: true, editar: null })}>
+          <Plus className="h-4 w-4" />Novo envio
+        </Button>
+      </div>
+      <p className="text-xs text-muted-foreground">{DESCRICAO_VISTA[vista]}</p>
+      {vista === 'enviados' && <HistoricoEnvios key={refresh} podeReenviar={podeReenviar} />}
+      {vista === 'agendados' && <Agendados podeEscrever={podeEscrever} podeExcluir={podeExcluir} refreshKey={refresh} onEditar={(a) => setModal({ aberto: true, editar: a })} />}
+      {vista === 'automaticos' && <Automaticas podeEscrever={podeEscrever} />}
+      <NovoEnvioModal aberto={modal.aberto} editar={modal.editar} onFechar={() => setModal({ aberto: false, editar: null })}
+        onSalvo={(destino) => { setModal({ aberto: false, editar: null }); setRefresh((r) => r + 1); setVista(destino); }} />
+    </div>
+  );
+}
+
+
+type Template = { id: string; nome: string; idioma?: string; categoria?: string; status_meta?: string; params_body?: number; modulo?: string | null; ativo?: boolean };
+function SeloMeta({ s }: { s?: string }) {
+  const st = (s || '').toUpperCase();
+  const map: Record<string, { cls: string }> = {
+    APPROVED: { cls: 'bg-emerald-500/15 text-emerald-600' },
+    REJECTED: { cls: 'bg-rose-500/15 text-rose-600' },
+    PENDING: { cls: 'bg-amber-500/15 text-amber-600' },
+  };
+  const m = map[st] || { cls: 'bg-slate-500/15 text-slate-600' };
+  return <span className={`inline-flex items-center rounded-md px-2 py-0.5 text-[11px] font-semibold ${m.cls}`}>{st || '—'}</span>;
+}
+function Templates({ podeSync, podeEditar }: { podeSync: boolean; podeEditar: boolean }) {
+  const [lista, setLista] = useState<Template[] | null>(null);
+  const [erro, setErro] = useState(false);
+  const [sincronizando, setSincronizando] = useState(false);
+  const [editId, setEditId] = useState<string | null>(null);
+  const [editForm, setEditForm] = useState({ modulo: '', ativo: true, categoria: '' });
+
+  const carregar = useCallback(() => {
+    setErro(false);
+    comunicacao.templates.list().then((r: Template[]) => setLista(r || [])).catch(() => { setLista([]); setErro(true); });
+  }, []);
+  useEffect(() => { carregar(); }, [carregar]);
+
+  async function sincronizar() {
+    setSincronizando(true);
+    try {
+      const r: Record<string, unknown> = await comunicacao.templates.sync();
+      const qtd = Number(r?.sincronizados ?? r?.total ?? r?.count ?? 0);
+      if (r?.erro) {
+
+
+
+        toast.error(`Meta recusou o catálogo: ${String(r.erro)}`, { duration: 12000 });
+      } else if (qtd === 0) {
+        toast.warning('Sincronizou, mas a Meta não retornou nenhum template. Confira o WHATSAPP_BUSINESS_ACCOUNT_ID.', { duration: 10000 });
+      } else {
+        toast.success(`Sincronizado com a Meta · ${qtd} templates com status/categoria`);
+      }
+      carregar();
+    } catch (e: unknown) { toast.error((e as Error)?.message || 'Erro ao sincronizar'); }
+    finally { setSincronizando(false); }
+  }
+  function editar(t: Template) { setEditId(t.id); setEditForm({ modulo: t.modulo || '', ativo: t.ativo !== false, categoria: t.categoria || '' }); }
+  async function salvarEdit(id: string) {
+    try { await comunicacao.templates.atualizar(id, { modulo: editForm.modulo || null, ativo: editForm.ativo, categoria: editForm.categoria || null }); toast.success('Template atualizado'); setEditId(null); carregar(); }
+    catch (e: unknown) { toast.error((e as Error)?.message || 'Erro'); }
+  }
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between">
+        <p className="text-sm text-muted-foreground">Catálogo espelhado da Meta. O status é definido pela Meta na aprovação.</p>
+        <Button size="sm" className="gap-1.5" disabled={!podeSync || sincronizando} onClick={sincronizar}>
+          {sincronizando ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}Sincronizar com a Meta
+        </Button>
+      </div>
+      {erro ? <ErroBox msg="Falha ao listar templates." onRetry={carregar} />
+        : lista === null ? <Spinner />
+        : (
+          <Card className="overflow-hidden p-0">
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b border-border text-[11px] uppercase tracking-wide text-muted-foreground">
+                    <th className="px-3 py-2.5 text-left font-medium">Nome</th>
+                    <th className="px-3 py-2.5 text-left font-medium">Idioma</th>
+                    <th className="px-3 py-2.5 text-left font-medium">Categoria</th>
+                    <th className="px-3 py-2.5 text-left font-medium">Status Meta</th>
+                    <th className="px-3 py-2.5 text-center font-medium">Params</th>
+                    <th className="px-3 py-2.5 text-left font-medium">Módulo dono</th>
+                    <th className="px-3 py-2.5 text-right font-medium"></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {lista.length === 0 ? (
+                    <tr><td colSpan={7} className="py-10 text-center text-sm text-muted-foreground">Nenhum template. Sincronize com a Meta.</td></tr>
+                  ) : lista.map((t) => (
+                    <tr key={t.id} className="border-b border-border/60 hover:bg-muted/40">
+                      <td className="px-3 py-2 font-medium">{t.nome}</td>
+                      <td className="px-3 py-2 text-xs">{t.idioma || '—'}</td>
+                      <td className="px-3 py-2 text-xs">
+                        {editId === t.id ? (
+                          <select className="h-8 rounded border border-input bg-background px-1 text-xs"
+                            value={editForm.categoria}
+                            onChange={(e) => setEditForm((f) => ({ ...f, categoria: e.target.value }))}>
+                            <option value="">— categoria —</option>
+                            <option value="utility">utility</option>
+                            <option value="marketing">marketing</option>
+                            <option value="authentication">authentication</option>
+                            <option value="service">service</option>
+                          </select>
+                        ) : (t.categoria || '—')}
+                      </td>
+                      <td className="px-3 py-2"><SeloMeta s={t.status_meta} /></td>
+                      <td className="px-3 py-2 text-center tabular-nums">{t.params_body ?? 0}</td>
+                      <td className="px-3 py-2">
+                        {editId === t.id ? (
+                          <div className="flex items-center gap-1">
+                            <Input className="h-8 w-28" value={editForm.modulo} onChange={(e) => setEditForm((f) => ({ ...f, modulo: e.target.value }))} placeholder="slug" />
+                            <label className="flex items-center gap-1 text-xs"><input type="checkbox" checked={editForm.ativo} onChange={(e) => setEditForm((f) => ({ ...f, ativo: e.target.checked }))} />ativo</label>
+                          </div>
+                        ) : (
+                          <div className="flex items-center gap-2">
+                            {t.modulo ? <Badge variant="outline">{t.modulo}</Badge> : <span className="text-xs text-muted-foreground">—</span>}
+                            {t.ativo === false && <Badge variant="secondary">inativo</Badge>}
+                          </div>
+                        )}
+                      </td>
+                      <td className="px-3 py-2 text-right">
+                        {editId === t.id ? (
+                          <div className="flex justify-end gap-1">
+                            <button onClick={() => salvarEdit(t.id)} className="rounded p-1.5 text-muted-foreground hover:text-primary" title="Salvar"><Save className="h-4 w-4" /></button>
+                            <button onClick={() => setEditId(null)} className="rounded p-1.5 text-muted-foreground hover:text-destructive" title="Cancelar"><X className="h-4 w-4" /></button>
+                          </div>
+                        ) : (
+                          <button disabled={!podeEditar} onClick={() => editar(t)} className="rounded p-1.5 text-muted-foreground hover:text-primary disabled:opacity-40" title="Editar"><Pencil className="h-4 w-4" /></button>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </Card>
+        )}
+    </div>
+  );
+}
+
+
+
+
+
+
+
+type Atendente = { id: string; profile_id: string; areas?: string[]; horarios?: { dia: number; inicio: string; fim: string }[]; ativo?: boolean; profile?: { id: string; name?: string; email?: string } };
+type Perfil = { id: string; name?: string; email?: string };
+const HORARIO_VAZIO = { dia: 1, inicio: '09:00', fim: '18:00' };
+
+function Atendentes({ podeEscrever }: { podeEscrever: boolean }) {
+  const [lista, setLista] = useState<Atendente[] | null>(null);
+  const [perfis, setPerfis] = useState<Perfil[]>([]);
+  const [erro, setErro] = useState(false);
+  const [editId, setEditId] = useState<string | null>(null);
+  const [form, setForm] = useState<{ profile_id: string; areas: string; horarios: { dia: number; inicio: string; fim: string }[] }>({ profile_id: '', areas: '', horarios: [{ ...HORARIO_VAZIO }] });
+  const [salvando, setSalvando] = useState(false);
+
+  const carregar = useCallback(() => {
+    setErro(false);
+    comunicacao.atendentes.list().then((r: Atendente[]) => setLista(r || [])).catch(() => { setLista([]); setErro(true); });
+  }, []);
+  useEffect(() => {
+    carregar();
+
+    import('../api').then(({ users }) => users.list().then((r: Perfil[] | { users?: Perfil[] }) => {
+      setPerfis(Array.isArray(r) ? r : (r?.users || []));
+    }).catch(() => setPerfis([])));
+  }, [carregar]);
+
+  function resetar() { setForm({ profile_id: '', areas: '', horarios: [{ ...HORARIO_VAZIO }] }); setEditId(null); }
+  function editar(a: Atendente) {
+    setEditId(a.id);
+    setForm({ profile_id: a.profile_id, areas: (a.areas || []).join(', '), horarios: (a.horarios && a.horarios.length ? a.horarios : [{ ...HORARIO_VAZIO }]) });
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }
+  function setHorario(i: number, patch: Partial<{ dia: number; inicio: string; fim: string }>) {
+    setForm((f) => ({ ...f, horarios: f.horarios.map((h, idx) => idx === i ? { ...h, ...patch } : h) }));
+  }
+  async function salvar() {
+    if (!form.profile_id) { toast.error('Selecione o colaborador.'); return; }
+    const body = {
+      profile_id: form.profile_id,
+      areas: form.areas.split(',').map((a) => a.trim()).filter(Boolean),
+      horarios: form.horarios.filter((h) => h.inicio && h.fim),
+    };
+    setSalvando(true);
+    try {
+      if (editId) { await comunicacao.atendentes.atualizar(editId, { areas: body.areas, horarios: body.horarios }); toast.success('Atendente atualizado'); }
+      else { await comunicacao.atendentes.criar(body); toast.success('Atendente adicionado'); }
+      resetar(); carregar();
+    } catch (e: unknown) { toast.error((e as Error)?.message || 'Erro ao salvar'); }
+    finally { setSalvando(false); }
+  }
+  async function toggleAtivo(a: Atendente) {
+    try { await comunicacao.atendentes.atualizar(a.id, { ativo: !a.ativo }); carregar(); }
+    catch (e: unknown) { toast.error((e as Error)?.message || 'Erro'); }
+  }
+  const nomePerfil = (a: Atendente) => a.profile?.name || a.profile?.email || perfis.find((p) => p.id === a.profile_id)?.name || a.profile_id;
+
+  return (
+    <div className="grid gap-4 lg:grid-cols-[1fr_380px]">
+      <div className="space-y-3">
+        {erro ? <ErroBox msg="Falha ao listar atendentes." onRetry={carregar} />
+          : lista === null ? <Spinner />
+          : lista.length === 0 ? <Card className="p-8 text-center text-sm text-muted-foreground">Nenhum atendente. {podeEscrever ? 'Adicione ao lado. →' : ''}</Card>
+          : lista.map((a) => (
+            <Card key={a.id} className="p-4">
+              <div className="flex items-start justify-between gap-2">
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2">
+                    <Users className="h-4 w-4 text-muted-foreground" />
+                    <span className="font-semibold">{nomePerfil(a)}</span>
+                    {a.ativo === false && <Badge variant="secondary">inativo</Badge>}
+                  </div>
+                  {a.areas && a.areas.length > 0 && (
+                    <div className="mt-1.5 flex flex-wrap gap-1">{a.areas.map((ar) => <Badge key={ar} variant="outline">{ar}</Badge>)}</div>
+                  )}
+                  {a.horarios && a.horarios.length > 0 && (
+                    <div className="mt-1.5 text-xs text-muted-foreground">{a.horarios.map((h, i) => <span key={i} className="mr-2">{DIAS_SEMANA[h.dia]?.slice(0, 3)} {h.inicio}–{h.fim}</span>)}</div>
+                  )}
+                </div>
+                <div className="flex shrink-0 gap-1">
+                  <button title={a.ativo === false ? 'Ativar' : 'Desativar'} disabled={!podeEscrever} onClick={() => toggleAtivo(a)} className="rounded p-1.5 text-muted-foreground hover:bg-muted disabled:opacity-40"><Power className="h-4 w-4" /></button>
+                  <button title="Editar" disabled={!podeEscrever} onClick={() => editar(a)} className="rounded p-1.5 text-muted-foreground hover:text-primary disabled:opacity-40"><Pencil className="h-4 w-4" /></button>
+                </div>
+              </div>
+            </Card>
+          ))}
+      </div>
+      <Card className="space-y-3 self-start p-4">
+        <p className="flex items-center gap-1.5 text-sm font-semibold"><Users className="h-4 w-4 text-primary" />{editId ? 'Editar atendente' : 'Novo atendente'}</p>
+        {editId ? (
+          <div className="rounded-lg border border-border bg-muted/40 p-2 text-sm">{nomePerfil(lista?.find((x) => x.id === editId) as Atendente)}</div>
+        ) : perfis.length > 0 ? (
+          <Select value={form.profile_id} onValueChange={(v) => setForm((f) => ({ ...f, profile_id: v }))}>
+            <SelectTrigger className="h-9" disabled={!podeEscrever}><SelectValue placeholder="Selecione o colaborador" /></SelectTrigger>
+            <SelectContent>{perfis.map((p) => <SelectItem key={p.id} value={p.id}>{p.name || p.email}</SelectItem>)}</SelectContent>
+          </Select>
+        ) : (
+          <Input placeholder="profile_id" value={form.profile_id} onChange={(e) => setForm((f) => ({ ...f, profile_id: e.target.value }))} disabled={!podeEscrever} />
+        )}
+        <Input placeholder="Áreas (separadas por vírgula)" value={form.areas} onChange={(e) => setForm((f) => ({ ...f, areas: e.target.value }))} disabled={!podeEscrever} />
+        <div className="space-y-2">
+          <div className="text-xs font-medium text-muted-foreground">Escala / horários</div>
+          {form.horarios.map((h, i) => (
+            <div key={i} className="flex items-center gap-1.5">
+              <Select value={String(h.dia)} onValueChange={(v) => setHorario(i, { dia: Number(v) })}>
+                <SelectTrigger className="h-8 w-[110px]" disabled={!podeEscrever}><SelectValue /></SelectTrigger>
+                <SelectContent>{DIAS_SEMANA.map((d, idx) => <SelectItem key={idx} value={String(idx)}>{d}</SelectItem>)}</SelectContent>
+              </Select>
+              <Input type="time" className="h-8" value={h.inicio} onChange={(e) => setHorario(i, { inicio: e.target.value })} disabled={!podeEscrever} />
+              <Input type="time" className="h-8" value={h.fim} onChange={(e) => setHorario(i, { fim: e.target.value })} disabled={!podeEscrever} />
+              <button disabled={!podeEscrever} onClick={() => setForm((f) => ({ ...f, horarios: f.horarios.filter((_, idx) => idx !== i) }))} className="text-muted-foreground hover:text-destructive disabled:opacity-40"><Trash2 className="h-3.5 w-3.5" /></button>
+            </div>
+          ))}
+          <Button variant="outline" size="sm" disabled={!podeEscrever} onClick={() => setForm((f) => ({ ...f, horarios: [...f.horarios, { ...HORARIO_VAZIO }] }))} className="gap-1"><Plus className="h-3.5 w-3.5" />Horário</Button>
+        </div>
+        <div className="flex gap-2">
+          {editId && <Button variant="outline" className="flex-1" onClick={resetar}>Cancelar</Button>}
+          <Button className="flex-1 gap-1.5" disabled={!podeEscrever || salvando} onClick={salvar}>{salvando ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}{editId ? 'Salvar' : 'Adicionar'}</Button>
+        </div>
+      </Card>
+    </div>
+  );
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+function BotAdmin({ podeEscrever }: { podeEscrever: boolean }) {
+  return (
+    <Tabs defaultValue="ia" className="space-y-4">
+      <TabsList>
+        <TabsTrigger value="ia"><Sparkles className="mr-1.5 h-3.5 w-3.5" />IA por área</TabsTrigger>
+        <TabsTrigger value="equipe"><Users className="mr-1.5 h-3.5 w-3.5" />Equipe</TabsTrigger>
+        <TabsTrigger value="menu"><Bot className="mr-1.5 h-3.5 w-3.5" />Menu do bot</TabsTrigger>
+        <TabsTrigger value="config"><MessageSquare className="mr-1.5 h-3.5 w-3.5" />Institucional</TabsTrigger>
+      </TabsList>
+      <TabsContent value="ia"><BotIaAreas podeEscrever={podeEscrever} /></TabsContent>
+      <TabsContent value="equipe"><EquipeAtendimento podeEscrever={podeEscrever} /></TabsContent>
+      <TabsContent value="menu"><MenuRespondeSozinho podeEscrever={podeEscrever} /><ConversasSetores /></TabsContent>
+      {
+                                                                                                        }
+      <TabsContent value="config"><WhatsappBotConfig soInstitucional /></TabsContent>
+    </Tabs>
+  );
+}
+
+
+
+
+
+type PessoaAuto = { nome: string; telefone: string | null; quando: string; hoje?: boolean; optin?: boolean };
+type ItemAuto = {
+  id: string; nome: string; quando: string; regra: string; fonte: string;
+  contexto: string | null; template_configurado: boolean | null; env_template: string | null;
+  total: number | null; universo?: { rotulo: string; qtd: number };
+  bloqueios?: string[];
+  fora?: { motivo: string; qtd: number }[];
+  pessoas?: PessoaAuto[]; pessoas_truncadas?: boolean;
+  enviados?: number | null; nao_entregues?: number | null;
+  fora_do_historico?: boolean; motivo_falha?: string | null; erro?: string;
+  desligado?: boolean;
+};
+
+function CardAutomatica({ item, podeDesligar, onMudou }: { item: ItemAuto; podeDesligar: boolean; onMudou: () => void }) {
+  const [abrir, setAbrir] = useState(false);
+
+  async function alternar() {
+    try {
+      await comunicacao.automaticaToggle(item.id, !!item.desligado);
+      toast.success(item.desligado ? `"${item.nome}" religado.` : `"${item.nome}" desligado — o cron pula este disparo.`);
+      onMudou();
+    } catch (e: unknown) { toast.error((e as Error)?.message || 'Erro ao alternar'); }
+  }
+
+
+
+  const quebrado = (item.total || 0) > 0 && item.enviados === 0 && (item.nao_entregues || 0) > 0;
+  const travado = !!item.bloqueios?.length;
+
+  return (
+    <Card className="overflow-hidden p-0">
+      <div className="flex flex-wrap items-start justify-between gap-3 border-b border-border p-4">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2">
+            <span className="font-semibold">{item.nome}</span>
+            {item.desligado && <Badge variant="secondary">desligado</Badge>}
+            {!item.desligado && travado && <Badge variant="outline" className="border-amber-500 text-amber-600">não está enviando</Badge>}
+            {!item.desligado && quebrado && <Badge variant="destructive">não está entregando</Badge>}
+            {podeDesligar && (
+              <span title={item.desligado ? 'Religar este disparo' : 'Desligar este disparo (o cron passa a pular)'}>
+                <Switch checked={!item.desligado} onCheckedChange={alternar} />
+              </span>
+            )}
+          </div>
+          <div className="mt-1 text-xs text-muted-foreground">{item.quando}</div>
+          <p className="mt-2 max-w-2xl text-[13px] leading-snug">{item.regra}</p>
+        </div>
+        <div className="text-right">
+          <div className="text-[11px] uppercase tracking-wide text-muted-foreground">
+            {travado ? 'Se encaixam na regra' : 'Recebem hoje'}
+          </div>
+          {
+
+                                                  }
+          <div
+            className="text-3xl font-bold tabular-nums"
+            style={{ color: travado ? undefined : C.primary, opacity: travado ? 0.55 : 1 }}
+          >
+            {item.total ?? '—'}
+          </div>
+          {item.universo && (
+            <div className="text-[11px] text-muted-foreground">de {item.universo.qtd} {item.universo.rotulo}</div>
+          )}
+        </div>
+      </div>
+
+      {travado && (
+        <div className="border-b border-amber-500/30 bg-amber-500/10 px-4 py-2.5">
+          <div className="text-xs font-semibold text-amber-700 dark:text-amber-500">
+            Por que nada está saindo:
+          </div>
+          <ul className="mt-1 space-y-0.5">
+            {item.bloqueios!.map((b) => (
+              <li key={b} className="text-xs text-amber-700 dark:text-amber-500">• {b}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      <div className="flex flex-wrap items-center gap-x-5 gap-y-1.5 px-4 py-2.5 text-xs">
+        <span className="text-muted-foreground">
+          Enviadas (30d): <b className="tabular-nums text-foreground">{item.enviados ?? '—'}</b>
+        </span>
+        <span className="text-muted-foreground">
+          Não entregues: <b className={`tabular-nums ${(item.nao_entregues || 0) > 0 ? 'text-red-600' : 'text-foreground'}`}>{item.nao_entregues ?? '—'}</b>
+        </span>
+        {item.fora_do_historico && (
+          <span className="text-amber-600">⚠️ não passa pela fila — fica fora do histórico de envios</span>
+        )}
+        {item.motivo_falha && <span className="text-red-600">erro: {item.motivo_falha}</span>}
+      </div>
+
+      {!!item.fora?.length && (
+        <div className="flex flex-wrap gap-1.5 px-4 pb-2.5">
+          {item.fora.map((f) => (
+            <Badge key={f.motivo} variant="secondary" className="font-normal">
+              {f.qtd} — {f.motivo}
+            </Badge>
+          ))}
+        </div>
+      )}
+
+      {item.erro && (
+        <div className="px-4 pb-3 text-xs text-red-600">Não foi possível calcular o público: {item.erro}</div>
+      )}
+
+      {!!item.pessoas?.length && (
+        <div className="border-t border-border">
+          <button
+            onClick={() => setAbrir((v) => !v)}
+            className="w-full px-4 py-2.5 text-left text-xs font-medium text-muted-foreground hover:bg-muted/40"
+          >
+            {abrir ? 'Esconder' : 'Ver'} quem recebe ({item.pessoas.length}{item.pessoas_truncadas ? ' primeiras' : ''})
+          </button>
+          {abrir && (
+            <div className="max-h-72 overflow-y-auto border-t border-border">
+              <table className="w-full text-sm">
+                <tbody>
+                  {item.pessoas.map((p, i) => (
+                    <tr key={`${p.nome}-${i}`} className="border-b border-border/60 last:border-0">
+                      <td className="px-4 py-1.5">{p.nome}</td>
+                      <td className="px-3 py-1.5 tabular-nums text-muted-foreground">{p.telefone || '—'}</td>
+                      <td className="px-3 py-1.5 text-right text-xs text-muted-foreground">
+                        {p.hoje && p.quando !== 'todo dia' ? <b className="text-foreground">{p.quando}</b> : p.quando}
+                        {p.optin === false && <span className="ml-2 text-amber-600">sem opt-in</span>}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              {item.pessoas_truncadas && (
+                <div className="px-4 py-2 text-[11px] text-muted-foreground">
+                  Lista cortada pra não pesar a tela — a contagem acima é o total real.
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
+      <div className="border-t border-border bg-muted/30 px-4 py-2 text-[11px] text-muted-foreground">
+        Quem dispara: <code>{item.fonte}</code>
+      </div>
+    </Card>
+  );
+}
+
+function Automaticas({ podeEscrever = false }: { podeEscrever?: boolean }) {
+  const [dados, setDados] = useState<{ itens: ItemAuto[]; pessoas_ocultas?: boolean } | null>(null);
+  const [erro, setErro] = useState(false);
+
+  const carregar = useCallback(() => {
+    setErro(false); setDados(null);
+    comunicacao.automaticas({ pessoas: true, dias: 30 })
+      .then((r: { itens: ItemAuto[] }) => setDados(r)).catch(() => setErro(true));
+  }, []);
+  useEffect(() => { carregar(); }, [carregar]);
+
+  if (erro) return <ErroBox msg="Falha ao carregar os disparos automáticos." onRetry={carregar} />;
+  if (!dados) return <Spinner />;
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-start justify-between gap-3">
+        <p className="max-w-3xl text-sm text-muted-foreground">
+          Mensagens que o sistema manda <b>sozinho</b>, sem ninguém apertar nada. Cada card mostra a regra
+          de quem entra, quantas pessoas se encaixam hoje e o que saiu de fato nos últimos 30 dias.
+          Esta tela é só de leitura — cada disparo é operado no módulo dono.
+        </p>
+        <Button variant="outline" size="sm" onClick={carregar}><RefreshCw className="h-4 w-4" /></Button>
+      </div>
+      {dados.pessoas_ocultas && (
+        <Card className="p-3 text-xs text-amber-600">
+          Você vê as contagens, mas a lista de nomes e telefones exige nível 2 no módulo.
+        </Card>
+      )}
+      <div className="space-y-3">
+        {dados.itens.map((i) => <CardAutomatica key={i.id} item={i} podeDesligar={podeEscrever} onMudou={carregar} />)}
+      </div>
+    </div>
+  );
+}
+
+
+
+
+
+
+const TABS = ['dashboard', 'conversas', 'envios', 'contatos', 'bot', 'config'];
+
+const TAB_LEGADO: Record<string, string> = {
+  programadas: 'envios', automaticas: 'envios', disparos: 'envios', erros: 'envios',
+  templates: 'config', numeros: 'config',
+  atendentes: 'bot',
+};
+
+export default function Comunicacao() {
+  const { getAccessLevel } = useAuth();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const tabParam = searchParams.get('tab') || 'dashboard';
+  const tabUrl = TAB_LEGADO[tabParam] || tabParam;
+
+  const vistaParam = searchParams.get('vista');
+  const vistaEnvios: VistaEnvios | undefined = tabParam === 'automaticas' ? 'automaticos'
+    : (tabParam === 'programadas' || tabParam === 'disparos') ? 'agendados'
+    : (vistaParam === 'agendados' || vistaParam === 'automaticos' || vistaParam === 'enviados') ? vistaParam : undefined;
+
+  const nivel = getAccessLevel(['comunicacao']);
+  const podeNvl3 = nivel >= 3;
+  const podeNvl4 = nivel >= 4;
+  const podeNvl5 = nivel >= 5;
+
+
+
+
+  const podeBot = getAccessLevel(['integracao', 'grupos']) >= 3;
+  const tabsVisiveis = podeBot ? TABS : TABS.filter(t => t !== 'bot');
+  const tab = tabsVisiveis.includes(tabUrl) ? tabUrl : 'dashboard';
+
+  function setTab(v: string) {
+    const p = new URLSearchParams(searchParams);
+    p.set('tab', v);
+    setSearchParams(p, { replace: true });
+  }
+
+  return (
+    <div className="space-y-4 p-4 md:p-6">
+      <div>
+        <h1 className="text-xl font-bold">Comunicação</h1>
+        <p className="text-sm text-muted-foreground">Central de WhatsApp da igreja — chat, envios, disparos e configurações.</p>
+      </div>
+      <Tabs value={tab} onValueChange={setTab} className="space-y-4">
+        <TabsList className="flex-wrap">
+          <TabsTrigger value="dashboard"><BarChart3 className="mr-1.5 h-3.5 w-3.5" />Dashboard</TabsTrigger>
+          <TabsTrigger value="conversas"><Inbox className="mr-1.5 h-3.5 w-3.5" />Conversas</TabsTrigger>
+          <TabsTrigger value="envios"><Send className="mr-1.5 h-3.5 w-3.5" />Envios</TabsTrigger>
+          <TabsTrigger value="contatos"><BookUser className="mr-1.5 h-3.5 w-3.5" />Contatos</TabsTrigger>
+          {podeBot && <TabsTrigger value="bot"><Bot className="mr-1.5 h-3.5 w-3.5" />Bot</TabsTrigger>}
+          <TabsTrigger value="config"><Settings className="mr-1.5 h-3.5 w-3.5" />Configurações</TabsTrigger>
+        </TabsList>
+
+        <TabsContent value="dashboard"><Dashboard podeNvl5={podeNvl5} /></TabsContent>
+        {                                                                                                                      }
+        <TabsContent value="conversas"><Conversas /></TabsContent>
+        <TabsContent value="envios"><Envios podeReenviar={podeNvl3} podeEscrever={podeNvl3} podeExcluir={podeNvl4} vistaInicial={vistaEnvios} /></TabsContent>
+        <TabsContent value="contatos"><ContatosTab podeGerirLideres={podeBot} /></TabsContent>
+        {podeBot && <TabsContent value="bot"><BotAdmin podeEscrever={podeNvl3} /></TabsContent>}
+        <TabsContent value="config">
+          <Configuracoes podeNvl3={podeNvl3} podeNvl5={podeNvl5} />
+        </TabsContent>
+      </Tabs>
+    </div>
+  );
+}
+
+
+
+
+
+
+
+
+
+
+function Configuracoes({ podeNvl3, podeNvl5 }: { podeNvl3: boolean; podeNvl5: boolean }) {
+  return (
+    <Tabs defaultValue="templates" className="space-y-4">
+      <TabsList>
+        <TabsTrigger value="templates"><FileText className="mr-1.5 h-3.5 w-3.5" />Templates</TabsTrigger>
+        <TabsTrigger value="conexao"><Phone className="mr-1.5 h-3.5 w-3.5" />Conexão</TabsTrigger>
+      </TabsList>
+      <TabsContent value="templates">
+        <Templates podeSync={podeNvl3} podeEditar={podeNvl3} />
+        <TesteTemplate podeTestar={podeNvl3} />
+      </TabsContent>
+      <TabsContent value="conexao"><Conexao podeNvl5={podeNvl5} /></TabsContent>
+    </Tabs>
+  );
+}
+
+
+
+

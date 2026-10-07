@@ -1,0 +1,1391 @@
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { devocionalPlanos as planosApi, devocionais as devocionaisApi } from '../api';
+import { useAuth } from '../contexts/AuthContext';
+import { Button } from './ui/button';
+import { Input } from './ui/input';
+import { DatePicker } from '@/components/ui/date-picker';
+import { Label } from './ui/label';
+import { Textarea } from './ui/textarea';
+import { Card } from './ui/card';
+import { Badge } from './ui/badge';
+import { Skeleton } from './ui/skeleton';
+import { Tabs, TabsList, TabsTrigger, TabsContent } from './ui/tabs';
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from './ui/dialog';
+import { Sparkles, Plus, Trash2, Loader2, ArrowLeft, RefreshCw, Edit2, Save, Calendar, Users, BookOpen, Send, CheckCircle2, AlertTriangle, Link2, Copy, TrendingUp, TrendingDown, ChevronDown, ChevronUp, Upload, Video } from 'lucide-react';
+import { toast } from 'sonner';
+import DevocionalPanel from './DevocionalPanel';
+
+type Plano = {
+  id: string;
+  titulo: string;
+  descricao: string | null;
+  data_inicio: string;
+  data_fim: string;
+  ativo: boolean;
+  created_at: string;
+  devocional_itens?: { count: number }[];
+};
+type Item = {
+  id: string;
+  plano_id: string;
+  data: string;
+  titulo: string;
+  passagem: string | null;
+  reflexao: string;
+  aplicacao: string | null;
+  oracao: string | null;
+  gerado_por_ia: boolean;
+  video_url?: string | null;
+  video_path?: string | null;
+};
+type AdesaoDia = {
+  plano_id: string;
+  item_id: string;
+  data: string;
+  titulo: string;
+  passagem: string | null;
+  check_ins: number;
+  total_membros: number;
+  pct_adesao: number;
+};
+
+export default function DevocionalAdmin() {
+  const { isAdmin } = useAuth();
+  const [view, setView] = useState<'lista' | 'detalhe'>('lista');
+  const [planoId, setPlanoId] = useState<string | null>(null);
+  const [topTab, setTopTab] = useState('planos');
+
+  return (
+    <div className="space-y-4">
+      {view === 'lista' && (
+        <Tabs value={topTab} onValueChange={setTopTab}>
+          <TabsList>
+            <TabsTrigger value="planos">Planos</TabsTrigger>
+            <TabsTrigger value="kpis">KPIs e OKR</TabsTrigger>
+          </TabsList>
+          <TabsContent value="planos" className="space-y-4 mt-4">
+            <PlanosLista
+              onAbrir={(id) => { setPlanoId(id); setView('detalhe'); }}
+              podeEditar={isAdmin}
+            />
+          </TabsContent>
+          <TabsContent value="kpis" className="mt-4">
+            <DevocionalKpis />
+          </TabsContent>
+        </Tabs>
+      )}
+      {view === 'detalhe' && planoId && (
+        <PlanoDetalhe
+          planoId={planoId}
+          onVoltar={() => { setPlanoId(null); setView('lista'); }}
+          podeEditar={isAdmin}
+        />
+      )}
+    </div>
+  );
+}
+
+
+
+
+
+
+const KR_STATUS_CORES: Record<string, string> = {
+  verde: 'text-emerald-500', amarelo: 'text-amber-500', vermelho: 'text-red-500',
+  sem_meta: 'text-muted-foreground', sem_dado: 'text-muted-foreground',
+};
+
+function DevocionalKpis() {
+  const [dados, setDados] = useState<any>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    devocionaisApi.kpis()
+      .then(setDados)
+      .catch((e: any) => toast.error(e.message))
+      .finally(() => setLoading(false));
+  }, []);
+
+  if (loading) {
+    return (
+      <div className="space-y-2">
+        <Skeleton className="h-24 w-full" />
+        <Skeleton className="h-40 w-full" />
+      </div>
+    );
+  }
+  if (!dados) return <Card className="p-8 text-center text-sm text-muted-foreground">Sem dados de KPI ainda.</Card>;
+
+  const m = dados.mes_atual || {};
+  const serie: { data: string; checkins: number }[] = dados.serie_diaria || [];
+  const maxDia = Math.max(1, ...serie.map(s => s.checkins));
+  const mesLabel = (iso: string) => {
+    const [y, mo] = iso.split('-');
+    return `${['jan', 'fev', 'mar', 'abr', 'mai', 'jun', 'jul', 'ago', 'set', 'out', 'nov', 'dez'][Number(mo) - 1]}/${y.slice(2)}`;
+  };
+
+  return (
+    <div className="space-y-4">
+      {                                                                    }
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        {[
+          { label: 'Check-ins no mês', valor: m.checkins ?? 0 },
+          { label: 'Pessoas fazendo devocional', valor: m.pessoas ?? 0 },
+          { label: 'Média de check-ins/dia', valor: m.media_dia ?? 0 },
+          { label: 'Famílias (devocional familiar)', valor: m.familias ?? 0 },
+        ].map(c => (
+          <Card key={c.label} className="p-4">
+            <div className="text-2xl font-bold">{c.valor}</div>
+            <div className="text-xs text-muted-foreground mt-1">{c.label}</div>
+          </Card>
+        ))}
+      </div>
+
+      {                                    }
+      <Card className="p-4">
+        <h4 className="text-sm font-semibold mb-3">Check-ins por dia · últimos 30 dias</h4>
+        <div className="flex items-end gap-[2px] h-24">
+          {serie.map(s => (
+            <div key={s.data} className="flex-1 flex flex-col justify-end group relative" title={`${fmt(s.data)} · ${s.checkins} check-in${s.checkins === 1 ? '' : 's'}`}>
+              <div
+                className="w-full rounded-t bg-primary/70 group-hover:bg-primary transition-colors"
+                style={{ height: `${Math.max(s.checkins > 0 ? 8 : 2, (s.checkins / maxDia) * 100)}%` }}
+              />
+            </div>
+          ))}
+        </div>
+        <div className="flex justify-between text-[10px] text-muted-foreground mt-1">
+          <span>{fmt(serie[0]?.data)}</span>
+          <span>{fmt(serie[serie.length - 1]?.data)}</span>
+        </div>
+      </Card>
+
+      {                     }
+      {(dados.serie_mensal || []).length > 1 && (
+        <Card className="p-4">
+          <h4 className="text-sm font-semibold mb-3">Evolução mensal</h4>
+          <div className="grid grid-cols-3 text-xs font-semibold text-muted-foreground border-b pb-1 mb-1">
+            <span>Mês</span><span className="text-right">Check-ins</span><span className="text-right">Pessoas</span>
+          </div>
+          {dados.serie_mensal.map((sm: any) => (
+            <div key={sm.mes} className="grid grid-cols-3 text-sm py-1 border-b border-border/40 last:border-0">
+              <span>{mesLabel(sm.mes)}</span>
+              <span className="text-right font-medium">{sm.checkins}</span>
+              <span className="text-right font-medium">{sm.pessoas}</span>
+            </div>
+          ))}
+        </Card>
+      )}
+
+      {                                     }
+      <Card className="p-4">
+        <h4 className="text-sm font-semibold">KPIs na matriz · valor Investir</h4>
+        <p className="text-xs text-muted-foreground mb-3">
+          Medidos automaticamente dos check-ins do app (coletor diário). Igreja toda — devocional não tem dimensão de área de culto.
+        </p>
+        {(dados.kpis || []).length === 0 ? (
+          <p className="text-sm text-muted-foreground">KPIs DEV-* ainda não cadastrados (aguardando migration).</p>
+        ) : (
+          <div className="space-y-2">
+            {dados.kpis.map((k: any) => (
+              <div key={k.id} className="flex items-center justify-between gap-3 border border-border/60 rounded-lg p-3">
+                <div className="min-w-0">
+                  <div className="text-sm font-medium">{k.indicador} <span className="text-xs text-muted-foreground">· {k.id}</span></div>
+                  <div className="text-xs text-muted-foreground truncate">{k.descricao}</div>
+                </div>
+                <div className="text-right shrink-0">
+                  <div className="text-lg font-bold">{k.trajetoria?.ultimo_valor ?? '—'}</div>
+                  <div className={`text-[11px] ${KR_STATUS_CORES[k.trajetoria?.status] || 'text-muted-foreground'}`}>
+                    {k.meta_valor != null ? `meta ${k.meta_valor}` : 'sem meta definida'}
+                    {k.trajetoria?.ultimo_periodo ? ` · ${k.trajetoria.ultimo_periodo}` : ''}
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </Card>
+
+      {         }
+      <Card className="p-4">
+        <h4 className="text-sm font-semibold">OKR · {dados.okr?.objetivo?.nome || 'Objetivo de devocionais'}</h4>
+        {dados.okr?.objetivo?.meta_descricao && (
+          <p className="text-xs text-muted-foreground mb-3">{dados.okr.objetivo.meta_descricao}</p>
+        )}
+        <div className="space-y-2 mt-2">
+          {(dados.okr?.krs || []).map((kr: any) => (
+            <div key={kr.id} className="flex items-center justify-between gap-3 border border-border/60 rounded-lg p-3">
+              <div className="min-w-0">
+                <div className="text-sm">{kr.titulo}</div>
+                {!kr.fonte_kpi_id && (
+                  <div className="text-[11px] text-muted-foreground">Sem medição automática ainda</div>
+                )}
+              </div>
+              <div className="text-right shrink-0">
+                <div className={`text-lg font-bold ${KR_STATUS_CORES[kr.kr_status] || ''}`}>{kr.realizado ?? '—'}</div>
+                {kr.realizado_periodo && <div className="text-[11px] text-muted-foreground">{kr.realizado_periodo}</div>}
+              </div>
+            </div>
+          ))}
+        </div>
+      </Card>
+    </div>
+  );
+}
+
+
+
+
+function PlanosLista({ onAbrir, podeEditar }: { onAbrir: (id: string) => void; podeEditar: boolean }) {
+  const [planos, setPlanos] = useState<Plano[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [modalNovo, setModalNovo] = useState(false);
+  const [modalImportar, setModalImportar] = useState(false);
+
+  const load = useCallback(() => {
+    setLoading(true);
+    planosApi.list()
+      .then((r: any) => setPlanos(r?.data || []))
+      .catch((e: any) => toast.error(e.message))
+      .finally(() => setLoading(false));
+  }, []);
+
+  useEffect(() => { load(); }, [load]);
+
+  return (
+    <>
+      <div className="flex items-center justify-between">
+        <div>
+          <h3 className="font-semibold">Planos de devocional</h3>
+          <p className="text-sm text-muted-foreground">Crie planos mensais e acompanhe a adesão dos membros</p>
+        </div>
+        {podeEditar && (
+          <div className="flex items-center gap-2">
+            <Button variant="outline" onClick={() => setModalImportar(true)} title="Suba o .docx do pastor (semana toda), revise a prévia e publique">
+              <Upload className="h-4 w-4 mr-2" /> Importar .docx
+            </Button>
+            <Button onClick={() => setModalNovo(true)}>
+              <Plus className="h-4 w-4 mr-2" /> Novo plano
+            </Button>
+          </div>
+        )}
+      </div>
+
+      {loading ? (
+        <div className="space-y-2">
+          <Skeleton className="h-20 w-full" />
+          <Skeleton className="h-20 w-full" />
+        </div>
+      ) : planos.length === 0 ? (
+        <Card className="p-8 text-center">
+          <BookOpen className="h-10 w-10 mx-auto text-muted-foreground mb-2" />
+          <p className="text-sm text-muted-foreground">Nenhum plano criado ainda.</p>
+          {podeEditar && <p className="text-xs text-muted-foreground mt-1">Crie o primeiro plano clicando em "Novo plano".</p>}
+        </Card>
+      ) : (
+        <div className="grid gap-3">
+          {planos.map(p => (
+            <Card key={p.id} className="p-4 cursor-pointer hover:border-primary transition-colors" onClick={() => onAbrir(p.id)}>
+              <div className="flex items-start justify-between">
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2 mb-1">
+                    <h4 className="font-semibold truncate">{p.titulo}</h4>
+                    {p.ativo ? <Badge variant="default" className="text-xs">Ativo</Badge> : <Badge variant="secondary" className="text-xs">Inativo</Badge>}
+                  </div>
+                  {p.descricao && <p className="text-sm text-muted-foreground line-clamp-2 mb-2">{p.descricao}</p>}
+                  <div className="flex items-center gap-3 text-xs text-muted-foreground">
+                    <span className="flex items-center gap-1"><Calendar className="h-3 w-3" /> {fmt(p.data_inicio)} - {fmt(p.data_fim)}</span>
+                    <span>· {p.devocional_itens?.[0]?.count || 0} itens</span>
+                  </div>
+                </div>
+              </div>
+            </Card>
+          ))}
+        </div>
+      )}
+
+      {modalNovo && <NovoPlanoModal onClose={() => setModalNovo(false)} onSaved={(id) => { setModalNovo(false); load(); onAbrir(id); }} />}
+      {modalImportar && <ImportarDocxModal createMode onClose={() => setModalImportar(false)} onDone={(id) => { setModalImportar(false); load(); if (id) onAbrir(id); }} />}
+    </>
+  );
+}
+
+function NovoPlanoModal({ onClose, onSaved }: { onClose: () => void; onSaved: (id: string) => void }) {
+  const hoje = new Date().toISOString().slice(0, 10);
+  const proxMes = new Date();
+  proxMes.setMonth(proxMes.getMonth() + 1);
+  const [form, setForm] = useState({
+    titulo: '',
+    descricao: '',
+    data_inicio: hoje,
+    data_fim: proxMes.toISOString().slice(0, 10),
+  });
+  const [saving, setSaving] = useState(false);
+
+  async function save() {
+    if (!form.titulo) return toast.error('Título obrigatório');
+    setSaving(true);
+    try {
+      const r: any = await planosApi.create(form);
+      toast.success('Plano criado');
+      onSaved(r.id);
+    } catch (e: any) { toast.error(e.message); }
+    finally { setSaving(false); }
+  }
+
+  return (
+    <Dialog open onOpenChange={(v) => !v && onClose()}>
+      <DialogContent>
+        <DialogHeader><DialogTitle>Novo plano de devocional</DialogTitle></DialogHeader>
+        <div className="space-y-3">
+          <div>
+            <Label>Título *</Label>
+            <Input value={form.titulo} onChange={e => setForm({ ...form, titulo: e.target.value })} placeholder="Devocional Junho 2026" />
+          </div>
+          <div>
+            <Label>Descrição / contexto</Label>
+            <Textarea rows={3} value={form.descricao} onChange={e => setForm({ ...form, descricao: e.target.value })} placeholder="Tema, série bíblica, foco pastoral..." />
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <Label>Início</Label>
+              <DatePicker value={form.data_inicio} onChange={v => setForm({ ...form, data_inicio: v })} />
+            </div>
+            <div>
+              <Label>Fim</Label>
+              <DatePicker value={form.data_fim} onChange={v => setForm({ ...form, data_fim: v })} />
+            </div>
+          </div>
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose}>Cancelar</Button>
+          <Button onClick={save} disabled={saving}>{saving ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : null} Criar</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+
+
+
+function PlanoDetalhe({ planoId, onVoltar, podeEditar }: { planoId: string; onVoltar: () => void; podeEditar: boolean }) {
+  const [plano, setPlano] = useState<Plano | null>(null);
+  const [itens, setItens] = useState<Item[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [modalIA, setModalIA] = useState(false);
+  const [modalEditar, setModalEditar] = useState(false);
+  const [modalNovoItem, setModalNovoItem] = useState(false);
+  const [editingItem, setEditingItem] = useState<Item | null>(null);
+  const [tab, setTab] = useState('itens');
+  const [modalImportar, setModalImportar] = useState(false);
+
+  const load = useCallback(() => {
+    setLoading(true);
+    planosApi.get(planoId)
+      .then((r: any) => { setPlano(r.plano); setItens(r.itens || []); })
+      .catch((e: any) => toast.error(e.message))
+      .finally(() => setLoading(false));
+  }, [planoId]);
+
+  useEffect(() => { load(); }, [load]);
+
+  async function removerItem(id: string) {
+    if (!confirm('Remover este item?')) return;
+    try { await planosApi.removeItem(id); toast.success('Removido'); load(); }
+    catch (e: any) { toast.error(e.message); }
+  }
+
+  async function togglePlanoAtivo() {
+    if (!plano) return;
+    try {
+      await planosApi.update(plano.id, { ativo: !plano.ativo });
+      toast.success(plano.ativo ? 'Plano desativado' : 'Plano ativado');
+      load();
+    } catch (e: any) { toast.error(e.message); }
+  }
+
+  async function removerPlano() {
+    if (!plano) return;
+    if (!confirm(`Remover plano "${plano.titulo}" e todos os itens?`)) return;
+    try {
+      await planosApi.remove(plano.id);
+      toast.success('Plano removido');
+      onVoltar();
+    } catch (e: any) { toast.error(e.message); }
+  }
+
+  if (loading || !plano) return <Skeleton className="h-64 w-full" />;
+
+  return (
+    <>
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex items-center gap-3 min-w-0">
+          <Button variant="ghost" size="icon" onClick={onVoltar}><ArrowLeft className="h-4 w-4" /></Button>
+          <div className="min-w-0">
+            <div className="flex items-center gap-2">
+              <h3 className="font-semibold truncate">{plano.titulo}</h3>
+              {plano.ativo ? <Badge>Ativo</Badge> : <Badge variant="secondary">Inativo</Badge>}
+            </div>
+            <p className="text-xs text-muted-foreground">{fmt(plano.data_inicio)} - {fmt(plano.data_fim)} · {itens.length} itens</p>
+          </div>
+        </div>
+        {podeEditar && (
+          <div className="flex items-center gap-2">
+            <Button variant="outline" size="sm" onClick={() => setModalEditar(true)}><Edit2 className="h-4 w-4 mr-1" /> Renomear</Button>
+            <Button variant="outline" size="sm" onClick={togglePlanoAtivo}>{plano.ativo ? 'Desativar' : 'Ativar'}</Button>
+            <Button variant="outline" size="sm" onClick={removerPlano}><Trash2 className="h-4 w-4" /></Button>
+          </div>
+        )}
+      </div>
+
+      <Tabs value={tab} onValueChange={setTab}>
+        <TabsList>
+          <TabsTrigger value="itens">Itens diários</TabsTrigger>
+          <TabsTrigger value="adesao">Adesão</TabsTrigger>
+          <TabsTrigger value="envios">Envios</TabsTrigger>
+          <TabsTrigger value="estudo">Estudo bíblico</TabsTrigger>
+        </TabsList>
+
+        <TabsContent value="itens" className="space-y-3">
+          {podeEditar && (
+            <div className="flex items-center justify-end gap-2 flex-wrap">
+              <Button onClick={() => setModalImportar(true)} variant="outline" title="Suba o .docx do pastor (semana toda) e revise a prévia antes de publicar">
+                <Upload className="h-4 w-4 mr-2" /> Importar .docx
+              </Button>
+              <Button onClick={() => setModalNovoItem(true)} variant="outline">
+                <Plus className="h-4 w-4 mr-2" /> Novo item
+              </Button>
+              <Button onClick={() => setModalIA(true)} variant="default">
+                <Sparkles className="h-4 w-4 mr-2" /> Gerar com IA
+              </Button>
+            </div>
+          )}
+          {itens.length === 0 ? (
+            <Card className="p-8 text-center">
+              <Sparkles className="h-10 w-10 mx-auto text-muted-foreground mb-2" />
+              <p className="text-sm text-muted-foreground">Nenhum item criado ainda.</p>
+              {podeEditar && <p className="text-xs text-muted-foreground mt-1">Use "Novo item" pra criar manualmente ou "Gerar com IA" pra preencher todos os dias.</p>}
+            </Card>
+          ) : (
+            <div className="space-y-2">
+              {itens.map(item => (
+                <Card key={item.id} className="p-4">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2 mb-1">
+                        <span className="text-xs font-mono text-muted-foreground">{fmt(item.data)}</span>
+                        {item.gerado_por_ia && <Badge variant="secondary" className="text-xs"><Sparkles className="h-3 w-3 mr-1" />IA</Badge>}
+                        {item.passagem && <Badge variant="outline" className="text-xs">{item.passagem}</Badge>}
+                      </div>
+                      <h4 className="font-medium">{item.titulo}</h4>
+                      <p className="text-sm text-muted-foreground line-clamp-2 mt-1">{item.reflexao}</p>
+                    </div>
+                    {podeEditar && (
+                      <div className="flex flex-col gap-1">
+                        <Button variant="ghost" size="icon" onClick={() => setEditingItem(item)}><Edit2 className="h-4 w-4" /></Button>
+                        <Button variant="ghost" size="icon" onClick={() => removerItem(item.id)}><Trash2 className="h-4 w-4 text-destructive" /></Button>
+                      </div>
+                    )}
+                  </div>
+                </Card>
+              ))}
+            </div>
+          )}
+        </TabsContent>
+
+        <TabsContent value="adesao">
+          <AdesaoView planoId={planoId} />
+        </TabsContent>
+
+        <TabsContent value="envios">
+          <EnviosView planoId={planoId} podeEnviar={podeEditar} planoItens={itens} />
+        </TabsContent>
+
+        <TabsContent value="estudo">
+          <DevocionalPanel />
+        </TabsContent>
+      </Tabs>
+
+      {modalIA && plano && <GerarIAModal plano={plano} onClose={() => setModalIA(false)} onDone={() => { setModalIA(false); load(); }} />}
+      {modalEditar && plano && <EditarPlanoModal plano={plano} onClose={() => setModalEditar(false)} onSaved={() => { setModalEditar(false); load(); }} />}
+      {modalImportar && plano && <ImportarDocxModal plano={plano} onClose={() => setModalImportar(false)} onDone={() => { setModalImportar(false); load(); }} />}
+      {modalNovoItem && plano && <NovoItemModal plano={plano} itens={itens} onClose={() => setModalNovoItem(false)} onSaved={() => { setModalNovoItem(false); load(); }} />}
+      {editingItem && <EditarItemModal item={editingItem} onClose={() => setEditingItem(null)} onSaved={() => { setEditingItem(null); load(); }} />}
+    </>
+  );
+}
+
+
+
+type ItemPrev = { titulo: string; passagem: string; passagem_texto: string; reflexao: string; aplicacao: string };
+function ImportarDocxModal({ plano, createMode, onClose, onDone }: { plano?: Plano; createMode?: boolean; onClose: () => void; onDone: (id?: string) => void }) {
+  const hoje = new Date().toISOString().slice(0, 10);
+  const [etapa, setEtapa] = useState<'arquivo' | 'previa'>('arquivo');
+  const [lendo, setLendo] = useState(false);
+  const [publicando, setPublicando] = useState(false);
+  const [itens, setItens] = useState<ItemPrev[]>([]);
+  const [nome, setNome] = useState('');
+  const [inicio, setInicio] = useState(plano?.data_inicio || hoje);
+  const fileRef = useRef<HTMLInputElement>(null);
+
+  async function escolher(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+    setLendo(true);
+    try {
+      const r: any = await planosApi.previewDocx(file);
+      const its: ItemPrev[] = (r?.itens || []).map((o: any) => ({
+        titulo: o.titulo || '', passagem: o.passagem || '', passagem_texto: o.passagem_texto || '',
+        reflexao: o.reflexao || '', aplicacao: o.aplicacao || '',
+      }));
+      if (its.length === 0) { toast.error('Nenhum devocional reconhecido no documento.'); return; }
+      setItens(its);
+      if (createMode && !nome.trim()) setNome(`Devocional da semana ${inicio.slice(8, 10)}/${inicio.slice(5, 7)}`);
+      setEtapa('previa');
+    } catch (err: any) { toast.error(err.message); }
+    finally { setLendo(false); }
+  }
+
+  function setCampo(i: number, k: keyof ItemPrev, v: string) {
+    setItens((xs) => xs.map((it, idx) => (idx === i ? { ...it, [k]: v } : it)));
+  }
+
+  async function publicar() {
+    const validos = itens.filter((i) => i.titulo.trim() && i.reflexao.trim());
+    if (validos.length === 0) { toast.error('Cada dia precisa de título e reflexão.'); return; }
+    setPublicando(true);
+    try {
+      let planoId = plano?.id;
+      if (createMode) {
+        const fim = new Date(inicio + 'T12:00:00'); fim.setDate(fim.getDate() + (validos.length - 1));
+        const titulo = nome.trim() || `Devocional da semana ${inicio.slice(8, 10)}/${inicio.slice(5, 7)}`;
+        const r: any = await planosApi.create({ titulo, data_inicio: inicio, data_fim: fim.toISOString().slice(0, 10) });
+        planoId = r.id;
+      }
+      const res: any = await planosApi.publicarItensLote(planoId, validos, !createMode);
+      toast.success(`${res.criados} dia(s) publicados no devocional.`);
+      onDone(planoId);
+    } catch (err: any) { toast.error(err.message); }
+    finally { setPublicando(false); }
+  }
+
+  return (
+    <Dialog open onOpenChange={(o) => !o && !publicando && onClose()}>
+      <DialogContent className="max-w-2xl max-h-[85vh] flex flex-col">
+        <DialogHeader><DialogTitle>{createMode ? 'Importar devocional (.docx)' : 'Importar .docx no plano'}</DialogTitle></DialogHeader>
+
+        <div className="flex-1 overflow-y-auto min-h-0">
+          {etapa === 'arquivo' ? (
+            <div className="space-y-3 py-2">
+              <p className="text-sm text-muted-foreground">
+                Suba o documento do pastor (semana toda, 1 devocional por dia). O sistema vai extrair e mostrar a <b>prévia</b> — nada vai pro app antes de você revisar e publicar.
+              </p>
+              <input ref={fileRef} type="file" accept=".docx" hidden onChange={escolher} />
+              <Button onClick={() => fileRef.current?.click()} disabled={lendo}>
+                {lendo ? <><Loader2 className="h-4 w-4 mr-2 animate-spin" /> Lendo o documento...</> : <><Upload className="h-4 w-4 mr-2" /> Escolher arquivo .docx</>}
+              </Button>
+            </div>
+          ) : (
+            <div className="space-y-4">
+              <div className="rounded-md bg-primary/10 border border-primary/30 p-2 text-xs flex items-center gap-2">
+                <Sparkles className="h-3.5 w-3.5 text-primary" /> Prévia: {itens.length} dia(s). Revise/edite abaixo e clique em <b>Publicar</b>.
+              </div>
+
+              {createMode && (
+                <div className="grid grid-cols-2 gap-3">
+                  <div><Label className="text-xs">Nome do devocional</Label><Input value={nome} onChange={(e) => setNome(e.target.value)} /></div>
+                  <div><Label className="text-xs">1º dia (início)</Label><DatePicker value={inicio} onChange={setInicio} /></div>
+                </div>
+              )}
+
+              <div className="space-y-3">
+                {itens.map((it, i) => (
+                  <Card key={i} className="p-3 space-y-2">
+                    <div className="flex items-center gap-2">
+                      <Badge variant="secondary" className="text-xs">Dia {i + 1}</Badge>
+                      <Input className="h-8 text-sm font-medium" value={it.titulo} onChange={(e) => setCampo(i, 'titulo', e.target.value)} placeholder="Título" />
+                    </div>
+                    <div className="grid grid-cols-2 gap-2">
+                      <Input className="h-8 text-sm" value={it.passagem} onChange={(e) => setCampo(i, 'passagem', e.target.value)} placeholder="Passagem (ex.: Jó 1-6)" />
+                    </div>
+                    <Textarea rows={2} value={it.passagem_texto} onChange={(e) => setCampo(i, 'passagem_texto', e.target.value)} placeholder="Versículo em destaque" className="text-sm" />
+                    <Textarea rows={4} value={it.reflexao} onChange={(e) => setCampo(i, 'reflexao', e.target.value)} placeholder="Reflexão" className="text-sm" />
+                    <Textarea rows={2} value={it.aplicacao} onChange={(e) => setCampo(i, 'aplicacao', e.target.value)} placeholder="Aplicação (Viva esta mensagem...)" className="text-sm" />
+                  </Card>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+
+        <DialogFooter className="flex-wrap gap-2">
+          <Button variant="outline" onClick={onClose} disabled={publicando}>Cancelar</Button>
+          {etapa === 'previa' && (
+            <Button onClick={publicar} disabled={publicando}>
+              {publicando ? <><Loader2 className="h-4 w-4 mr-2 animate-spin" /> Publicando...</> : <><CheckCircle2 className="h-4 w-4 mr-2" /> Publicar no app</>}
+            </Button>
+          )}
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function EditarPlanoModal({ plano, onClose, onSaved }: { plano: Plano; onClose: () => void; onSaved: () => void }) {
+  const [titulo, setTitulo] = useState(plano.titulo);
+  const [dataInicio, setDataInicio] = useState(plano.data_inicio);
+  const [dataFim, setDataFim] = useState(plano.data_fim);
+  const [salvando, setSalvando] = useState(false);
+
+  async function salvar() {
+    if (!titulo.trim()) { toast.error('Informe o nome do devocional'); return; }
+    if (dataFim < dataInicio) { toast.error('A data final não pode ser antes da inicial'); return; }
+    setSalvando(true);
+    try {
+      await planosApi.update(plano.id, { titulo: titulo.trim(), data_inicio: dataInicio, data_fim: dataFim });
+      toast.success('Devocional atualizado');
+      onSaved();
+    } catch (e: any) { toast.error(e.message); } finally { setSalvando(false); }
+  }
+
+  return (
+    <Dialog open onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className="max-w-md">
+        <DialogHeader><DialogTitle>Editar devocional</DialogTitle></DialogHeader>
+        <div className="space-y-3">
+          <div><Label className="text-xs">Nome</Label><Input value={titulo} onChange={e => setTitulo(e.target.value)} placeholder="Ex.: Devocional da semana — Jó" /></div>
+          <div className="grid grid-cols-2 gap-3">
+            <div><Label className="text-xs">Início</Label><DatePicker value={dataInicio} onChange={setDataInicio} /></div>
+            <div><Label className="text-xs">Fim</Label><DatePicker value={dataFim} onChange={setDataFim} /></div>
+          </div>
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose} disabled={salvando}>Cancelar</Button>
+          <Button onClick={salvar} disabled={salvando}>{salvando ? <Loader2 className="h-4 w-4 animate-spin" /> : <><Save className="h-4 w-4 mr-1" /> Salvar</>}</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function GerarIAModal({ plano, onClose, onDone }: { plano: Plano; onClose: () => void; onDone: () => void }) {
+  const [tema, setTema] = useState('');
+  const [tom, setTom] = useState('pastoral, edificante, com aplicação prática');
+  const [sobrescrever, setSobrescrever] = useState(false);
+  const [gerando, setGerando] = useState(false);
+  const [progresso, setProgresso] = useState({ feitos: 0, total: 0 });
+
+  const diasTotalPlano = useMemo(() => {
+    const inicio = new Date(plano.data_inicio + 'T12:00');
+    const fim = new Date(plano.data_fim + 'T12:00');
+    return Math.round((fim.getTime() - inicio.getTime()) / 86400000) + 1;
+  }, [plano]);
+
+
+  const maxPermitido = Math.min(30, diasTotalPlano);
+  const [diasParaGerar, setDiasParaGerar] = useState(maxPermitido);
+
+
+  function primeirasDatas(n: number): string[] {
+    const out: string[] = [];
+    const cur = new Date(plano.data_inicio + 'T12:00');
+    for (let i = 0; i < n; i++) {
+      out.push(cur.toISOString().slice(0, 10));
+      cur.setUTCDate(cur.getUTCDate() + 1);
+    }
+    return out;
+  }
+
+  async function gerar() {
+    const n = Math.max(1, Math.min(maxPermitido, Number(diasParaGerar) || maxPermitido));
+    const apenas_datas = primeirasDatas(n);
+    setGerando(true);
+    setProgresso({ feitos: 0, total: n });
+    let totalCriados = 0;
+    try {
+
+      for (let i = 0; i < 20; i++) {
+        const r: any = await planosApi.gerarIA(plano.id, { tema, tom, sobrescrever, apenas_datas });
+        const criados = r.criados || 0;
+        const restantes = r.restantes ?? 0;
+        totalCriados += criados;
+        setProgresso(p => ({ feitos: p.feitos + criados, total: p.total }));
+        if (sobrescrever && i === 0) setSobrescrever(false);
+        if (restantes === 0 || criados === 0) break;
+      }
+      toast.success(`${totalCriados} devocionais gerados`);
+      onDone();
+    } catch (e: any) {
+      if (totalCriados > 0) {
+        toast.warning(`${totalCriados} gerados, mas erro no lote seguinte: ${e.message}`);
+        onDone();
+      } else {
+        toast.error(e.message);
+      }
+    } finally { setGerando(false); }
+  }
+
+  return (
+    <Dialog open onOpenChange={(v) => !v && !gerando && onClose()}>
+      <DialogContent>
+        <DialogHeader><DialogTitle>Gerar devocionais com IA</DialogTitle></DialogHeader>
+        <div className="space-y-3">
+          <p className="text-sm text-muted-foreground">
+            Plano de {diasTotalPlano} dias. Use Claude Haiku pra gerar conteúdo automático.
+            Você pode gerar parte do plano agora e o restante depois (ou criar manualmente).
+          </p>
+          <div>
+            <Label>Quantos dias gerar? <span className="text-muted-foreground">(máx. {maxPermitido})</span></Label>
+            <Input
+              type="number"
+              min={1}
+              max={maxPermitido}
+              value={diasParaGerar}
+              onChange={e => setDiasParaGerar(Number(e.target.value))}
+            />
+            <p className="text-xs text-muted-foreground mt-1">
+              Gera a partir do primeiro dia do plano ({fmt(plano.data_inicio)}).
+              Tempo estimado: ~{Math.ceil(diasParaGerar / 10) * 40}s.
+            </p>
+          </div>
+          <div>
+            <Label>Tema / série bíblica (opcional)</Label>
+            <Input value={tema} onChange={e => setTema(e.target.value)} placeholder="Ex: Caminhar com Deus · Salmos · Vida no Espírito" />
+          </div>
+          <div>
+            <Label>Tom / estilo</Label>
+            <Input value={tom} onChange={e => setTom(e.target.value)} />
+          </div>
+          <label className="flex items-center gap-2 text-sm">
+            <input type="checkbox" checked={sobrescrever} onChange={e => setSobrescrever(e.target.checked)} />
+            Sobrescrever itens existentes no plano
+          </label>
+          {gerando && progresso.total > 0 && (
+            <div className="space-y-1">
+              <div className="flex justify-between text-xs">
+                <span>Progresso</span>
+                <span>{progresso.feitos} / {progresso.total}</span>
+              </div>
+              <div className="h-2 bg-muted rounded overflow-hidden">
+                <div className="h-full bg-primary transition-all" style={{ width: `${(progresso.feitos / progresso.total) * 100}%` }} />
+              </div>
+            </div>
+          )}
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose} disabled={gerando}>Cancelar</Button>
+          <Button onClick={gerar} disabled={gerando || diasParaGerar < 1}>
+            {gerando ? <><Loader2 className="h-4 w-4 mr-2 animate-spin" /> Gerando...</> : <><Sparkles className="h-4 w-4 mr-2" /> Gerar {diasParaGerar}</>}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function NovoItemModal({ plano, itens, onClose, onSaved }: { plano: Plano; itens: Item[]; onClose: () => void; onSaved: () => void }) {
+
+  const datasUsadas = useMemo(() => new Set(itens.map(i => i.data)), [itens]);
+  const proxData = useMemo(() => {
+    const cur = new Date(plano.data_inicio + 'T12:00');
+    const fim = new Date(plano.data_fim + 'T12:00');
+    while (cur <= fim) {
+      const d = cur.toISOString().slice(0, 10);
+      if (!datasUsadas.has(d)) return d;
+      cur.setUTCDate(cur.getUTCDate() + 1);
+    }
+    return plano.data_inicio;
+  }, [plano, datasUsadas]);
+
+  const [form, setForm] = useState({
+    data: proxData,
+    titulo: '',
+    passagem: '',
+    reflexao: '',
+    aplicacao: '',
+    oracao: '',
+  });
+  const [saving, setSaving] = useState(false);
+
+  async function save() {
+    if (!form.titulo.trim()) return toast.error('Título obrigatório');
+    if (!form.reflexao.trim()) return toast.error('Reflexão obrigatória');
+    if (form.data < plano.data_inicio || form.data > plano.data_fim) {
+      return toast.error('Data fora do período do plano');
+    }
+    setSaving(true);
+    try {
+      await planosApi.createItem(plano.id, form);
+      toast.success('Item criado');
+      onSaved();
+    } catch (e: any) {
+      toast.error(e.message);
+    } finally { setSaving(false); }
+  }
+
+  return (
+    <Dialog open onOpenChange={(v) => !v && onClose()}>
+      <DialogContent className="max-w-2xl">
+        <DialogHeader><DialogTitle>Novo devocional (manual)</DialogTitle></DialogHeader>
+        <div className="space-y-3 max-h-[65vh] overflow-y-auto">
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <Label>Data *</Label>
+              <DatePicker
+                min={plano.data_inicio}
+                max={plano.data_fim}
+                value={form.data}
+                onChange={v => setForm({ ...form, data: v })}
+              />
+            </div>
+            <div>
+              <Label>Passagem</Label>
+              <Input value={form.passagem} onChange={e => setForm({ ...form, passagem: e.target.value })} placeholder="Ex: João 3:16" />
+            </div>
+          </div>
+          <div>
+            <Label>Título *</Label>
+            <Input value={form.titulo} onChange={e => setForm({ ...form, titulo: e.target.value })} placeholder="O amor de Deus" />
+          </div>
+          <div>
+            <Label>Reflexão *</Label>
+            <Textarea rows={6} value={form.reflexao} onChange={e => setForm({ ...form, reflexao: e.target.value })} placeholder="Corpo principal do devocional..." />
+          </div>
+          <div>
+            <Label>Aplicação</Label>
+            <Textarea rows={3} value={form.aplicacao} onChange={e => setForm({ ...form, aplicacao: e.target.value })} placeholder="Como aplicar hoje · pergunta prática" />
+          </div>
+          <div>
+            <Label>Oração</Label>
+            <Textarea rows={3} value={form.oracao} onChange={e => setForm({ ...form, oracao: e.target.value })} placeholder="Sugestão de oração curta" />
+          </div>
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose} disabled={saving}>Cancelar</Button>
+          <Button onClick={save} disabled={saving}>
+            {saving ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <Save className="h-4 w-4 mr-2" />} Criar
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function EditarItemModal({ item, onClose, onSaved }: { item: Item; onClose: () => void; onSaved: () => void }) {
+  const [form, setForm] = useState({
+    titulo: item.titulo,
+    passagem: item.passagem || '',
+    reflexao: item.reflexao,
+    aplicacao: item.aplicacao || '',
+    oracao: item.oracao || '',
+  });
+  const [saving, setSaving] = useState(false);
+
+
+  const [videoUrl, setVideoUrl] = useState<string | null>(item.video_url ?? null);
+  const [progresso, setProgresso] = useState<number | null>(null);
+  const [mudouVideo, setMudouVideo] = useState(false);
+  const fechar = () => (mudouVideo ? onSaved() : onClose());
+
+  async function save() {
+    setSaving(true);
+    try {
+      await planosApi.updateItem(item.id, form);
+      toast.success('Item atualizado');
+      onSaved();
+    } catch (e: any) { toast.error(e.message); }
+    finally { setSaving(false); }
+  }
+
+  async function escolherVideo(e: React.ChangeEvent<HTMLInputElement>) {
+    const f = e.target.files?.[0];
+    e.target.value = '';
+    if (!f) return;
+    setProgresso(0);
+    try {
+      const { path, signedUrl }: any = await planosApi.videoUpload(item.id, { tipo: f.type, tamanho: f.size });
+      await enviarDireto(signedUrl, f, setProgresso);
+      const salvo: any = await planosApi.updateItem(item.id, { video_path: path });
+      setVideoUrl(salvo?.video_url ?? null);
+      setMudouVideo(true);
+      toast.success('Vídeo enviado');
+    } catch (err: any) { toast.error(err.message || 'Falha ao enviar o vídeo'); }
+    finally { setProgresso(null); }
+  }
+
+  const [linkYoutube, setLinkYoutube] = useState('');
+  async function usarLinkYoutube() {
+    if (!linkYoutube.trim()) return;
+    setProgresso(0);
+    try {
+      const salvo: any = await planosApi.updateItem(item.id, { video_url: linkYoutube.trim() });
+      setVideoUrl(salvo?.video_url ?? null);
+      setLinkYoutube('');
+      setMudouVideo(true);
+      toast.success('Vídeo do YouTube vinculado');
+    } catch (err: any) { toast.error(err.message); }
+    finally { setProgresso(null); }
+  }
+
+  async function tirarVideo() {
+    setProgresso(0);
+    try {
+      await planosApi.updateItem(item.id, { video_path: null, video_url: null });
+      setVideoUrl(null);
+      setMudouVideo(true);
+      toast.success('Vídeo removido');
+    } catch (err: any) { toast.error(err.message); }
+    finally { setProgresso(null); }
+  }
+
+  return (
+    <Dialog open onOpenChange={(v) => !v && fechar()}>
+      <DialogContent className="max-w-2xl">
+        <DialogHeader><DialogTitle>Editar item · {fmt(item.data)}</DialogTitle></DialogHeader>
+        <div className="space-y-3 max-h-[60vh] overflow-y-auto">
+          <div><Label>Título</Label><Input value={form.titulo} onChange={e => setForm({ ...form, titulo: e.target.value })} /></div>
+          <div className="space-y-2 rounded-lg border p-3">
+            <Label className="flex items-center gap-2"><Video className="h-4 w-4" /> Vídeo (opcional)</Label>
+            {videoUrl
+              ? (idYoutube(videoUrl)
+                ? <iframe src={`https://www.youtube-nocookie.com/embed/${idYoutube(videoUrl)}`} title="Vídeo do devocional" className="w-full aspect-video rounded-md bg-black" allow="encrypted-media; picture-in-picture; fullscreen" allowFullScreen />
+                : <video src={videoUrl} controls preload="metadata" className="w-full rounded-md bg-black max-h-64" />)
+              : <p className="text-xs text-muted-foreground">Aparece no app acima do texto bíblico e toca <b>dentro do app</b>, com tela cheia. Cole um link do YouTube (o vídeo pode ser "não listado", mas não privado) ou envie um arquivo — prefira <b>MP4</b>, até 500 MB.</p>}
+            {progresso === null && <div className="flex gap-2">
+              <Input value={linkYoutube} onChange={e => setLinkYoutube(e.target.value)} placeholder="https://youtu.be/…" className="text-sm" />
+              <Button variant="outline" size="sm" onClick={usarLinkYoutube} disabled={!linkYoutube.trim()}>Usar link</Button>
+            </div>}
+            {progresso !== null
+              ? <div className="space-y-1"><div className="h-2 rounded bg-muted overflow-hidden"><div className="h-2 bg-primary transition-all" style={{ width: `${progresso}%` }} /></div><p className="text-xs text-muted-foreground">Enviando… {progresso}%</p></div>
+              : <div className="flex gap-2">
+                <label className="inline-flex items-center gap-2 cursor-pointer rounded-md border px-3 py-1.5 text-sm hover:bg-muted">
+                  <Upload className="h-4 w-4" /> {videoUrl ? 'Trocar por arquivo' : 'Enviar arquivo'}
+                  <input type="file" accept="video/mp4,video/quicktime,video/webm" className="hidden" onChange={escolherVideo} />
+                </label>
+                {videoUrl && <Button variant="outline" size="sm" onClick={tirarVideo}><Trash2 className="h-4 w-4 mr-1" /> Remover</Button>}
+              </div>}
+          </div>
+          <div><Label>Passagem</Label><Input value={form.passagem} onChange={e => setForm({ ...form, passagem: e.target.value })} placeholder="João 3:16" /></div>
+          <div><Label>Reflexão</Label><Textarea rows={8} value={form.reflexao} onChange={e => setForm({ ...form, reflexao: e.target.value })} /></div>
+          <div><Label>Aplicação</Label><Textarea rows={3} value={form.aplicacao} onChange={e => setForm({ ...form, aplicacao: e.target.value })} /></div>
+          <div><Label>Oração</Label><Textarea rows={3} value={form.oracao} onChange={e => setForm({ ...form, oracao: e.target.value })} /></div>
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={fechar}>{mudouVideo ? 'Fechar' : 'Cancelar'}</Button>
+          <Button onClick={save} disabled={saving || progresso !== null}>{saving ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <Save className="h-4 w-4 mr-2" />} Salvar</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+
+function idYoutube(url: string): string | null {
+  const m = url.match(/[?&]v=([A-Za-z0-9_-]{11})/);
+  return m ? m[1] : null;
+}
+
+
+
+
+
+
+function enviarDireto(signedUrl: string, arquivo: File, aoProgresso: (p: number) => void): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const corpo = new FormData();
+    corpo.append('cacheControl', '3600');
+    corpo.append('', arquivo);
+    const xhr = new XMLHttpRequest();
+    xhr.open('PUT', signedUrl);
+    xhr.setRequestHeader('x-upsert', 'false');
+    xhr.upload.onprogress = (ev) => { if (ev.lengthComputable) aoProgresso(Math.round((ev.loaded / ev.total) * 100)); };
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) return resolve();
+      let msg = `Falha no envio (${xhr.status})`;
+      try { const j = JSON.parse(xhr.responseText); if (j?.message) msg = j.message; } catch {                        }
+      if (xhr.status === 413) msg = 'O vídeo é maior que o limite aceito pelo servidor. Comprima antes de enviar.';
+      reject(new Error(msg));
+    };
+    xhr.onerror = () => reject(new Error('Falha de rede no envio do vídeo'));
+    xhr.send(corpo);
+  });
+}
+
+
+
+
+type Periodo = 'semana' | '30d' | 'tudo';
+
+function AdesaoView({ planoId }: { planoId: string }) {
+  const [dias, setDias] = useState<AdesaoDia[]>([]);
+  const [totalMembros, setTotalMembros] = useState(0);
+  const [loading, setLoading] = useState(true);
+  const [periodo, setPeriodo] = useState<Periodo>('30d');
+
+  const load = useCallback(() => {
+    setLoading(true);
+    planosApi.adesao(planoId)
+      .then((r: any) => { setDias(r.dias || []); setTotalMembros(r.total_membros || 0); })
+      .catch((e: any) => toast.error(e.message))
+      .finally(() => setLoading(false));
+  }, [planoId]);
+
+  useEffect(() => { load(); }, [load]);
+
+
+  const diasFiltrados = useMemo(() => {
+    if (!dias.length) return [];
+    const hoje = new Date().toISOString().slice(0, 10);
+    if (periodo === 'tudo') return dias;
+    if (periodo === 'semana') {
+      const ini = new Date();
+      ini.setDate(ini.getDate() - ini.getDay());
+      const iniIso = ini.toISOString().slice(0, 10);
+      const fim = new Date();
+      fim.setDate(fim.getDate() + (6 - fim.getDay()));
+      const fimIso = fim.toISOString().slice(0, 10);
+      return dias.filter(d => d.data >= iniIso && d.data <= fimIso);
+    }
+    if (periodo === '30d') {
+      const ini = new Date(); ini.setDate(ini.getDate() - 14);
+      const fim = new Date(); fim.setDate(fim.getDate() + 15);
+      return dias.filter(d => d.data >= ini.toISOString().slice(0, 10) && d.data <= fim.toISOString().slice(0, 10));
+    }
+    return dias;
+  }, [dias, periodo]);
+
+
+  const diasComCheckin = diasFiltrados.filter(d => d.check_ins > 0);
+  const mediaAdesao = diasComCheckin.length
+    ? Math.round(diasComCheckin.reduce((s, d) => s + d.pct_adesao, 0) / diasComCheckin.length)
+    : 0;
+  const melhor = diasComCheckin.length ? [...diasComCheckin].sort((a, b) => b.pct_adesao - a.pct_adesao)[0] : null;
+  const pior = diasComCheckin.length ? [...diasComCheckin].sort((a, b) => a.pct_adesao - b.pct_adesao)[0] : null;
+  const totalCheckIns = diasFiltrados.reduce((s, d) => s + d.check_ins, 0);
+
+
+  const semanas = useMemo(() => {
+    const map = new Map<string, { ini: string; dias: AdesaoDia[] }>();
+    for (const d of diasFiltrados) {
+      const dt = new Date(d.data + 'T12:00');
+      const diaSem = dt.getDay();
+      const segIso = new Date(dt);
+      segIso.setDate(dt.getDate() - ((diaSem + 6) % 7));
+      const key = segIso.toISOString().slice(0, 10);
+      if (!map.has(key)) map.set(key, { ini: key, dias: [] });
+      map.get(key)!.dias.push(d);
+    }
+    return Array.from(map.values()).sort((a, b) => a.ini.localeCompare(b.ini));
+  }, [diasFiltrados]);
+
+  function corPorPct(pct: number) {
+    if (pct === 0) return 'bg-muted';
+    if (pct < 30) return 'bg-rose-500/70';
+    if (pct < 60) return 'bg-amber-500/80';
+    return 'bg-primary';
+  }
+
+  if (loading) return <Skeleton className="h-64 w-full" />;
+
+  return (
+    <div className="space-y-4">
+      {                        }
+      <div className="flex items-center justify-between gap-2 flex-wrap">
+        <div className="inline-flex rounded-lg border bg-card overflow-hidden">
+          {[
+            { key: 'semana', label: 'Esta semana' },
+            { key: '30d', label: '±15 dias' },
+            { key: 'tudo', label: 'Tudo' },
+          ].map(opt => (
+            <button
+              key={opt.key}
+              onClick={() => setPeriodo(opt.key as Periodo)}
+              className={`px-3 py-1.5 text-sm transition-colors ${periodo === opt.key ? 'bg-primary text-primary-foreground' : 'hover:bg-accent'}`}
+            >
+              {opt.label}
+            </button>
+          ))}
+        </div>
+        <Button variant="ghost" size="sm" onClick={load}><RefreshCw className="h-4 w-4" /></Button>
+      </div>
+
+      {                          }
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+        <Card className="p-3">
+          <div className="flex items-center gap-2 text-xs text-muted-foreground"><Users className="h-3 w-3" /> Membros</div>
+          <div className="text-2xl font-bold mt-1">{totalMembros}</div>
+        </Card>
+        <Card className="p-3">
+          <div className="flex items-center gap-2 text-xs text-muted-foreground"><CheckCircle2 className="h-3 w-3" /> Total check-ins</div>
+          <div className="text-2xl font-bold mt-1">{totalCheckIns}</div>
+        </Card>
+        <Card className="p-3">
+          <div className="flex items-center gap-2 text-xs text-muted-foreground"><Sparkles className="h-3 w-3" /> Adesão média</div>
+          <div className="text-2xl font-bold mt-1" style={{ color: mediaAdesao >= 60 ? '#00B39D' : mediaAdesao >= 30 ? '#f59e0b' : undefined }}>
+            {mediaAdesao}%
+          </div>
+        </Card>
+        <Card className="p-3">
+          <div className="flex items-center gap-2 text-xs text-muted-foreground"><Calendar className="h-3 w-3" /> Dias</div>
+          <div className="text-2xl font-bold mt-1">{diasFiltrados.length}</div>
+        </Card>
+      </div>
+
+      {                       }
+      {melhor && pior && melhor.item_id !== pior.item_id && (
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <Card className="p-3 border-l-4 border-l-primary">
+            <div className="flex items-center gap-2 text-xs text-muted-foreground">
+              <TrendingUp className="h-3 w-3 text-primary" /> Melhor adesão
+            </div>
+            <div className="text-sm font-semibold truncate mt-1">{melhor.titulo}</div>
+            <div className="text-xs text-muted-foreground">{fmt(melhor.data)} · {melhor.check_ins} check-ins · {melhor.pct_adesao}%</div>
+          </Card>
+          <Card className="p-3 border-l-4 border-l-rose-500">
+            <div className="flex items-center gap-2 text-xs text-muted-foreground">
+              <TrendingDown className="h-3 w-3 text-rose-500" /> Menor adesão
+            </div>
+            <div className="text-sm font-semibold truncate mt-1">{pior.titulo}</div>
+            <div className="text-xs text-muted-foreground">{fmt(pior.data)} · {pior.check_ins} check-ins · {pior.pct_adesao}%</div>
+          </Card>
+        </div>
+      )}
+
+      {                                }
+      {diasFiltrados.length === 0 ? (
+        <Card className="p-8 text-center text-sm text-muted-foreground">
+          <Calendar className="h-8 w-8 mx-auto mb-2 opacity-50" />
+          Sem itens neste período.
+        </Card>
+      ) : (
+        <div className="space-y-3">
+          {semanas.map(sem => {
+            const total = sem.dias.reduce((s, d) => s + d.check_ins, 0);
+            const media = Math.round(sem.dias.reduce((s, d) => s + d.pct_adesao, 0) / sem.dias.length);
+            return (
+              <SemanaBloco key={sem.ini} ini={sem.ini} dias={sem.dias} total={total} media={media} corPorPct={corPorPct} />
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SemanaBloco({ ini, dias, total, media, corPorPct }: { ini: string; dias: AdesaoDia[]; total: number; media: number; corPorPct: (p: number) => string }) {
+  const [aberto, setAberto] = useState(true);
+  const fim = dias[dias.length - 1]?.data || ini;
+
+  return (
+    <Card className="overflow-hidden">
+      <button
+        onClick={() => setAberto(a => !a)}
+        className="w-full flex items-center justify-between p-3 hover:bg-accent/50 transition-colors"
+      >
+        <div className="flex items-center gap-3">
+          <Calendar className="h-4 w-4 text-muted-foreground" />
+          <div className="text-left">
+            <div className="font-medium text-sm">Semana de {fmt(ini)} - {fmt(fim)}</div>
+            <div className="text-xs text-muted-foreground">{dias.length} dias · {total} check-ins · {media}% média</div>
+          </div>
+        </div>
+        {aberto ? <ChevronUp className="h-4 w-4 text-muted-foreground" /> : <ChevronDown className="h-4 w-4 text-muted-foreground" />}
+      </button>
+      {aberto && (
+        <div className="border-t divide-y">
+          {dias.map(d => (
+            <div key={d.item_id} className="flex items-center gap-3 px-3 py-2 text-sm hover:bg-accent/30">
+              <div className="w-14 text-xs">
+                <div className="font-mono">{fmt(d.data)}</div>
+                <div className="text-muted-foreground text-[10px] uppercase">{diaSemana(d.data)}</div>
+              </div>
+              <div className="flex-1 min-w-0">
+                <div className="truncate text-sm">{d.titulo}</div>
+                {d.passagem && <div className="text-xs text-muted-foreground truncate">{d.passagem}</div>}
+              </div>
+              <div className="flex items-center gap-2 w-44">
+                <div className="flex-1 h-2 bg-muted rounded-full overflow-hidden">
+                  <div className={`h-full transition-all ${corPorPct(d.pct_adesao)}`} style={{ width: `${Math.min(100, d.pct_adesao)}%` }} />
+                </div>
+                <span className="text-xs font-medium w-20 text-right tabular-nums">{d.check_ins}/{d.total_membros}</span>
+                <span className="text-xs font-bold w-10 text-right tabular-nums">{d.pct_adesao}%</span>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </Card>
+  );
+}
+
+function diaSemana(iso: string) {
+  if (!iso) return '';
+  return new Date(iso + 'T12:00').toLocaleDateString('pt-BR', { weekday: 'short' }).replace('.', '');
+}
+
+function fmt(iso: string) {
+  if (!iso) return '';
+  return new Date(iso + 'T12:00').toLocaleDateString('pt-BR', { day: '2-digit', month: 'short' });
+}
+
+
+
+
+type EnvioAgg = {
+  item_id: string;
+  data: string;
+  titulo: string;
+  enviados: number;
+  erros: number;
+  ultimos_motivos: Record<string, number>;
+};
+
+function EnviosView({ planoId, podeEnviar, planoItens }: { planoId: string; podeEnviar: boolean; planoItens: Item[] }) {
+  const [envios, setEnvios] = useState<EnvioAgg[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [enviando, setEnviando] = useState(false);
+
+  const load = useCallback(() => {
+    setLoading(true);
+    planosApi.envios(planoId)
+      .then((r: any) => setEnvios(r.itens || []))
+      .catch((e: any) => toast.error(e.message))
+      .finally(() => setLoading(false));
+  }, [planoId]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const hoje = new Date().toISOString().slice(0, 10);
+  const itemHoje = useMemo(() => (planoItens || []).find(i => i.data === hoje), [planoItens, hoje]);
+
+  function buildMensagem(item: Item) {
+    const linhas = ['📖 *Devocional de hoje*', '', `*${item.titulo}*`];
+    if (item.passagem) linhas.push(item.passagem);
+    linhas.push('', 'Leia no aplicativo CBRio 💙');
+    return linhas.join('\n');
+  }
+
+  async function copiarMensagem() {
+    if (!itemHoje) return toast.error('Plano não tem item pra hoje');
+    const texto = buildMensagem(itemHoje);
+    try {
+      await navigator.clipboard.writeText(texto);
+      toast.success('Mensagem copiada · cole no WhatsApp/Telegram/grupo');
+    } catch {
+      toast.error('Não consegui copiar · selecione manualmente abaixo');
+    }
+  }
+
+  function abrirWhatsAppWeb() {
+    if (!itemHoje) return toast.error('Plano não tem item pra hoje');
+    const texto = encodeURIComponent(buildMensagem(itemHoje));
+    window.open(`https://wa.me/?text=${texto}`, '_blank');
+  }
+
+  async function enviarHoje() {
+    setEnviando(true);
+    try {
+      const r: any = await planosApi.enviarHoje(planoId);
+      if (r.motivo === 'sem_item_hoje') {
+        toast.error('Plano não tem item pra hoje');
+      } else if (r.motivo === 'sem_destinatarios') {
+        toast.error('Nenhum membro elegível (precisa ter logado pelo /devocional + telefone)');
+      } else if (r.motivo === 'whatsapp_desabilitado') {
+        toast.warning('WhatsApp desabilitado · WHATSAPP_ENABLED=true e credenciais precisam estar no Vercel');
+      } else {
+        toast.success(`Enviados: ${r.enviados} · Erros: ${r.erros} · Já existentes: ${r.ja_existentes}`);
+      }
+      load();
+    } catch (e: any) { toast.error(e.message); }
+    finally { setEnviando(false); }
+  }
+
+  return (
+    <div className="space-y-4">
+      {                                                                       }
+      <Card className="p-4 space-y-3 border-primary/30 bg-primary/5">
+        <div className="flex items-center gap-2">
+          <Link2 className="h-4 w-4 text-primary" />
+          <h4 className="font-semibold text-sm">Compartilhar por link</h4>
+        </div>
+        {itemHoje ? (
+          <>
+            <div className="text-xs text-muted-foreground">
+              Pré-formatado pra colar no WhatsApp Web, grupo ou status. Membro abre o link e vê o conteúdo completo no app.
+            </div>
+            <pre className="text-xs bg-card border rounded p-3 whitespace-pre-wrap font-sans">{buildMensagem(itemHoje)}</pre>
+            <div className="flex flex-wrap gap-2">
+              <Button onClick={copiarMensagem} variant="default" size="sm">
+                <Copy className="h-4 w-4 mr-2" /> Copiar mensagem
+              </Button>
+              <Button onClick={abrirWhatsAppWeb} variant="outline" size="sm">
+                <Send className="h-4 w-4 mr-2" /> Abrir no WhatsApp Web
+              </Button>
+            </div>
+          </>
+        ) : (
+          <p className="text-sm text-muted-foreground">Plano não tem item pra hoje. Gere/crie um item com data {hoje}.</p>
+        )}
+      </Card>
+
+      {                                             }
+      <div className="flex items-center justify-between">
+        <p className="text-sm text-muted-foreground">
+          Cron diário 06:00 BRT envia via WhatsApp Business API (precisa do template aprovado pelo Meta).
+        </p>
+        {podeEnviar && (
+          <Button onClick={enviarHoje} disabled={enviando} variant="outline">
+            {enviando ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <Send className="h-4 w-4 mr-2" />}
+            Disparar API agora
+          </Button>
+        )}
+      </div>
+
+      {loading ? (
+        <Skeleton className="h-32 w-full" />
+      ) : envios.length === 0 ? (
+        <Card className="p-8 text-center text-sm text-muted-foreground">
+          <Send className="h-8 w-8 mx-auto mb-2 opacity-50" />
+          Nenhum envio registrado ainda.
+        </Card>
+      ) : (
+        <div className="space-y-2">
+          {envios.map(it => (
+            <Card key={it.item_id} className="p-3">
+              <div className="flex items-center gap-3">
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2 mb-1">
+                    <span className="font-mono text-xs text-muted-foreground">{fmt(it.data)}</span>
+                    <span className="text-sm font-medium truncate">{it.titulo}</span>
+                  </div>
+                  {Object.keys(it.ultimos_motivos).length > 0 && (
+                    <div className="flex flex-wrap gap-1 mt-1">
+                      {Object.entries(it.ultimos_motivos).map(([motivo, count]) => (
+                        <Badge key={motivo} variant="outline" className="text-xs">
+                          <AlertTriangle className="h-3 w-3 mr-1 text-amber-600" />
+                          {motivo}: {count}
+                        </Badge>
+                      ))}
+                    </div>
+                  )}
+                </div>
+                <div className="flex items-center gap-3 text-sm">
+                  <span className="flex items-center gap-1 text-primary">
+                    <CheckCircle2 className="h-4 w-4" /> {it.enviados}
+                  </span>
+                  {it.erros > 0 && (
+                    <span className="flex items-center gap-1 text-destructive">
+                      <AlertTriangle className="h-4 w-4" /> {it.erros}
+                    </span>
+                  )}
+                </div>
+              </div>
+            </Card>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}

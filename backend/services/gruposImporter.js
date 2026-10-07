@@ -1,0 +1,200 @@
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+const XLSX = require('xlsx');
+const { supabase } = require('../utils/supabase');
+const { acharOuCriarGuardado, acharMembroGuardado } = require('./membroMatch');
+
+const onlyDigits = (s) => String(s || '').replace(/\D/g, '');
+const cpf11 = (s) => { const d = onlyDigits(s); return d.length === 11 ? d : null; };
+const tel10 = (s) => { const d = onlyDigits(s); return d.length >= 10 ? d : null; };
+const normNome = (s) => String(s || '').trim().toLowerCase()
+  .normalize('NFD').replace(/[̀-ͯ]/g, '')
+  .replace(/\s+/g, ' ');
+
+function chunk(arr, n) {
+  const out = [];
+  for (let i = 0; i < arr.length; i += n) out.push(arr.slice(i, i + n));
+  return out;
+}
+
+
+async function carregarTodos(tabela, cols) {
+  const size = 1000;
+  let from = 0;
+  let all = [];
+  while (true) {
+    const { data, error } = await supabase.from(tabela).select(cols).range(from, from + size - 1);
+    if (error) throw new Error(`${tabela}: ${error.message}`);
+    if (!data || data.length === 0) break;
+    all = all.concat(data);
+    if (data.length < size) break;
+    from += size;
+  }
+  return all;
+}
+
+function parsePlanilha(buffer) {
+  const wb = XLSX.read(buffer, { type: 'buffer' });
+  const ws = wb.Sheets[wb.SheetNames[0]];
+  const rows = XLSX.utils.sheet_to_json(ws, { defval: null });
+  const pessoas = [];
+  for (const r of rows) {
+    const nome = String(r['NOME'] || '').trim();
+    if (!nome) continue;
+    const grupos = [];
+    for (let i = 1; i <= 17; i++) {
+      const g = String(r['GRUPO ' + i] || '').trim();
+      if (g) grupos.push(g);
+    }
+    pessoas.push({ nome, cpf: cpf11(r['CPF']), telefone: tel10(r['TELEFONE']), grupos });
+  }
+  return pessoas;
+}
+
+async function importarParticipantes(buffer, { dryRun = true, reconciliar = false } = {}) {
+  const pessoas = parsePlanilha(buffer);
+
+  const grupos = await carregarTodos('mem_grupos', 'id, nome, ativo');
+  const byGrupo = new Map();
+  for (const g of grupos) { const nn = normNome(g.nome); if (nn && !byGrupo.has(nn)) byGrupo.set(nn, g); }
+
+  const vinculos = await carregarTodos('mem_grupo_membros', 'id, membro_id, grupo_id, saiu_em');
+  const vinculoAtivo = new Set(vinculos.filter((v) => !v.saiu_em).map((v) => `${v.membro_id}|${v.grupo_id}`));
+
+  const rep = {
+    pessoas_planilha: pessoas.length,
+    criar: 0, atualizar: 0, ignorar: 0, ambiguos: 0,
+    grupos_existentes: 0, grupos_criar: 0,
+    vinculos_criar: 0, vinculos_existentes: 0,
+    exemplos: { ambiguos: [], criar: [], atualizar: [] },
+  };
+
+
+  const grupoLabelPorNN = new Map();
+  for (const p of pessoas) for (const g of p.grupos) { const nn = normNome(g); if (!grupoLabelPorNN.has(nn)) grupoLabelPorNN.set(nn, g.trim()); }
+  const grupoIdPorNN = new Map();
+  const gruposNovos = [];
+  for (const [nn, label] of grupoLabelPorNN) {
+    if (byGrupo.has(nn)) { grupoIdPorNN.set(nn, byGrupo.get(nn).id); rep.grupos_existentes++; }
+    else { gruposNovos.push({ nn, nome: label }); rep.grupos_criar++; }
+  }
+  if (!dryRun && gruposNovos.length) {
+    for (const lote of chunk(gruposNovos, 200)) {
+      const { data, error } = await supabase.from('mem_grupos')
+        .insert(lote.map((g) => ({ nome: g.nome, ativo: true }))).select('id, nome');
+      if (error) throw new Error('criar grupos: ' + error.message);
+      (data || []).forEach((g) => grupoIdPorNN.set(normNome(g.nome), g.id));
+    }
+  }
+
+
+
+  const resolvidos = [];
+  for (const p of pessoas) {
+    const entrada = { cpf: p.cpf, telefone: p.telefone, nome: p.nome, status: 'visitante', origem: 'grupos_importacao' };
+    const resultado = dryRun
+      ? await acharMembroGuardado(entrada)
+      : await acharOuCriarGuardado(entrada);
+    if (resultado?.membro_id) {
+      const criado = !!resultado.created;
+      if (criado) {
+        rep.criar++;
+        if (rep.exemplos.criar.length < 15) rep.exemplos.criar.push(p.nome);
+      } else {
+        rep.ignorar++;
+      }
+      resolvidos.push({ p, membroId: resultado.membro_id, acao: criado ? 'criar' : 'existe' });
+    } else {
+      rep.criar++;
+      if (rep.exemplos.criar.length < 15) rep.exemplos.criar.push(p.nome);
+      resolvidos.push({ p, membroId: null, acao: 'criar' });
+    }
+  }
+
+
+  const novosVinculos = [];
+  for (const r of resolvidos) {
+    if (!r.membroId && dryRun && r.acao === 'criar') {
+
+      for (const g of r.p.grupos) { if (grupoIdPorNN.has(normNome(g)) || true) rep.vinculos_criar++; }
+      continue;
+    }
+    if (!r.membroId) continue;
+    for (const g of r.p.grupos) {
+      const gid = grupoIdPorNN.get(normNome(g));
+      if (!gid) continue;
+      const chave = `${r.membroId}|${gid}`;
+      if (vinculoAtivo.has(chave)) { rep.vinculos_existentes++; continue; }
+      rep.vinculos_criar++;
+      vinculoAtivo.add(chave);
+
+
+
+
+      novosVinculos.push({
+        membro_id: r.membroId, grupo_id: gid, funcao: 'frequentador',
+        entrou_em: new Date().toISOString().slice(0, 10),
+      });
+    }
+  }
+  if (!dryRun && novosVinculos.length) {
+    for (const lote of chunk(novosVinculos, 500)) {
+      const { error } = await supabase.from('mem_grupo_membros').insert(lote);
+      if (error) throw new Error('criar vínculos: ' + error.message);
+    }
+  }
+
+
+
+
+
+  if (reconciliar) {
+    const keepPairs = new Set();
+    const keepGrupos = new Set([...grupoIdPorNN.values()]);
+    for (const r of resolvidos) {
+      if (!r.membroId) continue;
+      for (const g of r.p.grupos) {
+        const gid = grupoIdPorNN.get(normNome(g));
+        if (gid) keepPairs.add(`${r.membroId}|${gid}`);
+      }
+    }
+    const aDesativarVinc = vinculos.filter((v) => !v.saiu_em && v.id && !keepPairs.has(`${v.membro_id}|${v.grupo_id}`));
+    const aDesativarGrupos = grupos.filter((g) => g.ativo && !keepGrupos.has(g.id));
+    rep.desativar_vinculos = aDesativarVinc.length;
+    rep.desativar_grupos = aDesativarGrupos.length;
+    if (!dryRun) {
+      const hoje = new Date().toISOString().slice(0, 10);
+      for (const lote of chunk(aDesativarVinc.map((v) => v.id), 500)) {
+        const { error } = await supabase.from('mem_grupo_membros')
+          .update({ saiu_em: hoje, motivo_saida: 'reconciliação consolidado' }).in('id', lote);
+        if (error) throw new Error('desativar vínculos: ' + error.message);
+      }
+      for (const lote of chunk(aDesativarGrupos.map((g) => g.id), 500)) {
+        const { error } = await supabase.from('mem_grupos').update({ ativo: false }).in('id', lote);
+        if (error) throw new Error('desativar grupos: ' + error.message);
+      }
+    }
+  }
+
+  rep.dry_run = dryRun;
+  return rep;
+}
+
+module.exports = { importarParticipantes };

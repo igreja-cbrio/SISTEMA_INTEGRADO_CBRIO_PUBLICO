@@ -1,0 +1,48 @@
+
+
+
+
+const router = require('express').Router();
+const { authenticate } = require('../middleware/auth');
+const { isAuthorizedCron } = require('../utils/cronAuth');
+const { checarSaude, checarEAlertar } = require('../services/monitorAutomacoes');
+
+
+const DONO_MONITOR = (process.env.MONITOR_OWNER_EMAIL || '').trim().toLowerCase();
+
+
+
+async function cronChecar(req, res) {
+  if (!isAuthorizedCron(req)) return res.status(401).json({ error: 'Unauthorized' });
+  try {
+    const alertas = await checarEAlertar();
+    res.json({ ok: true, alertas });
+  } catch (e) {
+    console.error('[monitor-automacoes/cron]', e.message);
+    res.status(500).json({ error: e.message });
+  }
+}
+router.get('/cron/checar', cronChecar);
+router.post('/cron/checar', cronChecar);
+
+
+router.get('/status', authenticate, async (req, res) => {
+  if (!DONO_MONITOR || (req.user?.email || '').toLowerCase() !== DONO_MONITOR) {
+    return res.status(403).json({ error: 'Acesso restrito.' });
+  }
+  try {
+    const pipelines = await checarSaude();
+    const resumo = {
+      ok: pipelines.filter((p) => p.status === 'ok').length,
+      atrasado: pipelines.filter((p) => p.status === 'atrasado').length,
+      parado: pipelines.filter((p) => p.status === 'parado').length,
+      desconhecido: pipelines.filter((p) => p.status === 'desconhecido').length,
+    };
+    res.json({ pipelines, resumo });
+  } catch (e) {
+    console.error('[monitor-automacoes/status]', e.message);
+    res.status(500).json({ error: 'Erro ao checar a saúde das automações' });
+  }
+});
+
+module.exports = router;

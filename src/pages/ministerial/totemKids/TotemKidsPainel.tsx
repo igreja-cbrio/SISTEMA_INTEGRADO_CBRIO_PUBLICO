@@ -1,0 +1,1010 @@
+
+
+
+
+
+
+
+
+import { useEffect, useRef, useState } from 'react';
+import { Baby, Users, Loader2, CheckCircle2, ShieldAlert, RefreshCw, PowerOff, AlertTriangle, Heart, ChevronLeft, Phone, MessageCircle, ArrowRight, LogOut, BellRing } from 'lucide-react';
+import { Button } from '@/components/ui/button';
+import { Card, CardContent } from '@/components/ui/card';
+import { Badge } from '@/components/ui/badge';
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import { toast } from 'sonner';
+import { totemKids } from '@/api';
+import { format } from 'date-fns';
+import { ptBR } from 'date-fns/locale';
+import { useAuth } from '@/contexts/AuthContext';
+import { useNavigate } from 'react-router-dom';
+
+type CultoDia = {
+  culto_id: string;
+  sessao_id: string;
+  culto_nome: string;
+  service_type_name: string | null;
+  abrir_em: string | null;
+  status: string;
+  presentes: number;
+  sairam: number;
+  decisoes: number;
+  total: number;
+};
+
+type PainelSala = {
+  sessao_id: string;
+  culto_id: string;
+  data_culto: string;
+  culto_nome: string;
+  status: string;
+  sala_id: string | null;
+  sala_nome: string | null;
+  sala_cor: string | null;
+  capacidade: number | null;
+  total_checkins: number;
+  criancas_presentes: number;
+  criancas_saidas: number;
+  decisoes_jesus: number;
+  overrides: number;
+  ocupacao_pct: number | null;
+};
+
+type CriancaNaSala = {
+  id: string;
+  crianca_id: string;
+  checkin_at: string;
+  checkout_at: string | null;
+  codigo_seguranca: string;
+  responsavel_checkin_nome: string;
+  fez_decisao_jesus: boolean;
+  observacoes_no_dia: string | null;
+  total_decisoes_historico: number;
+  crianca: {
+    id: string;
+    nome: string;
+    data_nascimento: string | null;
+    foto_url: string | null;
+    observacoes_medicas: string | null;
+    idade_label: string;
+  };
+};
+
+type Responsavel = {
+  id: string;
+  parentesco: string | null;
+  autorizado_buscar: boolean;
+  contato_emergencia: boolean;
+  membro: { id: string; nome: string; telefone: string | null; email: string | null } | null;
+};
+type CriancaDetalhe = {
+  id: string;
+  nome: string;
+  foto_url: string | null;
+  idade_label: string;
+  observacoes_medicas: string | null;
+  tem_alergia: boolean | null;
+  alergia_qual: string | null;
+  tem_espectro: boolean | null;
+  espectro_qual: string | null;
+  tem_limitacao_fisica: boolean | null;
+  limitacao_fisica_qual: string | null;
+  responsaveis: Responsavel[] | null;
+};
+
+
+function digitsTel(tel?: string | null): string | null {
+  if (!tel) return null;
+  let d = String(tel).replace(/\D/g, '');
+  if (!d) return null;
+  if (d.length <= 11 && !d.startsWith('55')) d = '55' + d;
+  return d;
+}
+
+export default function TotemKidsPainel() {
+  const { isAdmin, modulePerms } = useAuth();
+  const navigate = useNavigate();
+  const [cultosDia, setCultosDia] = useState<CultoDia[]>([]);
+  const [dataDia, setDataDia] = useState<string>('');
+  const [unicas, setUnicas] = useState<{ presentes: number; total: number } | null>(null);
+
+  type PagerItem = {
+    pager_numero?: string;
+    checkin_id: string;
+    crianca_id: string | null;
+    checkin_at: string | null;
+    crianca_nome: string;
+    sala_nome: string | null;
+    responsavel_nome: string | null;
+    culto_nome?: string | null;
+  };
+
+  const horaCulto = (nome?: string | null) => nome?.match(/\d{2}:\d{2}/)?.[0] || null;
+  const [pagers, setPagers] = useState<{ em_uso: PagerItem[]; pendentes: PagerItem[] }>({ em_uso: [], pendentes: [] });
+  const [cultoSel, setCultoSel] = useState<CultoDia | null>(null);
+  const cultoSelRef = useRef<string | null>(null);
+  const [dados, setDados] = useState<PainelSala[]>([]);
+  const [carregando, setCarregando] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [encerrando, setEncerrando] = useState(false);
+  const [baixandoTodos, setBaixandoTodos] = useState(false);
+
+
+  const [salaDetalhe, setSalaDetalhe] = useState<PainelSala | null>(null);
+  const [criancasNaSala, setCriancasNaSala] = useState<CriancaNaSala[]>([]);
+  const [carregandoSala, setCarregandoSala] = useState(false);
+  const [salvandoDecisao, setSalvandoDecisao] = useState<string | null>(null);
+  const [criancaSelId, setCriancaSelId] = useState<string | null>(null);
+  const [criancaDet, setCriancaDet] = useState<CriancaDetalhe | null>(null);
+  const [carregandoCrianca, setCarregandoCrianca] = useState(false);
+
+  const [criancaSelCheckin, setCriancaSelCheckin] = useState<CriancaNaSala | null>(null);
+  const [fazendoCheckout, setFazendoCheckout] = useState(false);
+
+  const [selCheckout, setSelCheckout] = useState<Set<string>>(new Set());
+  const [checkoutLote, setCheckoutLote] = useState(false);
+
+  function toggleSel(id: string) {
+    setSelCheckout(prev => {
+      const n = new Set(prev);
+      if (n.has(id)) n.delete(id); else n.add(id);
+      return n;
+    });
+  }
+
+  async function fazerCheckoutSelecionados() {
+    const ids = [...selCheckout];
+    if (ids.length === 0 || checkoutLote) return;
+    setCheckoutLote(true);
+    let ok = 0;
+    try {
+      for (const checkinId of ids) {
+        try {
+          await totemKids.checkout.realizar({ checkin_id: checkinId, metodo: 'painel' });
+          ok++;
+        } catch {                       }
+      }
+      toast.success(`Check-out de ${ok} criança${ok === 1 ? '' : 's'} registrado${ok === 1 ? '' : 's'}`);
+      setSelCheckout(new Set());
+      if (salaDetalhe) await abrirDetalheSala(salaDetalhe);
+      await carregar(true);
+    } catch (e: any) {
+      toast.error(e?.message || 'Erro no check-out em lote');
+    } finally {
+      setCheckoutLote(false);
+    }
+  }
+
+  const podeEncerrar = isAdmin || (modulePerms?.kids?.escrita ?? 0) >= 3;
+  const podeMarcarDecisao = isAdmin || (modulePerms?.kids?.escrita ?? 0) >= 2;
+
+  async function selecionarCulto(c: CultoDia) {
+    cultoSelRef.current = c.culto_id;
+    setCultoSel(c);
+    setRefreshing(true);
+    try {
+      const d = await totemKids.painel.aoVivo(c.sessao_id);
+      setDados(d);
+    } finally {
+      setRefreshing(false);
+    }
+  }
+
+
+  async function checkoutTodos() {
+    if (!window.confirm('Dar baixa (check-out) em TODAS as crianças que ainda constam presentes? Use ao fim do culto — quem já saiu não é afetado.')) return;
+    setBaixandoTodos(true);
+    try {
+      const r: any = await totemKids.painel.checkoutTodos();
+      toast.success(`Baixa em ${r?.baixados ?? 0} criança(s).`);
+      carregar(true);
+    } catch (e: unknown) {
+      toast.error((e as { message?: string })?.message || 'Erro ao dar baixa em todos');
+    } finally { setBaixandoTodos(false); }
+  }
+
+  async function carregar(silent = false) {
+    if (!silent) setRefreshing(true);
+    try {
+      const resp = await totemKids.painel.dia();
+      const cultos: CultoDia[] = resp?.cultos || [];
+      setCultosDia(cultos);
+      setDataDia(resp?.data || '');
+      setUnicas(resp?.unicas || null);
+
+      const sel =
+        cultos.find(c => c.culto_id === cultoSelRef.current) ||
+        cultos.find(c => c.status === 'aberta') ||
+        cultos[0] ||
+        null;
+      setCultoSel(sel);
+      cultoSelRef.current = sel?.culto_id || null;
+      if (sel?.sessao_id) {
+        const d = await totemKids.painel.aoVivo(sel.sessao_id);
+        setDados(d);
+      } else {
+        setDados([]);
+      }
+
+      try {
+        const p = await totemKids.pagersEmUso();
+        setPagers({ em_uso: p?.em_uso || [], pendentes: p?.pendentes || [] });
+      } catch {                              }
+    } finally {
+      setCarregando(false);
+      setRefreshing(false);
+    }
+  }
+
+  useEffect(() => {
+    carregar();
+    const interval = setInterval(() => carregar(true), 15000);
+    return () => clearInterval(interval);
+  }, []);
+
+  async function abrirDetalheSala(s: PainelSala) {
+    if (!s.sala_id) return;
+    setSalaDetalhe(s);
+    setCriancaSelId(null);
+    setCriancaDet(null);
+    setSelCheckout(new Set());
+    setCarregandoSala(true);
+    try {
+      const lista = await totemKids.painel.sala(s.sala_id, s.sessao_id);
+      setCriancasNaSala(lista);
+    } finally {
+      setCarregandoSala(false);
+    }
+  }
+
+
+
+  function abrirFichaPager(p: { checkin_id: string; crianca_id: string | null; checkin_at: string | null; crianca_nome: string; responsavel_nome: string | null }) {
+    if (!p.crianca_id) { toast.error('Check-in sem criança vinculada'); return; }
+    setCriancaSelCheckin({
+      id: p.checkin_id,
+      crianca_id: p.crianca_id,
+      checkin_at: p.checkin_at || '',
+      checkout_at: null,
+      codigo_seguranca: '',
+      responsavel_checkin_nome: p.responsavel_nome || '',
+      fez_decisao_jesus: false,
+      observacoes_no_dia: null,
+      total_decisoes_historico: 0,
+      crianca: { id: p.crianca_id, nome: p.crianca_nome, data_nascimento: null, foto_url: null, observacoes_medicas: null, idade_label: '' },
+    });
+    abrirCrianca(p.crianca_id);
+  }
+
+  async function abrirCrianca(criancaId: string) {
+    setCriancaSelId(criancaId);
+    setCriancaDet(null);
+    setCarregandoCrianca(true);
+    try {
+      const det = await totemKids.criancas.get(criancaId);
+      setCriancaDet(det);
+    } catch (e: unknown) {
+      toast.error((e as { message?: string })?.message || 'Erro ao carregar a criança');
+      setCriancaSelId(null);
+    } finally {
+      setCarregandoCrianca(false);
+    }
+  }
+
+  async function toggleDecisao(c: CriancaNaSala) {
+    if (salvandoDecisao) return;
+    const novoValor = !c.fez_decisao_jesus;
+    setSalvandoDecisao(c.id);
+    try {
+      await totemKids.checkin.atualizar(c.id, { fez_decisao_jesus: novoValor });
+      setCriancasNaSala(prev => prev.map(x => x.id === c.id ? { ...x, fez_decisao_jesus: novoValor } : x));
+      if (novoValor) {
+        const sequencia = (c.total_decisoes_historico || 0) + 1;
+        const sufixo = sequencia === 1 ? '1ª' : `${sequencia}ª`;
+        toast.success(
+          sequencia === 1
+            ? `${c.crianca.nome} aceitou Jesus · 1ª decisão registrada 🙏`
+            : `${c.crianca.nome} renovou a decisão · ${sufixo} vez (já tinha ${sequencia - 1})`,
+          { duration: 5000 }
+        );
+      } else {
+        toast.info(`Decisão desmarcada de ${c.crianca.nome}`);
+      }
+      carregar(true);
+    } catch (e: unknown) {
+      toast.error((e as { message?: string })?.message || 'Erro');
+    } finally {
+      setSalvandoDecisao(null);
+    }
+  }
+
+
+
+
+  async function fazerCheckoutPainel() {
+    if (!criancaSelCheckin || fazendoCheckout) return;
+    setFazendoCheckout(true);
+    try {
+      await totemKids.checkout.realizar({ checkin_id: criancaSelCheckin.id, metodo: 'painel' });
+      toast.success(`Check-out de ${criancaSelCheckin.crianca.nome} registrado`);
+      setCriancaSelId(null); setCriancaDet(null); setCriancaSelCheckin(null);
+      if (salaDetalhe) await abrirDetalheSala(salaDetalhe);
+      carregar(true);
+    } catch (e: unknown) {
+      toast.error((e as { message?: string })?.message || 'Erro ao fazer check-out');
+    } finally {
+      setFazendoCheckout(false);
+    }
+  }
+
+
+  async function desfazerCheckoutPainel() {
+    if (!criancaSelCheckin || fazendoCheckout) return;
+    setFazendoCheckout(true);
+    try {
+      await totemKids.checkout.desfazer(criancaSelCheckin.id);
+      toast.success(`${criancaSelCheckin.crianca.nome} voltou pra sala (check-in refeito)`);
+      setCriancaSelId(null); setCriancaDet(null); setCriancaSelCheckin(null);
+      if (salaDetalhe) await abrirDetalheSala(salaDetalhe);
+      carregar(true);
+    } catch (e: unknown) {
+      toast.error((e as { message?: string })?.message || 'Erro ao refazer o check-in');
+    } finally {
+      setFazendoCheckout(false);
+    }
+  }
+
+  async function encerrarSessao() {
+    if (!cultoSel) return;
+    if (!confirm(`Encerrar a sessão de ${cultoSel.culto_nome}? Vai consolidar ${cultoSel.presentes} criança(s) no culto.`)) return;
+    setEncerrando(true);
+    try {
+      try {
+        await totemKids.sessoes.encerrar(cultoSel.sessao_id);
+      } catch (e409: unknown) {
+
+
+        const err = e409 as { precisa_confirmar_limpeza?: boolean; suspeitos?: number };
+        if (!err?.precisa_confirmar_limpeza) throw e409;
+        const limpar = confirm(`${err.suspeitos} check-in(s) fora do horário do culto parecem teste.\n\nOK = apagar antes de consolidar (não contam no número) · Cancelar = manter tudo`);
+        await totemKids.sessoes.encerrar(cultoSel.sessao_id, { limpar_testes: limpar });
+      }
+      toast.success('Sessão encerrada · KPIs consolidados');
+      carregar();
+    } catch (e: unknown) {
+      toast.error((e as { message?: string })?.message || 'Erro ao encerrar');
+    } finally {
+      setEncerrando(false);
+    }
+  }
+
+  const totalPresentes = dados.reduce((s, d) => s + (d.criancas_presentes || 0), 0);
+  const totalSaidas = dados.reduce((s, d) => s + (d.criancas_saidas || 0), 0);
+  const totalDecisoes = dados.reduce((s, d) => s + (d.decisoes_jesus || 0), 0);
+  const totalOverrides = dados.reduce((s, d) => s + (d.overrides || 0), 0);
+
+  if (carregando) {
+    return (
+      <div className="flex items-center justify-center min-h-[60vh]">
+        <Loader2 className="h-8 w-8 animate-spin text-pink-500" />
+      </div>
+    );
+  }
+
+  if (!cultosDia.length) {
+    return (
+      <div className="max-w-4xl mx-auto p-4 sm:p-6">
+        <button onClick={() => navigate('/ministerial/kids')} className="text-xs text-muted-foreground hover:text-foreground inline-flex items-center gap-1 mb-2"><ChevronLeft className="h-4 w-4" /> Voltar ao Kids</button>
+        <h1 className="text-xl sm:text-2xl font-bold text-pink-700 dark:text-pink-300">Kids · Painel ao vivo</h1>
+        <Card className="mt-4">
+          <CardContent className="p-8 text-center">
+            <Baby className="h-12 w-12 text-pink-500 mx-auto mb-3" />
+            <p>Nenhum culto com Kids hoje.</p>
+            <Button variant="outline" size="sm" className="mt-4" onClick={() => carregar()}>
+              <RefreshCw className="h-4 w-4 mr-1" /> Atualizar
+            </Button>
+          </CardContent>
+        </Card>
+        {
+                                                                          }
+        <div className="mt-4">
+          <ConferenciaPagers />
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="max-w-3xl mx-auto p-3 sm:p-4 space-y-3 sm:space-y-4">
+      {               }
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          <button onClick={() => navigate('/ministerial/kids')} className="text-xs text-muted-foreground hover:text-foreground inline-flex items-center gap-1 mb-1"><ChevronLeft className="h-4 w-4" /> Voltar ao Kids</button>
+          <h1 className="text-xl sm:text-2xl font-bold text-pink-700 dark:text-pink-300 leading-tight">Kids · Painel ao vivo</h1>
+          <p className="text-xs sm:text-sm text-muted-foreground capitalize">
+            {dataDia && format(new Date(dataDia + 'T00:00:00'), "EEEE, dd 'de' MMMM", { locale: ptBR })}
+          </p>
+        </div>
+        <div className="flex gap-2 shrink-0">
+          <Button variant="outline" size="icon" className="h-9 w-9" onClick={() => carregar()} title="Atualizar">
+            <RefreshCw className={`h-4 w-4 ${refreshing ? 'animate-spin' : ''}`} />
+          </Button>
+          {podeEncerrar && (unicas?.presentes ?? 0) > 0 && (
+            <Button variant="outline" size="sm" onClick={checkoutTodos} disabled={baixandoTodos}
+              title="Dar baixa (check-out) em todas as crianças que ainda constam presentes">
+              {baixandoTodos ? <Loader2 className="h-4 w-4 sm:mr-1 animate-spin" /> : <LogOut className="h-4 w-4 sm:mr-1" />}
+              <span className="hidden sm:inline">Check-out de todos</span>
+            </Button>
+          )}
+          {podeEncerrar && cultoSel?.status === 'aberta' && (
+            <Button variant="destructive" size="sm" onClick={encerrarSessao} disabled={encerrando}>
+              {encerrando ? <Loader2 className="h-4 w-4 sm:mr-1 animate-spin" /> : <PowerOff className="h-4 w-4 sm:mr-1" />}
+              <span className="hidden sm:inline">Encerrar</span>
+            </Button>
+          )}
+        </div>
+      </div>
+
+      {                                                                            }
+      {unicas && (unicas.total > 0 || unicas.presentes > 0) && (
+        <div className="rounded-xl border-2 border-pink-300 dark:border-pink-800 bg-pink-50 dark:bg-pink-950/30 p-3 flex items-center gap-3">
+          <Users className="h-7 w-7 text-pink-600 shrink-0" />
+          <div>
+            <div className="text-3xl font-bold text-pink-600 leading-none">{unicas.presentes}</div>
+            <div className="text-[11px] text-muted-foreground mt-0.5">crianças únicas presentes agora</div>
+          </div>
+          <div className="ml-auto text-right">
+            <div className="text-xl font-semibold leading-none">{unicas.total}</div>
+            <div className="text-[11px] text-muted-foreground mt-0.5">únicas no dia (total)</div>
+          </div>
+        </div>
+      )}
+
+      {                                              }
+      <div>
+        <div className="text-[11px] uppercase tracking-wide text-muted-foreground mb-1.5">Cultos de hoje</div>
+        <div className="flex gap-2 overflow-x-auto pb-1 -mx-1 px-1">
+          {cultosDia.map(c => {
+            const ativo = cultoSel?.culto_id === c.culto_id;
+            return (
+              <button
+                key={c.culto_id}
+                onClick={() => selecionarCulto(c)}
+                className={`shrink-0 rounded-xl border px-3 py-2 text-left transition-colors ${
+                  ativo ? 'border-pink-500 bg-pink-50 dark:bg-pink-950/40' : 'bg-card hover:border-pink-300'
+                }`}
+                style={{ minWidth: 108 }}
+              >
+                <div className="flex items-center gap-1.5">
+                  <span className="text-[11px] font-semibold truncate max-w-[120px]">
+                    {c.service_type_name || c.culto_nome}
+                  </span>
+                  {c.status === 'aberta' && (
+                    <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse" title="Em andamento" />
+                  )}
+                </div>
+                <div className="text-2xl font-bold text-pink-600 leading-tight">{c.presentes}</div>
+                <div className="text-[10px] text-muted-foreground">
+                  presentes{c.total > c.presentes ? ` · ${c.total} no total` : ''}
+                </div>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      {
+
+
+                                                                                     }
+      {(pagers.em_uso.length > 0 || pagers.pendentes.length > 0) && (
+        <div className="rounded-xl border bg-card p-3 space-y-2">
+          <div className="text-[11px] uppercase tracking-wide text-muted-foreground flex items-center gap-1.5">
+            <BellRing className="h-3.5 w-3.5" /> Pagers em uso
+          </div>
+          {pagers.em_uso.length > 0 ? (
+            <div className="flex flex-col gap-1.5">
+              {pagers.em_uso.map((p, i) => (
+                <button
+                  key={i}
+                  type="button"
+                  onClick={() => abrirFichaPager(p)}
+                  className="flex items-center gap-2 text-sm w-full text-left rounded-md px-1 py-0.5 -mx-1 hover:bg-accent transition-colors"
+                  title="Abrir a ficha da criança (com check-out)"
+                >
+                  <span className="shrink-0 inline-flex items-center justify-center min-w-[2.2rem] h-7 px-2 rounded-md bg-amber-600 text-white font-mono font-bold">{p.pager_numero}</span>
+                  <span className="font-medium truncate">{p.crianca_nome}</span>
+                  {p.sala_nome && <span className="text-muted-foreground truncate">· {p.sala_nome}</span>}
+                  {horaCulto(p.culto_nome) && (
+                    <span className="shrink-0 text-[11px] font-semibold text-pink-600 bg-pink-50 dark:bg-pink-950/40 border border-pink-200 dark:border-pink-900 rounded px-1.5 py-0.5" title={p.culto_nome || undefined}>
+                      {horaCulto(p.culto_nome)}
+                    </span>
+                  )}
+                  {p.responsavel_nome && <span className="text-muted-foreground truncate ml-auto text-right">{p.responsavel_nome}</span>}
+                </button>
+              ))}
+            </div>
+          ) : (
+            <div className="text-xs text-muted-foreground">Nenhum pager em uso agora.</div>
+          )}
+          {pagers.pendentes.length > 0 && (
+            <div className="rounded-lg border border-red-300 dark:border-red-800 bg-red-50 dark:bg-red-950/30 p-2 space-y-1">
+              <div className="text-[11px] font-semibold text-red-600 flex items-center gap-1.5">
+                <AlertTriangle className="h-3.5 w-3.5" /> Precisam de pager e estão sem número
+              </div>
+              {pagers.pendentes.map((p, i) => (
+                <button
+                  key={i}
+                  type="button"
+                  onClick={() => abrirFichaPager(p)}
+                  className="text-sm flex items-center gap-2 w-full text-left rounded-md px-1 py-0.5 -mx-1 hover:bg-red-100/60 dark:hover:bg-red-900/30 transition-colors"
+                  title="Abrir a ficha da criança (com check-out)"
+                >
+                  <span className="font-medium truncate">{p.crianca_nome}</span>
+                  {p.sala_nome && <span className="text-muted-foreground truncate">· {p.sala_nome}</span>}
+                  {horaCulto(p.culto_nome) && (
+                    <span className="shrink-0 text-[11px] font-semibold text-red-600 bg-red-100/70 dark:bg-red-900/40 border border-red-200 dark:border-red-800 rounded px-1.5 py-0.5" title={p.culto_nome || undefined}>
+                      {horaCulto(p.culto_nome)}
+                    </span>
+                  )}
+                  {p.responsavel_nome && <span className="text-muted-foreground truncate ml-auto">{p.responsavel_nome}</span>}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {
+                                                                               }
+      <ConferenciaPagers />
+
+      {                                 }
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 sm:gap-3">
+        <Card><CardContent className="p-3 sm:p-4">
+          <div className="text-[11px] uppercase tracking-wide text-muted-foreground">Presentes</div>
+          <div className="text-2xl sm:text-3xl font-bold text-pink-600">{totalPresentes}</div>
+        </CardContent></Card>
+        <Card><CardContent className="p-3 sm:p-4">
+          <div className="text-[11px] uppercase tracking-wide text-muted-foreground">Saíram</div>
+          <div className="text-2xl sm:text-3xl font-bold">{totalSaidas}</div>
+        </CardContent></Card>
+        <Card><CardContent className="p-3 sm:p-4">
+          <div className="text-[11px] uppercase tracking-wide text-muted-foreground">Decisões</div>
+          <div className="text-2xl sm:text-3xl font-bold text-emerald-600 flex items-center gap-1">
+            {totalDecisoes} {totalDecisoes > 0 && <CheckCircle2 className="h-5 w-5" />}
+          </div>
+        </CardContent></Card>
+        <Card><CardContent className="p-3 sm:p-4">
+          <div className="text-[11px] uppercase tracking-wide text-muted-foreground">Overrides</div>
+          <div className={`text-2xl sm:text-3xl font-bold flex items-center gap-1 ${totalOverrides > 0 ? 'text-amber-600' : ''}`}>
+            {totalOverrides} {totalOverrides > 0 && <ShieldAlert className="h-5 w-5" />}
+          </div>
+        </CardContent></Card>
+      </div>
+
+      {                                }
+      <div className="space-y-2">
+        <h2 className="text-base sm:text-lg font-semibold flex items-center gap-2">
+          <Users className="h-5 w-5" /> Por sala
+        </h2>
+        {dados.length === 0 ? (
+          <Card><CardContent className="p-6 text-center text-muted-foreground">
+            Ainda sem check-ins neste culto.
+          </CardContent></Card>
+        ) : (
+          <div className="grid sm:grid-cols-2 gap-2 sm:gap-3">
+            {dados.map(d => (
+              <Card
+                key={d.sala_id || 'sem-sala'}
+                className={d.sala_id ? 'cursor-pointer active:scale-[.99] hover:shadow-md transition' : ''}
+                onClick={() => d.sala_id && abrirDetalheSala(d)}
+              >
+                <CardContent className="p-3 sm:p-4">
+                  <div className="flex items-center justify-between mb-2 gap-2">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <span className="h-3 w-3 rounded-full shrink-0" style={{ background: d.sala_cor || '#888' }} />
+                      <span className="font-semibold truncate">{d.sala_nome || '(sem sala)'}</span>
+                    </div>
+                    <Badge variant={d.ocupacao_pct && d.ocupacao_pct > 90 ? 'destructive' : 'secondary'}>
+                      {d.criancas_presentes}{d.capacidade ? `/${d.capacidade}` : ''}
+                    </Badge>
+                  </div>
+                  <div className="flex gap-4 text-xs sm:text-sm text-muted-foreground">
+                    <span>Saíram: <b className="text-foreground">{d.criancas_saidas}</b></span>
+                    {d.decisoes_jesus > 0 && <span className="text-emerald-600">Decisões: {d.decisoes_jesus}</span>}
+                    {d.overrides > 0 && <span className="text-amber-600">Override: {d.overrides}</span>}
+                  </div>
+                  {d.capacidade && d.ocupacao_pct != null && (
+                    <div className="h-2 bg-muted rounded-full overflow-hidden mt-3">
+                      <div className="h-full transition-all" style={{ width: `${Math.min(d.ocupacao_pct, 100)}%`, background: d.sala_cor || '#EC4899' }} />
+                    </div>
+                  )}
+                  {d.sala_id && (
+                    <p className="text-[11px] text-muted-foreground mt-2 flex items-center gap-1">
+                      Ver crianças <ArrowRight className="h-3 w-3" />
+                    </p>
+                  )}
+                </CardContent>
+              </Card>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {                                                                            }
+      {                                                                         }
+      <Dialog open={!!salaDetalhe || !!criancaSelId} onOpenChange={(o) => { if (!o) { setSalaDetalhe(null); setCriancaSelId(null); setCriancaDet(null); setCriancaSelCheckin(null); setSelCheckout(new Set()); } }}>
+        <DialogContent className="max-w-lg max-h-[90vh] flex flex-col p-0 gap-0">
+          {                            }
+          {criancaSelId ? (
+            <>
+              <DialogHeader className="p-4 pb-2 border-b">
+                <DialogTitle className="flex items-center gap-2">
+                  <button onClick={() => { setCriancaSelId(null); setCriancaDet(null); setCriancaSelCheckin(null); }} className="text-muted-foreground hover:text-foreground">
+                    <ChevronLeft className="h-5 w-5" />
+                  </button>
+                  Ficha da criança
+                </DialogTitle>
+              </DialogHeader>
+              <div className="flex-1 overflow-y-auto min-h-0 p-4">
+                {carregandoCrianca || !criancaDet ? (
+                  <div className="flex justify-center py-8"><Loader2 className="h-6 w-6 animate-spin text-pink-500" /></div>
+                ) : (
+                  <div className="space-y-4">
+                    <div className="flex items-center gap-3">
+                      {criancaDet.foto_url ? (
+                        <img src={criancaDet.foto_url} alt="" className="h-16 w-16 rounded-full object-cover" />
+                      ) : (
+                        <div className="h-16 w-16 rounded-full bg-pink-100 dark:bg-pink-900/40 flex items-center justify-center">
+                          <Baby className="h-8 w-8 text-pink-500" />
+                        </div>
+                      )}
+                      <div className="min-w-0">
+                        <p className="text-lg font-bold leading-tight">{criancaDet.nome}</p>
+                        <p className="text-sm text-muted-foreground">{criancaDet.idade_label}</p>
+                        {
+                                                                                           }
+                        {criancaSelCheckin?.checkin_at && (
+                          <p className="text-xs text-muted-foreground mt-0.5">
+                            Check-in às <b>{format(new Date(criancaSelCheckin.checkin_at), 'HH:mm', { locale: ptBR })}</b>
+                            {criancaSelCheckin.checkout_at && <> · saída às <b>{format(new Date(criancaSelCheckin.checkout_at), 'HH:mm', { locale: ptBR })}</b></>}
+                          </p>
+                        )}
+                      </div>
+                    </div>
+
+                    {                     }
+                    {(criancaDet.observacoes_medicas || criancaDet.tem_alergia || criancaDet.tem_espectro || criancaDet.tem_limitacao_fisica) && (
+                      <div className="rounded-lg border border-amber-300 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/30 p-3 space-y-1">
+                        <div className="flex items-center gap-1.5 text-amber-700 dark:text-amber-400 text-sm font-semibold">
+                          <AlertTriangle className="h-4 w-4" /> Atenção
+                        </div>
+                        {criancaDet.observacoes_medicas && <p className="text-sm">{criancaDet.observacoes_medicas}</p>}
+                        {criancaDet.tem_alergia && <p className="text-sm">Alergia: {criancaDet.alergia_qual || 'sim'}</p>}
+                        {criancaDet.tem_espectro && <p className="text-sm">Espectro: {criancaDet.espectro_qual || 'sim'}</p>}
+                        {criancaDet.tem_limitacao_fisica && <p className="text-sm">Limitação física: {criancaDet.limitacao_fisica_qual || 'sim'}</p>}
+                      </div>
+                    )}
+
+                    {                            }
+                    <div>
+                      <div className="text-[11px] uppercase tracking-wide text-muted-foreground mb-2">Responsáveis</div>
+                      {!(criancaDet.responsaveis && criancaDet.responsaveis.length) ? (
+                        <p className="text-sm text-muted-foreground">Sem responsável cadastrado.</p>
+                      ) : (
+                        <div className="space-y-2">
+                          {criancaDet.responsaveis.map(r => {
+                            const tel = digitsTel(r.membro?.telefone);
+                            return (
+                              <div key={r.id} className="rounded-lg border p-3">
+                                <div className="flex items-center justify-between gap-2 flex-wrap">
+                                  <div className="min-w-0">
+                                    <p className="font-medium truncate">{r.membro?.nome || '—'}</p>
+                                    <p className="text-xs text-muted-foreground capitalize">
+                                      {r.parentesco || 'responsável'}
+                                      {r.autorizado_buscar && ' · pode buscar'}
+                                      {r.contato_emergencia && ' · emergência'}
+                                    </p>
+                                    {r.membro?.telefone && <p className="text-sm mt-0.5">{r.membro.telefone}</p>}
+                                  </div>
+                                  {tel && (
+                                    <div className="flex gap-2 shrink-0">
+                                      <a href={`tel:+${tel}`} className="inline-flex items-center justify-center h-9 w-9 rounded-full bg-muted hover:bg-accent" title="Ligar">
+                                        <Phone className="h-4 w-4" />
+                                      </a>
+                                      {
+
+                                                                                                         }
+                                      <a href={`https://wa.me/${tel}`} target="_blank" rel="noreferrer" className="inline-flex items-center justify-center h-9 w-9 rounded-full bg-emerald-500 text-white hover:bg-emerald-600" title="WhatsApp">
+                                        <MessageCircle className="h-4 w-4" />
+                                      </a>
+                                    </div>
+                                  )}
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+
+                    {                                      }
+                    {criancaSelCheckin && (
+                      criancaSelCheckin.checkout_at ? (
+                        <div className="rounded-lg border bg-muted/40 p-3 space-y-2 text-center">
+                          <p className="text-sm text-muted-foreground">Esta criança já saiu (check-out feito).</p>
+                          <p className="text-xs text-muted-foreground">Foi sem querer? Refaça o check-in:</p>
+                          <Button variant="outline" className="w-full" disabled={fazendoCheckout} onClick={desfazerCheckoutPainel}>
+                            {fazendoCheckout ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <RefreshCw className="h-4 w-4 mr-1" />}
+                            Fazer check-in de novo
+                          </Button>
+                        </div>
+                      ) : (
+                        <div>
+                          <div className="text-[11px] uppercase tracking-wide text-muted-foreground mb-2">Fazer check-out</div>
+                          <Button className="w-full bg-pink-600 hover:bg-pink-700 text-white h-auto py-3"
+                            disabled={fazendoCheckout} onClick={fazerCheckoutPainel}>
+                            {fazendoCheckout ? <Loader2 className="h-5 w-5 mr-2 animate-spin" /> : <CheckCircle2 className="h-5 w-5 mr-2" />}
+                            Fazer check-out
+                          </Button>
+                          <p className="text-xs text-muted-foreground mt-2">Confira com quem a criança está saindo antes de confirmar.</p>
+                        </div>
+                      )
+                    )}
+                  </div>
+                )}
+              </div>
+            </>
+          ) : (
+
+            <>
+              <DialogHeader className="p-4 pb-2 border-b">
+                <DialogTitle className="flex items-center gap-2">
+                  <span className="h-3 w-3 rounded-full" style={{ background: salaDetalhe?.sala_cor || '#888' }} />
+                  {salaDetalhe?.sala_nome}
+                  <Badge variant="secondary" className="ml-1">
+                    {salaDetalhe?.criancas_presentes} presente{salaDetalhe?.criancas_presentes === 1 ? '' : 's'}
+                  </Badge>
+                </DialogTitle>
+              </DialogHeader>
+              <div className="flex-1 overflow-y-auto min-h-0 p-4">
+                {carregandoSala ? (
+                  <div className="flex justify-center py-8"><Loader2 className="h-6 w-6 animate-spin text-pink-500" /></div>
+                ) : criancasNaSala.length === 0 ? (
+                  <p className="text-center text-muted-foreground py-6">Sem check-ins nessa sala ainda.</p>
+                ) : (
+                  <div className="space-y-2">
+                    {criancasNaSala.map(c => {
+                      const ehDecisaoMarcada = c.fez_decisao_jesus;
+                      const sequenciaAtual = ehDecisaoMarcada ? (c.total_decisoes_historico || 1) : (c.total_decisoes_historico || 0) + 1;
+                      return (
+                        <div
+                          key={c.id}
+                          className={`flex items-center gap-3 p-3 rounded-lg border ${
+                            ehDecisaoMarcada ? 'bg-emerald-50 dark:bg-emerald-950/30 border-emerald-300 dark:border-emerald-800' : 'bg-card'
+                          } ${c.checkout_at ? 'opacity-60' : ''}`}
+                        >
+                          {!c.checkout_at && (
+                            <input
+                              type="checkbox"
+                              className="h-5 w-5 shrink-0 accent-pink-600"
+                              checked={selCheckout.has(c.id)}
+                              onChange={() => toggleSel(c.id)}
+                              aria-label={`Selecionar ${c.crianca.nome} pra check-out`}
+                            />
+                          )}
+                          <button className="flex items-center gap-3 flex-1 min-w-0 text-left" onClick={() => { setCriancaSelCheckin(c); abrirCrianca(c.crianca_id); }}>
+                            {c.crianca.foto_url ? (
+                              <img src={c.crianca.foto_url} alt="" className="h-10 w-10 rounded-full object-cover" />
+                            ) : (
+                              <div className="h-10 w-10 rounded-full bg-pink-100 dark:bg-pink-900/40 flex items-center justify-center">
+                                <Baby className="h-5 w-5 text-pink-500" />
+                              </div>
+                            )}
+                            <div className="flex-1 min-w-0">
+                              <div className="flex items-center gap-2 flex-wrap">
+                                <span className="font-medium">{c.crianca.nome}</span>
+                                <span className="text-xs text-muted-foreground">{c.crianca.idade_label} · cod {c.codigo_seguranca}</span>
+                                {c.checkout_at && <Badge variant="outline" className="text-xs">saiu</Badge>}
+                                {c.crianca.observacoes_medicas && <AlertTriangle className="h-3 w-3 text-amber-600" aria-label={c.crianca.observacoes_medicas} />}
+                              </div>
+                              <div className="text-xs text-muted-foreground truncate">
+                                Trazida por {c.responsavel_checkin_nome} · toque pra ver contato
+                              </div>
+                            </div>
+                          </button>
+
+                          {podeMarcarDecisao && !c.checkout_at && (
+                            <Button
+                              size="sm"
+                              variant={ehDecisaoMarcada ? 'default' : 'outline'}
+                              disabled={!!salvandoDecisao}
+                              onClick={() => toggleDecisao(c)}
+                              className={ehDecisaoMarcada ? 'bg-emerald-600 hover:bg-emerald-700 text-white shrink-0' : 'shrink-0'}
+                            >
+                              {salvandoDecisao === c.id ? (
+                                <Loader2 className="h-4 w-4 animate-spin" />
+                              ) : (
+                                <>
+                                  <Heart className={`h-4 w-4 sm:mr-1 ${ehDecisaoMarcada ? 'fill-white' : ''}`} />
+                                  <span className="hidden sm:inline">
+                                    {ehDecisaoMarcada ? `Sim · ${sequenciaAtual}ª` : c.total_decisoes_historico > 0 ? `Marcar (${c.total_decisoes_historico + 1}ª)` : 'Decisão'}
+                                  </span>
+                                </>
+                              )}
+                            </Button>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+              {                                }
+              {criancasNaSala.some(c => !c.checkout_at) && (
+                <div className="border-t p-3 flex items-center gap-2 bg-card">
+                  {(() => {
+                    const presentes = criancasNaSala.filter(c => !c.checkout_at);
+                    const todosSel = presentes.length > 0 && presentes.every(c => selCheckout.has(c.id));
+                    return (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="shrink-0"
+                        onClick={() => setSelCheckout(todosSel ? new Set() : new Set(presentes.map(c => c.id)))}
+                      >
+                        {todosSel ? 'Limpar' : 'Selecionar todos'}
+                      </Button>
+                    );
+                  })()}
+                  <Button
+                    className="flex-1 bg-pink-600 hover:bg-pink-700"
+                    disabled={selCheckout.size === 0 || checkoutLote}
+                    onClick={fazerCheckoutSelecionados}
+                  >
+                    {checkoutLote ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <CheckCircle2 className="h-4 w-4 mr-2" />}
+                    Fazer check-out{selCheckout.size > 0 ? ` (${selCheckout.size})` : ''}
+                  </Button>
+                </div>
+              )}
+            </>
+          )}
+        </DialogContent>
+      </Dialog>
+    </div>
+  );
+}
+
+
+
+
+
+type ConfPager = {
+  pager_numero: string;
+  culto: string | null;
+  criancas: string[];
+  responsavel_nome: string | null;
+  todos_sairam: boolean;
+  devolvido_at: string | null;
+  checkin_ids: string[];
+};
+type ConfCulto = { culto_id: string; nome: string; data: string; tem_pager: boolean };
+function ConferenciaPagers() {
+  const [cultos, setCultos] = useState<ConfCulto[]>([]);
+  const [cultoId, setCultoId] = useState<string>('');
+  const [lista, setLista] = useState<ConfPager[]>([]);
+  const [resumo, setResumo] = useState<{ total: number; nao_devolvidos: number; foram_pra_casa: number } | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [salvando, setSalvando] = useState<string | null>(null);
+
+  const fmtData = (d: string) => { const [y, m, dd] = String(d).slice(0, 10).split('-'); return `${dd}/${m}/${y?.slice(2)}`; };
+  const labelCulto = (c: ConfCulto) => `${c.nome || 'Culto'} · ${fmtData(c.data)}`;
+
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const cs = (await totemKids.pagersCultos()) as ConfCulto[];
+        setCultos(cs || []);
+        if (cs && cs.length) setCultoId((prev) => prev || cs[0].culto_id);
+      } catch (e: any) { toast.error(e?.message || 'Erro ao listar cultos'); }
+    })();
+  }, []);
+
+  async function carregar() {
+    if (!cultoId) { setLista([]); setResumo(null); return; }
+    setLoading(true);
+    try {
+      const r = await totemKids.pagersConferencia({ culto_id: cultoId });
+      setLista(r?.lista || []);
+      setResumo(r?.resumo || null);
+    } catch (e: any) { toast.error(e?.message || 'Erro ao carregar pagers'); }
+    setLoading(false);
+  }
+  useEffect(() => { carregar(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [cultoId]);
+
+  async function marcar(g: ConfPager, devolvido: boolean) {
+    if (!g.checkin_ids.length) return;
+    setSalvando(g.pager_numero);
+    try {
+
+
+      const r: any = await totemKids.checkin.pagerDevolvido(g.checkin_ids[0], devolvido);
+      if (devolvido && r?.baixados > 0) {
+        toast.success(`Pager ${g.pager_numero} devolvido · check-out de ${r.baixados} criança(s) registrado`);
+      }
+      await carregar();
+    } catch (e: any) { toast.error(e?.message || 'Erro ao registrar devolução'); }
+    setSalvando(null);
+  }
+
+  return (
+    <div className="rounded-xl border bg-card p-3 space-y-2">
+      <div className="flex items-center justify-between gap-2 flex-wrap">
+        <div className="text-[11px] uppercase tracking-wide text-muted-foreground flex items-center gap-1.5">
+          <BellRing className="h-3.5 w-3.5" /> Conferência de pagers
+        </div>
+        <div className="flex items-center gap-2">
+          <select value={cultoId} onChange={(e) => setCultoId(e.target.value)}
+            className="h-7 rounded-md border bg-background px-2 text-xs max-w-[220px]">
+            {cultos.length === 0 && <option value="">Sem cultos</option>}
+            {cultos.map((c) => (
+              <option key={c.culto_id} value={c.culto_id}>{labelCulto(c)}{c.tem_pager ? '' : ' (sem pager)'}</option>
+            ))}
+          </select>
+          <Button size="sm" variant="ghost" className="h-7 px-2" onClick={carregar} disabled={loading}>
+            <RefreshCw className={`h-3.5 w-3.5 ${loading ? 'animate-spin' : ''}`} />
+          </Button>
+        </div>
+      </div>
+
+      {resumo && resumo.total > 0 && (
+        <div className="flex flex-wrap gap-3 text-xs">
+          <span className="text-muted-foreground">{resumo.total} pager(s) no culto</span>
+          {resumo.nao_devolvidos > 0 && <span className="text-amber-600 font-medium">{resumo.nao_devolvidos} não devolvido(s)</span>}
+          {resumo.foram_pra_casa > 0 && <span className="text-red-600 font-semibold">{resumo.foram_pra_casa} foi(ram) pra casa (saiu sem devolver)</span>}
+        </div>
+      )}
+
+      {loading ? (
+        <div className="py-4 text-center"><Loader2 className="h-4 w-4 animate-spin inline text-muted-foreground" /></div>
+      ) : lista.length === 0 ? (
+        <div className="text-xs text-muted-foreground">Nenhum pager entregue neste culto.</div>
+      ) : (
+        <div className="flex flex-col gap-1.5">
+          {lista.map((g) => {
+            const foiPraCasa = !g.devolvido_at && g.todos_sairam;
+            return (
+              <div key={g.pager_numero}
+                className={`flex items-center gap-2 text-sm rounded-md px-2 py-1.5 border ${foiPraCasa ? 'border-red-300 dark:border-red-800 bg-red-50 dark:bg-red-950/30' : 'border-transparent'}`}>
+                <span className="shrink-0 inline-flex items-center justify-center min-w-[2.2rem] h-7 px-2 rounded-md bg-amber-600 text-white font-mono font-bold">{g.pager_numero}</span>
+                <div className="min-w-0 flex-1">
+                  <div className="font-medium truncate">{g.criancas.join(', ')}</div>
+                  <div className="text-[11px] text-muted-foreground truncate">
+                    {g.culto || 'culto —'}
+                    {g.todos_sairam ? ' · já saiu' : ' · na sala'}
+                    {g.responsavel_nome ? ` · ${g.responsavel_nome}` : ''}
+                  </div>
+                </div>
+                {g.devolvido_at ? (
+                  <button type="button" onClick={() => marcar(g, false)} disabled={salvando === g.pager_numero}
+                    className="shrink-0 inline-flex items-center gap-1 text-xs text-emerald-600 font-medium"
+                    title="Devolvido — clique pra desfazer a marcação (não desfaz o check-out; pra isso use o reabrir da ficha)">
+                    <CheckCircle2 className="h-4 w-4" /> Devolvido
+                  </button>
+                ) : (
+                  <Button size="sm" variant={foiPraCasa ? 'default' : 'outline'} className="h-7 shrink-0"
+                    title="Marca a devolução E dá baixa (check-out) na família — libera o número pro próximo"
+                    onClick={() => marcar(g, true)} disabled={salvando === g.pager_numero}>
+                    {salvando === g.pager_numero ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : 'Devolvido'}
+                  </Button>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}

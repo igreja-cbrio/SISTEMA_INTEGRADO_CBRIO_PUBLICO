@@ -1,0 +1,1817 @@
+import { useEffect, useMemo, useState } from 'react';
+import { ModuleHeader } from '../components/layout/ModuleHeader';
+import { useNavigate } from 'react-router-dom';
+import { useAuth } from '../contexts/AuthContext';
+import { nps as api } from '../api';
+import { DatePicker } from '@/components/ui/date-picker';
+import { toast } from 'sonner';
+import QrLinkDialog from '../components/QrLinkDialog';
+import {
+  BarChart3, BrainCircuit, Check, Copy, GripVertical, Link2, Loader2, MessageSquare, Minus, Pencil, Plus, QrCode, Search, Send, Sparkles, Trash2, TrendingDown, TrendingUp, Upload, Users, X
+} from 'lucide-react';
+
+const C = {
+  card: 'var(--cbrio-card)', text: 'var(--cbrio-text)',
+  t2: 'var(--cbrio-text2)', t3: 'var(--cbrio-text3)',
+  border: 'var(--cbrio-border)', inputBg: 'var(--cbrio-input-bg)',
+  modalBg: 'var(--cbrio-modal-bg)', overlay: 'var(--cbrio-overlay)',
+  primary: '#00B39D', primaryBg: '#e6f7f5',
+  green: '#10b981', red: '#ef4444', amber: '#f59e0b', blue: '#3b82f6',
+  cyan: '#06b6d4', cyanBg: '#cffafe',
+};
+
+const VALORES = [
+  { id: 'seguir',       label: 'Seguir Jesus', color: '#8b5cf6' },
+  { id: 'conectar',     label: 'Conectar',     color: '#3b82f6' },
+  { id: 'investir',     label: 'Investir Tempo', color: '#10b981' },
+  { id: 'servir',       label: 'Servir',       color: '#f59e0b' },
+  { id: 'generosidade', label: 'Generosidade', color: '#ec4899' },
+];
+
+const CONTEXTOS_KPI = [
+  { id: 'nps_geral',       label: 'NPS Geral' },
+  { id: 'nps_next',        label: 'NPS NEXT' },
+  { id: 'nps_lideres',     label: 'NPS Líderes' },
+  { id: 'nps_voluntarios', label: 'NPS Voluntários' },
+  { id: 'nps_culto',       label: 'NPS de Culto' },
+];
+
+
+
+
+const AREAS_NPS = [
+  { grupo: 'Geral',         opcoes: [{ id: 'geral', label: 'Geral / Cross-área' }] },
+  { grupo: 'Áreas de Culto', opcoes: [
+    { id: 'kids',         label: 'CBKids' },
+    { id: 'ami',          label: 'AMI' },
+    { id: 'bridge',       label: 'Bridge' },
+    { id: 'sede',         label: 'Sede' },
+    { id: 'online',       label: 'Online' },
+  ]},
+  { grupo: 'Ministerial',   opcoes: [
+    { id: 'cuidados',     label: 'Cuidados' },
+    { id: 'grupos',       label: 'Grupos' },
+    { id: 'integracao',   label: 'Integração' },
+    { id: 'next',         label: 'NEXT' },
+    { id: 'voluntariado', label: 'Voluntariado' },
+    { id: 'generosidade', label: 'Generosidade' },
+  ]},
+  { grupo: 'Operacional',   opcoes: [
+    { id: 'producao',     label: 'Produção' },
+    { id: 'adoracao',     label: 'Adoração' },
+    { id: 'marketing',    label: 'Marketing' },
+    { id: 'reserva_espaco', label: 'Reserva de Espaço' },
+    { id: 'cozinha',      label: 'Cozinha' },
+    { id: 'manutencao',   label: 'Manutenção' },
+    { id: 'logistica_estoque', label: 'Logística · Estoque' },
+    { id: 'logistica_compras', label: 'Logística · Compras' },
+    { id: 'rh',           label: 'Recursos Humanos' },
+    { id: 'ti',           label: 'TI' },
+    { id: 'financeiro',   label: 'Financeiro' },
+  ]},
+  { grupo: 'Institucional', opcoes: [
+    { id: 'jornada',      label: 'Jornada (cross-cutting)' },
+    { id: 'igreja',       label: 'Igreja (institucional)' },
+  ]},
+];
+
+const AREA_LABEL = (() => {
+  const map = {};
+  AREAS_NPS.forEach(g => g.opcoes.forEach(o => { map[o.id] = o.label; }));
+  return map;
+})();
+
+
+
+const normArea = (s) => String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().trim();
+
+const STATUS_MAP = {
+  rascunho:  { label: 'Rascunho',  color: '#6b7280', bg: '#6b728020' },
+  ativa:     { label: 'Ativa',     color: C.green,   bg: '#10b98120' },
+  encerrada: { label: 'Encerrada', color: C.amber,   bg: '#f59e0b20' },
+  arquivada: { label: 'Arquivada', color: '#6b7280', bg: '#6b728020' },
+};
+
+const inp = {
+  width: '100%', padding: '10px 12px', borderRadius: 8,
+  border: `1px solid ${C.border}`, background: C.inputBg,
+  color: C.text, fontSize: 14, boxSizing: 'border-box', fontFamily: 'inherit',
+};
+
+function Btn({ children, onClick, variant = 'primary', disabled, size = 'md', style: sx, type }) {
+  const padding = size === 'sm' ? '6px 12px' : '9px 18px';
+  const fontSize = size === 'sm' ? 12 : 13;
+  const base = { padding, borderRadius: 8, fontSize, fontWeight: 600, cursor: disabled ? 'not-allowed' : 'pointer', border: 'none', opacity: disabled ? 0.5 : 1, display: 'inline-flex', alignItems: 'center', gap: 6 };
+  const v = {
+    primary: { background: C.primary, color: '#fff' },
+    ghost:   { background: 'transparent', color: C.t2, border: `1px solid ${C.border}` },
+    danger:  { background: C.red, color: '#fff' },
+    cyan:    { background: C.cyan, color: '#fff' },
+  };
+  return <button type={type || 'button'} onClick={onClick} disabled={disabled} style={{ ...base, ...v[variant], ...sx }}>{children}</button>;
+}
+
+function FieldRow({ label, children, hint }) {
+  return (
+    <div>
+      <label style={{ display: 'block', fontSize: 12, fontWeight: 600, color: C.t2, marginBottom: 6 }}>{label}</label>
+      {children}
+      {hint && <p style={{ fontSize: 11, color: C.t3, margin: '4px 0 0' }}>{hint}</p>}
+    </div>
+  );
+}
+
+function Modal({ open, onClose, title, children, footer, width = 640 }) {
+  if (!open) return null;
+  return (
+    <div onClick={onClose} style={{ position: 'fixed', inset: 0, zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center', background: C.overlay, padding: 16 }}>
+      {
+                                                                                      }
+      <div onClick={e => e.stopPropagation()} style={{ background: 'var(--panel)', WebkitBackdropFilter: 'blur(18px) saturate(140%)', backdropFilter: 'blur(18px) saturate(140%)', border: '1px solid var(--hairline)', borderRadius: 16, width, maxWidth: '100%', maxHeight: '90vh', display: 'flex', flexDirection: 'column', boxShadow: 'var(--shadow-hover), var(--hi)' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '22px 24px 14px', flex: 'none' }}>
+          <h2 style={{ margin: 0, fontSize: 18, color: C.text, fontWeight: 700 }}>{title}</h2>
+          <button onClick={onClose} style={{ background: 'none', border: 'none', fontSize: 22, cursor: 'pointer', color: C.t3, lineHeight: 1 }}>×</button>
+        </div>
+        <div style={{ padding: '0 24px 20px', overflowY: 'auto', flex: 1 }}>{children}</div>
+        {footer && <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, padding: '14px 24px', borderTop: `1px solid ${C.border}`, flex: 'none' }}>{footer}</div>}
+      </div>
+    </div>
+  );
+}
+
+function valorMeta(id) {
+  if (!id) return null;
+  return VALORES.find(v => v.id === id) || { label: id, color: '#6b7280' };
+}
+
+function NpsBadge({ status }) {
+  const s = STATUS_MAP[status] || STATUS_MAP.ativa;
+  return <span style={{ padding: '2px 10px', borderRadius: 12, fontSize: 11, fontWeight: 600, color: s.color, background: s.bg }}>{s.label}</span>;
+}
+
+function ScoreCard({ stats }) {
+  if (!stats || !stats.total_respostas) {
+    return <div style={{ color: C.t3, fontSize: 12 }}>Sem respostas</div>;
+  }
+  const nps = Number(stats.nps_score) || 0;
+  const icon = nps >= 50 ? <TrendingUp size={14} /> : nps >= 0 ? <Minus size={14} /> : <TrendingDown size={14} />;
+  const cor = nps >= 50 ? C.green : nps >= 0 ? C.amber : C.red;
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 4, color: cor, fontWeight: 700, fontSize: 18 }}>
+        {icon}{nps.toFixed(0)}
+      </div>
+      <div style={{ fontSize: 11, color: C.t3 }}>
+        {stats.total_respostas} resp. · média {Number(stats.score_medio).toFixed(1)}
+      </div>
+    </div>
+  );
+}
+
+
+export default function Nps() {
+  const { isAdmin, isDiretor, getAccessLevel } = useAuth();
+
+  const canWrite = isAdmin || isDiretor || getAccessLevel(['nps']) >= 3;
+
+  const canCreate = true;
+  const navigate = useNavigate();
+
+  const [lista, setLista] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [tab, setTab] = useState('ativas');
+  const [search, setSearch] = useState('');
+  const [filtroArea, setFiltroArea] = useState('todas');
+  const [showCreate, setShowCreate] = useState(false);
+  const [showImport, setShowImport] = useState(false);
+  const [detalheId, setDetalheId] = useState(null);
+
+  async function load() {
+    setLoading(true);
+    try {
+      const data = await api.list();
+      setLista(data || []);
+    } catch (e) {
+      toast.error(e.message || 'Erro ao carregar');
+    }
+    setLoading(false);
+  }
+
+  useEffect(() => { load(); }, []);
+
+  const filtradas = useMemo(() => {
+    const term = search.trim().toLowerCase();
+    return (lista || []).filter(p => {
+      if (tab === 'ativas' && p.status !== 'ativa') return false;
+      if (tab === 'encerradas' && !['encerrada', 'arquivada'].includes(p.status)) return false;
+      if (filtroArea !== 'todas' && p.area !== filtroArea) return false;
+      if (term && !`${p.titulo} ${p.objetivo}`.toLowerCase().includes(term)) return false;
+      return true;
+    });
+  }, [lista, tab, search, filtroArea]);
+
+  return (
+    <div style={{ maxWidth: 1400, margin: '0 auto', padding: '24px' }}>
+      <ModuleHeader
+        icon={MessageSquare}
+        title="NPS — Pesquisas com IA"
+        accent={C.cyan}
+        subtitle="Crie pesquisas para os 5 valores · IA gera as perguntas a partir do que você quer medir · respostas analisadas automaticamente e ligadas aos KPIs."
+        actions={canCreate ? (
+          <div style={{ display: 'flex', gap: 8 }}>
+            <Btn onClick={() => setShowImport(true)} variant="ghost"><Link2 size={16} />Importar do Forms</Btn>
+            <Btn onClick={() => setShowCreate(true)} variant="cyan"><Plus size={16} />Nova NPS</Btn>
+          </div>
+        ) : undefined}
+      />
+
+      {                  }
+      <div style={{ display: 'flex', gap: 12, alignItems: 'center', marginBottom: 16, flexWrap: 'wrap' }}>
+        <div style={{ display: 'flex', gap: 4, padding: 4, background: C.card, borderRadius: 10, border: `1px solid ${C.border}` }}>
+          {['ativas', 'encerradas', 'todas'].map(t => (
+            <button key={t} onClick={() => setTab(t)}
+              style={{ padding: '6px 16px', borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: 'pointer', border: 'none', background: tab === t ? C.cyan : 'transparent', color: tab === t ? '#fff' : C.t2, textTransform: 'capitalize' }}>
+              {t}
+            </button>
+          ))}
+        </div>
+        <select value={filtroArea} onChange={e => setFiltroArea(e.target.value)}
+          style={{ ...inp, width: 'auto', minWidth: 180 }}>
+          <option value="todas">Todas as áreas</option>
+          {AREAS_NPS.map(grp => (
+            <optgroup key={grp.grupo} label={grp.grupo}>
+              {grp.opcoes.map(o => <option key={o.id} value={o.id}>{o.label}</option>)}
+            </optgroup>
+          ))}
+        </select>
+        <div style={{ flex: 1, minWidth: 240, position: 'relative' }}>
+          <Search size={14} style={{ position: 'absolute', left: 12, top: '50%', transform: 'translateY(-50%)', color: C.t3 }} />
+          <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Buscar pesquisa..."
+            style={{ ...inp, paddingLeft: 36 }} />
+        </div>
+      </div>
+
+      {           }
+      {loading ? (
+        <div style={{ textAlign: 'center', padding: 60, color: C.t3 }}>
+          <Loader2 size={28} className="animate-spin" style={{ display: 'inline-block' }} />
+        </div>
+      ) : filtradas.length === 0 ? (
+        <div style={{ textAlign: 'center', padding: 60, color: C.t3, background: C.card, borderRadius: 12, border: `1px dashed ${C.border}` }}>
+          <MessageSquare size={36} style={{ opacity: 0.4, marginBottom: 12 }} />
+          <p style={{ margin: 0, fontSize: 14 }}>Nenhuma pesquisa encontrada</p>
+          {canCreate && tab !== 'encerradas' && (
+            <Btn variant="ghost" onClick={() => setShowCreate(true)} style={{ marginTop: 12 }}><Plus size={14} />Criar primeira NPS</Btn>
+          )}
+        </div>
+      ) : (
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(340px, 1fr))', gap: 16 }}>
+          {filtradas.map(p => {
+            const v = valorMeta(p.valor);
+            const accentColor = v?.color || C.primary;
+            return (
+              <div key={p.id} onClick={() => setDetalheId(p.id)}
+                style={{ position: 'relative', overflow: 'hidden', background: 'var(--panel)', WebkitBackdropFilter: 'blur(14px) saturate(140%)', backdropFilter: 'blur(14px) saturate(140%)', border: '1px solid var(--hairline)', boxShadow: 'var(--shadow), var(--hi)', borderRadius: 16, padding: 18, cursor: 'pointer', transition: 'transform .12s' }}
+                onMouseEnter={e => e.currentTarget.style.transform = 'translateY(-2px)'}
+                onMouseLeave={e => e.currentTarget.style.transform = 'translateY(0)'}>
+                <div style={{ position: 'absolute', inset: 0, background: `linear-gradient(135deg, ${accentColor}22, transparent 58%)`, pointerEvents: 'none' }} />
+                <div style={{ position: 'absolute', top: 0, left: 0, right: 0, height: 3, background: accentColor, opacity: 0.9 }} />
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 8, marginBottom: 10, position: 'relative', zIndex: 1 }}>
+                  <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                    {v && (
+                      <span style={{ fontSize: 11, fontWeight: 700, color: v.color, padding: '2px 8px', borderRadius: 10, background: `${v.color}15` }}>{v.label}</span>
+                    )}
+                    {p.area && p.area !== 'geral' && (
+                      <span style={{ fontSize: 11, fontWeight: 600, color: C.t2, padding: '2px 8px', borderRadius: 10, background: C.border }}>{AREA_LABEL[p.area] || p.area}</span>
+                    )}
+                  </div>
+                  <NpsBadge status={p.status} />
+                </div>
+                <h3 style={{ position: 'relative', zIndex: 1, margin: '0 0 6px', fontSize: 15, fontWeight: 700, color: C.text, lineHeight: 1.3 }}>{p.titulo}</h3>
+                <p style={{ position: 'relative', zIndex: 1, margin: '0 0 14px', fontSize: 12, color: C.t2, lineHeight: 1.4, display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>{p.objetivo}</p>
+                <div style={{ position: 'relative', zIndex: 1 }}><ScoreCard stats={p.stats} /></div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {showCreate && (
+        <CreateModal
+          onClose={() => setShowCreate(false)}
+          onCreated={() => { setShowCreate(false); load(); }}
+        />
+      )}
+
+      {showImport && (
+        <ImportarFormModal
+          onClose={() => setShowImport(false)}
+          onCreated={() => { setShowImport(false); load(); }}
+        />
+      )}
+
+      {detalheId && (
+        <DetalheModal
+          id={detalheId}
+          onClose={() => setDetalheId(null)}
+          onChanged={load}
+          canWrite={canWrite}
+          onResponder={(id) => navigate(`/nps/${id}/responder`)}
+        />
+      )}
+    </div>
+  );
+}
+
+
+
+const TIPO_LABEL_IMPORT = {
+  texto_curto: 'Texto curto', texto_longo: 'Parágrafo', escala_5: 'Escala',
+  opcao_unica: 'Múltipla escolha', multipla: 'Caixas de seleção', secao: 'Seção',
+};
+
+function ImportarFormModal({ onClose, onCreated }) {
+  const { isAdmin, isDiretor, userAreas } = useAuth();
+  const restringeArea = !isAdmin && !isDiretor;
+  const minhasAreas = (userAreas || []).map(normArea).filter(Boolean);
+  const areaInicial = restringeArea ? (minhasAreas[0] || '') : 'geral';
+  const gruposArea = restringeArea
+    ? AREAS_NPS.map(g => ({ ...g, opcoes: g.opcoes.filter(o => minhasAreas.includes(o.id)) })).filter(g => g.opcoes.length)
+    : AREAS_NPS;
+
+  const [url, setUrl] = useState('');
+  const [lendo, setLendo] = useState(false);
+  const [form, setForm] = useState(null);
+  const [titulo, setTitulo] = useState('');
+  const [valor, setValor] = useState(null);
+  const [area, setArea] = useState(areaInicial);
+  const [contextoKpi, setContextoKpi] = useState('nps_geral');
+  const [permitePublico, setPermitePublico] = useState(true);
+  const [dataFim, setDataFim] = useState('');
+  const [notaId, setNotaId] = useState('');
+  const [escalaSel, setEscalaSel] = useState('10');
+  const [salvando, setSalvando] = useState(false);
+
+  const areaEspecifica = area && area.toLowerCase() !== 'geral';
+  const escopoOk = !!valor || areaEspecifica;
+
+
+  const escalaDoCandidato = (cands, id) => {
+    const c = (cands || []).find(x => x.id === id);
+    return c && c.max <= 5 ? '5' : '10';
+  };
+
+  async function ler() {
+    if (!url.trim()) return toast.error('Cole o link do Google Forms.');
+    setLendo(true);
+    try {
+      const f = await api.importarForm(url.trim());
+      setForm(f);
+      setTitulo(f.titulo || 'Pesquisa importada');
+      const primeiro = f.candidatos_nota?.[0]?.id || '';
+      setNotaId(primeiro);
+      setEscalaSel(escalaDoCandidato(f.candidatos_nota, primeiro));
+    } catch (e) { toast.error(e.message || 'Erro ao ler o formulário'); }
+    setLendo(false);
+  }
+
+  async function criar() {
+    if (!escopoOk) return toast.error('Escolha um valor ou uma área específica (não "Geral").');
+    if (!titulo.trim()) return toast.error('Defina um título.');
+    setSalvando(true);
+    try {
+      const itens = form.itens || [];
+      const notaItem = notaId ? itens.find(i => i.id === notaId) : null;
+      const pergunta_nps = notaItem
+        ? { id: notaItem.id, tipo: 'nps', texto: notaItem.texto }
+        : { id: 'nps', tipo: 'nps', texto: 'De 0 a 10, o quanto você recomendaria a CBRio para um amigo ou familiar?' };
+
+      const perguntas_extras = itens
+        .filter(i => !notaItem || i.id !== notaItem.id)
+        .map(({ escala, ...rest }) => rest);
+
+
+      const escalaNota = escalaSel === '5' ? { min: 0, max: 5 } : { tipo: '0-10' };
+      pergunta_nps.max = escalaSel === '5' ? 5 : 10;
+      const mapa_textos = {};
+      itens.forEach(i => { mapa_textos[i.id] = i.texto; });
+
+      await api.create({
+        titulo: titulo.trim(),
+        valor,
+        area,
+        contexto_kpi: contextoKpi,
+        objetivo: form.descricao || titulo.trim(),
+        permite_publico: permitePublico,
+        data_fim: dataFim || null,
+        perguntas: { descricao_curta: form.descricao || null, pergunta_nps, perguntas_extras },
+        import_meta: {
+          fonte: 'google_forms', url: form.url,
+          nota: { pergunta_id: pergunta_nps.id, escala: escalaNota },
+          mapa_textos,
+        },
+      });
+      toast.success('Pesquisa importada e criada.');
+      onCreated();
+    } catch (e) { toast.error(e.message || 'Erro ao criar'); }
+    setSalvando(false);
+  }
+
+  return (
+    <Modal open onClose={onClose} title={form ? 'Revisar e criar' : 'Importar do Google Forms'} width={720}
+      footer={form ? (
+        <>
+          <Btn variant="ghost" onClick={() => setForm(null)}>Voltar</Btn>
+          <Btn variant="cyan" onClick={criar} disabled={salvando}>
+            {salvando ? <><Loader2 size={14} className="animate-spin" />Criando...</> : <><Send size={14} />Criar pesquisa</>}
+          </Btn>
+        </>
+      ) : (
+        <>
+          <Btn variant="ghost" onClick={onClose}>Cancelar</Btn>
+          <Btn variant="cyan" onClick={ler} disabled={lendo}>
+            {lendo ? <><Loader2 size={14} className="animate-spin" />Lendo...</> : <><Link2 size={14} />Ler perguntas</>}
+          </Btn>
+        </>
+      )}
+    >
+      {!form ? (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+          <p style={{ fontSize: 13, color: C.t2, margin: 0 }}>Cole o link público do Google Forms. Eu leio as perguntas e monto a pesquisa aqui — você confere e escolhe qual pergunta é a nota (0 a 10).</p>
+          <input value={url} onChange={e => setUrl(e.target.value)} placeholder="https://docs.google.com/forms/d/e/.../viewform" style={inp} />
+          <p style={{ fontSize: 11, color: C.t3, margin: 0 }}>O formulário precisa estar público (aceitando respostas, sem exigir login).</p>
+        </div>
+      ) : (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+          <FieldRow label="Título"><input value={titulo} onChange={e => setTitulo(e.target.value)} style={inp} /></FieldRow>
+          <FieldRow label="Valor da CBRio (opcional se escolher área)">
+            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+              <button type="button" onClick={() => setValor(null)} style={{ padding: '6px 12px', borderRadius: 8, fontSize: 12, fontWeight: 600, cursor: 'pointer', border: `1.5px solid ${valor === null ? C.primary : C.border}`, background: valor === null ? C.primaryBg : 'transparent', color: valor === null ? C.primary : C.t3 }}>Sem valor</button>
+              {VALORES.map(v => (
+                <button key={v.id} type="button" onClick={() => setValor(v.id)} style={{ padding: '6px 12px', borderRadius: 8, fontSize: 12, fontWeight: 600, cursor: 'pointer', border: `1.5px solid ${valor === v.id ? v.color : C.border}`, background: valor === v.id ? `${v.color}15` : 'transparent', color: valor === v.id ? v.color : C.t2 }}>{v.label}</button>
+              ))}
+            </div>
+          </FieldRow>
+          <FieldRow label="Área">
+            <select value={area} onChange={e => setArea(e.target.value)} style={inp}>
+              {gruposArea.map(g => <optgroup key={g.grupo} label={g.grupo}>{g.opcoes.map(o => <option key={o.id} value={o.id}>{o.label}</option>)}</optgroup>)}
+            </select>
+          </FieldRow>
+          <FieldRow label="Contexto do KPI">
+            <select value={contextoKpi} onChange={e => setContextoKpi(e.target.value)} style={inp}>
+              {CONTEXTOS_KPI.map(c => <option key={c.id} value={c.id}>{c.label}</option>)}
+            </select>
+          </FieldRow>
+          {!escopoOk && <p style={{ fontSize: 11, color: C.amber, margin: 0 }}>Escolha um valor OU uma área específica (diferente de "Geral").</p>}
+          <FieldRow label="Qual pergunta é a nota?" hint="Escalas 0–10 e 0–5 são aceitas; a nota é normalizada pra 0–10 (métrica do NPS).">
+            <select value={notaId} onChange={e => { setNotaId(e.target.value); setEscalaSel(escalaDoCandidato(form.candidatos_nota, e.target.value)); }} style={inp}>
+              {(form.candidatos_nota || []).map(c => <option key={c.id} value={c.id}>{c.texto} (escala {c.min}–{c.max})</option>)}
+              <option value="">+ Adicionar pergunta 0–10 padrão</option>
+            </select>
+          </FieldRow>
+          <FieldRow label="Escala da nota">
+            <div style={{ display: 'flex', gap: 6 }}>
+              {[['10', '0 a 10'], ['5', '0 a 5']].map(([v, l]) => (
+                <button key={v} type="button" onClick={() => setEscalaSel(v)}
+                  style={{ flex: 1, padding: '8px 12px', borderRadius: 8, fontSize: 13, fontWeight: 600, cursor: 'pointer', border: `1.5px solid ${escalaSel === v ? C.cyan : C.border}`, background: escalaSel === v ? C.cyanBg : 'transparent', color: escalaSel === v ? C.cyan : C.t3 }}>
+                  {l}
+                </button>
+              ))}
+            </div>
+          </FieldRow>
+          <div>
+            <label style={{ fontSize: 12, fontWeight: 600, color: C.t2 }}>Perguntas lidas ({form.itens.length})</label>
+            <div style={{ marginTop: 6, display: 'flex', flexDirection: 'column', gap: 6, maxHeight: 240, overflowY: 'auto' }}>
+              {form.itens.map(i => (
+                <div key={i.id} style={{ padding: '8px 10px', border: `1px solid ${C.border}`, borderRadius: 8, background: C.card }}>
+                  <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                    <span style={{ fontSize: 10, fontWeight: 700, color: C.cyan, background: C.cyanBg, padding: '1px 7px', borderRadius: 8 }}>{TIPO_LABEL_IMPORT[i.tipo] || i.tipo}</span>
+                    <span style={{ fontSize: 13, color: C.text }}>{i.texto}</span>
+                  </div>
+                  {i.opcoes?.length ? <div style={{ fontSize: 11, color: C.t3, marginTop: 3 }}>{i.opcoes.join(' · ')}</div> : null}
+                </div>
+              ))}
+            </div>
+          </div>
+          {form.avisos?.length ? <p style={{ fontSize: 11, color: C.amber, margin: 0 }}>{form.avisos.length} item(ns) não suportado(s) foram ignorados (ex.: grade, upload de arquivo).</p> : null}
+        </div>
+      )}
+    </Modal>
+  );
+}
+
+
+function ImportarRespostasModal({ pesquisaId, onClose, onImported }) {
+  const [file, setFile] = useState(null);
+  const [preview, setPreview] = useState(null);
+  const [notaColuna, setNotaColuna] = useState('');
+  const [carregando, setCarregando] = useState(false);
+  const [importando, setImportando] = useState(false);
+
+  async function onFile(e) {
+    const f = e.target.files?.[0];
+    e.target.value = '';
+    if (!f) return;
+    setFile(f); setPreview(null); setNotaColuna('');
+    setCarregando(true);
+    try {
+      const p = await api.importarRespostas(pesquisaId, f, { preview: true });
+      setPreview(p);
+      setNotaColuna(p.nota_coluna || '');
+    } catch (err) { toast.error(err.message || 'Erro ao ler a planilha'); }
+    setCarregando(false);
+  }
+
+  async function importar() {
+    if (!file) return;
+    setImportando(true);
+    try {
+      const r = await api.importarRespostas(pesquisaId, file, { notaColuna: notaColuna || undefined });
+      toast.success(`${r.inseridas} resposta(s) importada(s)${r.ignoradas ? ` · ${r.ignoradas} ignorada(s) sem nota` : ''}.`);
+      onImported();
+    } catch (err) { toast.error(err.message || 'Erro ao importar'); }
+    setImportando(false);
+  }
+
+  return (
+    <Modal open onClose={onClose} title="Importar respostas (planilha)" width={640}
+      footer={preview ? (
+        <>
+          <Btn variant="ghost" onClick={() => { setPreview(null); setFile(null); }}>Trocar arquivo</Btn>
+          <Btn variant="cyan" onClick={importar} disabled={importando || !preview.validas || (!preview.nota_ok && !notaColuna)}>
+            {importando ? <><Loader2 size={14} className="animate-spin" />Importando...</> : <><Upload size={14} />Importar {preview.validas} resposta(s)</>}
+          </Btn>
+        </>
+      ) : <Btn variant="ghost" onClick={onClose}>Fechar</Btn>}
+    >
+      {!preview ? (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+          <p style={{ fontSize: 13, color: C.t2, margin: 0 }}>Suba a planilha de respostas exportada do Google Forms (.xlsx ou .csv). Eu mapeio as colunas com as perguntas da pesquisa e converto a nota pra 0–10.</p>
+          <label style={{ ...inp, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 8, color: C.t2 }}>
+            <Upload size={16} /> {carregando ? 'Lendo planilha...' : 'Escolher planilha (.xlsx/.csv)'}
+            <input type="file" accept=".xlsx,.xls,.csv" style={{ display: 'none' }} onChange={onFile} disabled={carregando} />
+          </label>
+        </div>
+      ) : (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+          <div style={{ display: 'flex', gap: 14, fontSize: 13 }}>
+            <span><b>{preview.validas}</b> com nota</span>
+            <span style={{ color: C.t3 }}><b>{preview.ignoradas}</b> sem nota</span>
+            <span style={{ color: C.t3 }}>de {preview.total_linhas} linhas</span>
+          </div>
+          <FieldRow label="Coluna da nota (0–10)" hint="Se o automático não acertou, escolha a coluna certa.">
+            <select value={notaColuna} onChange={e => setNotaColuna(e.target.value)} style={inp}>
+              <option value="">{preview.nota_ok ? `Automático: ${preview.nota_coluna}` : '— escolher a coluna —'}</option>
+              {preview.mapeamento.filter(m => m.papel === 'pergunta').map((m, i) => <option key={i} value={m.coluna}>{m.coluna}</option>)}
+            </select>
+          </FieldRow>
+          <div>
+            <label style={{ fontSize: 12, fontWeight: 600, color: C.t2 }}>Mapeamento das colunas</label>
+            <div style={{ marginTop: 6, display: 'flex', flexDirection: 'column', gap: 4, maxHeight: 220, overflowY: 'auto' }}>
+              {preview.mapeamento.map((m, i) => (
+                <div key={i} style={{ display: 'flex', justifyContent: 'space-between', gap: 10, fontSize: 12, padding: '6px 8px', border: `1px solid ${C.border}`, borderRadius: 6 }}>
+                  <span style={{ color: C.text }}>{m.coluna}</span>
+                  <span style={{ color: m.eh_nota ? C.cyan : m.papel === 'sem_mapa' ? C.amber : C.t3, textAlign: 'right' }}>
+                    {m.eh_nota ? 'NOTA (0–10)' : m.papel === 'carimbo' ? 'data' : m.papel === 'email' ? 'e-mail' : m.papel === 'sem_mapa' ? 'sem correspondência' : m.pergunta}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
+          {preview.sem_mapa?.length ? <p style={{ fontSize: 11, color: C.amber, margin: 0 }}>{preview.sem_mapa.length} coluna(s) sem correspondência serão ignoradas.</p> : null}
+        </div>
+      )}
+    </Modal>
+  );
+}
+
+
+
+
+function RespostaCard({ r, perguntasMap }) {
+  const [aberto, setAberto] = useState(false);
+  const cor = r.score >= 9 ? C.green : r.score >= 7 ? C.amber : C.red;
+  const entries = Object.entries(r.respostas || {}).filter(([, v]) => v != null && v !== '' && !(Array.isArray(v) && v.length === 0));
+  const fmt = (v) => (Array.isArray(v) ? v.join(', ') : String(v));
+  return (
+    <div style={{ padding: 12, background: C.inputBg, borderRadius: 8, border: `1px solid ${C.border}`, borderLeft: `4px solid ${cor}` }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
+          <span style={{ fontWeight: 800, color: cor, fontSize: 18 }}>{r.score}</span>
+          <span style={{ fontSize: 11, color: C.t3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {r.origem === 'publico' ? (r.nome_publico || 'Anônimo') : 'Colaborador'}
+          </span>
+        </div>
+        <span style={{ fontSize: 10, color: C.t3, whiteSpace: 'nowrap' }}>{new Date(r.created_at).toLocaleDateString('pt-BR')}</span>
+      </div>
+      {r.comentario && <p style={{ margin: '6px 0 0', fontSize: 12, color: C.t2, lineHeight: 1.4 }}>{r.comentario}</p>}
+      {entries.length > 0 && (
+        <>
+          <button onClick={() => setAberto(v => !v)} style={{ marginTop: 6, fontSize: 11, color: C.cyan, background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}>
+            {aberto ? '▲ ocultar respostas' : `▼ ver ${entries.length} respostas`}
+          </button>
+          {aberto && (
+            <div style={{ marginTop: 6, paddingTop: 6, borderTop: `1px dashed ${C.border}`, display: 'flex', flexDirection: 'column', gap: 5 }}>
+              {entries.map(([k, val]) => (
+                <div key={k} style={{ fontSize: 11.5, color: C.t2, lineHeight: 1.4 }}>
+                  <span style={{ color: C.t3 }}>{perguntasMap[k] || k}:</span> <strong style={{ color: C.text, fontWeight: 600 }}>{fmt(val)}</strong>
+                </div>
+              ))}
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+function CreateModal({ onClose, onCreated }) {
+  const { isAdmin, isDiretor, userAreas } = useAuth();
+
+  const restringeArea = !isAdmin && !isDiretor;
+  const minhasAreas = (userAreas || []).map(normArea).filter(Boolean);
+  const gruposArea = restringeArea
+    ? AREAS_NPS.map(g => ({ ...g, opcoes: g.opcoes.filter(o => minhasAreas.includes(o.id)) })).filter(g => g.opcoes.length)
+    : AREAS_NPS;
+  const areaInicial = restringeArea ? (minhasAreas[0] || '') : 'geral';
+
+  const [step, setStep] = useState(1);
+  const [valor, setValor] = useState(null);
+  const [objetivo, setObjetivo] = useState('');
+  const [contextoKpi, setContextoKpi] = useState('nps_geral');
+  const [area, setArea] = useState(areaInicial);
+  const [permitePublico, setPermitePublico] = useState(true);
+  const [dataFim, setDataFim] = useState('');
+  const [modo, setModo] = useState('ia');
+  const [npsTexto, setNpsTexto] = useState('De 0 a 10, o quanto você recomendaria a CBRio para um amigo ou familiar?');
+  const [extras, setExtras] = useState([{ texto: '', tipo: 'texto_longo' }]);
+
+  const [gerando, setGerando] = useState(false);
+  const [perguntas, setPerguntas] = useState(null);
+  const [titulo, setTitulo] = useState('');
+  const [salvando, setSalvando] = useState(false);
+
+  const areaEspecifica = area && area.toLowerCase() !== 'geral';
+  const escopoOk = !!valor || areaEspecifica;
+
+  async function gerar() {
+    if (!escopoOk) {
+      toast.error('Escolha um valor da CBRio ou uma área específica (não "Geral").');
+      return;
+    }
+    if (objetivo.trim().length < 5) {
+      toast.error('Descreva melhor o que quer medir (mínimo 5 caracteres).');
+      return;
+    }
+    setGerando(true);
+    try {
+      const result = await api.gerarPerguntas({ valor, objetivo, contexto_kpi: contextoKpi, area });
+      setPerguntas(result);
+      const fallback = valor ? `NPS — ${valor}` : `NPS — ${area}`;
+      setTitulo(result.titulo_sugerido || fallback);
+      setStep(2);
+    } catch (e) {
+      toast.error(e.message || 'Erro ao gerar perguntas');
+    }
+    setGerando(false);
+  }
+
+  async function salvar() {
+    if (!titulo.trim()) return toast.error('Defina um título');
+    setSalvando(true);
+    try {
+      await api.create({
+        titulo: titulo.trim(),
+        valor,
+        objetivo: objetivo.trim(),
+        contexto_kpi: contextoKpi,
+        area,
+        permite_publico: permitePublico,
+        data_fim: dataFim || null,
+        perguntas,
+        ia_prompt: perguntas?._ia_prompt || null,
+      });
+      toast.success('Pesquisa criada e notificada para os colaboradores');
+      onCreated();
+    } catch (e) {
+      toast.error(e.message || 'Erro ao salvar');
+    }
+    setSalvando(false);
+  }
+
+  async function criarManual() {
+    if (!escopoOk) return toast.error('Escolha um valor da CBRio ou uma área específica (não "Geral").');
+    if (!titulo.trim()) return toast.error('Defina um título pra pesquisa.');
+    if (!npsTexto.trim()) return toast.error('Defina a pergunta principal (nota 0 a 10).');
+    const extrasLimpos = extras.filter(e => e.texto.trim());
+    setSalvando(true);
+    try {
+      await api.create({
+        titulo: titulo.trim(),
+        valor,
+        objetivo: objetivo.trim() || titulo.trim(),
+        contexto_kpi: contextoKpi,
+        area,
+        permite_publico: permitePublico,
+        data_fim: dataFim || null,
+        perguntas: {
+          descricao_curta: objetivo.trim() || null,
+          pergunta_nps: { tipo: 'nps', texto: npsTexto.trim() },
+          perguntas_extras: extrasLimpos.map((e, i) => ({ id: `q${i + 1}`, tipo: e.tipo, texto: e.texto.trim() })),
+        },
+      });
+      toast.success('Pesquisa criada e notificada para os colaboradores');
+      onCreated();
+    } catch (e) { toast.error(e.message || 'Erro ao salvar'); }
+    setSalvando(false);
+  }
+
+  return (
+    <Modal
+      open
+      onClose={onClose}
+      title={step === 1 ? 'Nova pesquisa NPS' : 'Revisar perguntas geradas pela IA'}
+      width={680}
+      footer={step === 1 ? (
+        <>
+          <Btn variant="ghost" onClick={onClose}>Cancelar</Btn>
+          {modo === 'manual' ? (
+            <Btn onClick={criarManual} disabled={salvando} variant="cyan">
+              {salvando ? <><Loader2 size={14} className="animate-spin" />Criando...</> : <><Send size={14} />Criar pesquisa</>}
+            </Btn>
+          ) : (
+            <Btn onClick={gerar} disabled={gerando} variant="cyan">
+              {gerando ? <><Loader2 size={14} className="animate-spin" />Gerando...</> : <><Sparkles size={14} />Gerar perguntas com IA</>}
+            </Btn>
+          )}
+        </>
+      ) : (
+        <>
+          <Btn variant="ghost" onClick={() => setStep(1)}>Voltar</Btn>
+          <Btn onClick={salvar} disabled={salvando} variant="cyan">
+            {salvando ? <><Loader2 size={14} className="animate-spin" />Salvando...</> : <><Send size={14} />Publicar e notificar</>}
+          </Btn>
+        </>
+      )}
+    >
+      {step === 1 && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+          <div style={{ display: 'flex', gap: 6 }}>
+            {[['ia', '✨ Gerar com IA'], ['manual', '✍️ Escrever manualmente']].map(([m, lbl]) => (
+              <button key={m} type="button" onClick={() => setModo(m)}
+                style={{ flex: 1, padding: '9px 12px', borderRadius: 8, fontSize: 13, fontWeight: 600, cursor: 'pointer', border: `1.5px solid ${modo === m ? C.primary : C.border}`, background: modo === m ? C.primaryBg : 'transparent', color: modo === m ? C.primary : C.t3 }}>
+                {lbl}
+              </button>
+            ))}
+          </div>
+          <div>
+            <label style={{ display: 'block', fontSize: 12, fontWeight: 600, color: C.t2, marginBottom: 6 }}>
+              Valor da CBRio <span style={{ fontWeight: 400, color: C.t3 }}>(opcional se escolher uma área específica)</span>
+            </label>
+            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+              <button type="button" onClick={() => setValor(null)}
+                style={{ padding: '8px 14px', borderRadius: 8, fontSize: 13, fontWeight: 600, cursor: 'pointer', border: `1.5px solid ${valor === null ? C.primary : C.border}`, background: valor === null ? C.primaryBg : 'transparent', color: valor === null ? C.primary : C.t3 }}>
+                Sem valor específico
+              </button>
+              {VALORES.map(v => (
+                <button key={v.id} type="button" onClick={() => setValor(v.id)}
+                  style={{ padding: '8px 14px', borderRadius: 8, fontSize: 13, fontWeight: 600, cursor: 'pointer', border: `1.5px solid ${valor === v.id ? v.color : C.border}`, background: valor === v.id ? `${v.color}15` : 'transparent', color: valor === v.id ? v.color : C.t2 }}>
+                  {v.label}
+                </button>
+              ))}
+            </div>
+            {!escopoOk && (
+              <p style={{ fontSize: 11, color: C.amber, margin: '6px 0 0' }}>
+                Escolha um valor OU uma área específica (diferente de "Geral / Cross-área") abaixo.
+              </p>
+            )}
+          </div>
+
+          <div>
+            <label style={{ display: 'block', fontSize: 12, fontWeight: 600, color: C.t2, marginBottom: 6 }}>O que você quer medir? *</label>
+            <textarea value={objetivo} onChange={e => setObjetivo(e.target.value)}
+              rows={4} placeholder="Ex: A clareza do treinamento de novos voluntários no último ciclo — sentem que estão preparados para servir?"
+              style={{ ...inp, resize: 'vertical', minHeight: 90 }} />
+            <p style={{ fontSize: 11, color: C.t3, margin: '4px 0 0' }}>{modo === 'ia' ? 'A IA usa essa descrição para criar as perguntas certas.' : 'Descrição interna da pesquisa (opcional).'}</p>
+          </div>
+
+          {modo === 'manual' && (
+            <>
+              <div>
+                <label style={{ display: 'block', fontSize: 12, fontWeight: 600, color: C.t2, marginBottom: 6 }}>Título da pesquisa *</label>
+                <input value={titulo} onChange={e => setTitulo(e.target.value)} placeholder="Ex: NPS · Treinamento de voluntários" style={inp} />
+              </div>
+              <div>
+                <label style={{ display: 'block', fontSize: 12, fontWeight: 600, color: C.t2, marginBottom: 6 }}>Pergunta principal · nota 0 a 10 *</label>
+                <input value={npsTexto} onChange={e => setNpsTexto(e.target.value)} style={inp} />
+                <p style={{ fontSize: 11, color: C.t3, margin: '4px 0 0' }}>É a pergunta NPS — a resposta é uma nota de 0 a 10.</p>
+              </div>
+              <div>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+                  <label style={{ fontSize: 12, fontWeight: 600, color: C.t2 }}>Perguntas adicionais</label>
+                  <button type="button" onClick={() => setExtras([...extras, { texto: '', tipo: 'texto_longo' }])}
+                    style={{ fontSize: 12, fontWeight: 600, color: C.primary, background: 'none', border: 'none', cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                    <Plus size={13} /> Adicionar
+                  </button>
+                </div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                  {extras.map((ex, i) => (
+                    <div key={i} style={{ display: 'flex', gap: 8, alignItems: 'flex-start' }}>
+                      <input value={ex.texto} onChange={e => setExtras(extras.map((x, j) => j === i ? { ...x, texto: e.target.value } : x))}
+                        placeholder={`Pergunta ${i + 1}`} style={{ ...inp, flex: 1 }} />
+                      <select value={ex.tipo} onChange={e => setExtras(extras.map((x, j) => j === i ? { ...x, tipo: e.target.value } : x))}
+                        style={{ ...inp, width: 150, flex: 'none' }}>
+                        <option value="texto_longo">Texto longo</option>
+                        <option value="texto_curto">Texto curto</option>
+                        <option value="escala_5">Escala 1 a 5</option>
+                      </select>
+                      <button type="button" onClick={() => setExtras(extras.filter((_, j) => j !== i))}
+                        title="Remover" style={{ background: 'none', border: 'none', cursor: 'pointer', color: C.red, padding: 6 }}>
+                        <X size={15} />
+                      </button>
+                    </div>
+                  ))}
+                  {extras.length === 0 && <p style={{ fontSize: 12, color: C.t3, margin: 0 }}>Sem perguntas adicionais — só a nota 0 a 10.</p>}
+                </div>
+              </div>
+            </>
+          )}
+
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+            <div>
+              <label style={{ display: 'block', fontSize: 12, fontWeight: 600, color: C.t2, marginBottom: 6 }}>Contexto / KPI</label>
+              <select value={contextoKpi} onChange={e => setContextoKpi(e.target.value)} style={inp}>
+                {CONTEXTOS_KPI.map(c => <option key={c.id} value={c.id}>{c.label}</option>)}
+              </select>
+            </div>
+            <div>
+              <label style={{ display: 'block', fontSize: 12, fontWeight: 600, color: C.t2, marginBottom: 6 }}>Área</label>
+              <select value={area} onChange={e => {
+                const novaArea = e.target.value;
+                setArea(novaArea);
+
+                if (['kids', 'ami', 'bridge', 'sede', 'online'].includes(novaArea) && contextoKpi === 'nps_geral') {
+                  setContextoKpi('nps_culto');
+                }
+              }} style={inp} disabled={restringeArea && minhasAreas.length <= 1}>
+                {gruposArea.map(grp => (
+                  <optgroup key={grp.grupo} label={grp.grupo}>
+                    {grp.opcoes.map(o => <option key={o.id} value={o.id}>{o.label}</option>)}
+                  </optgroup>
+                ))}
+              </select>
+            </div>
+          </div>
+
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+            <div>
+              <label style={{ display: 'block', fontSize: 12, fontWeight: 600, color: C.t2, marginBottom: 6 }}>Encerramento (opcional)</label>
+              <DatePicker value={dataFim} onChange={setDataFim} style={inp} />
+            </div>
+            <label style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '10px 12px', borderRadius: 8, border: `1px solid ${C.border}`, background: C.inputBg, cursor: 'pointer' }}>
+              <input type="checkbox" checked={permitePublico} onChange={e => setPermitePublico(e.target.checked)} />
+              <span style={{ fontSize: 13, color: C.text }}>Gerar link público</span>
+            </label>
+          </div>
+        </div>
+      )}
+
+      {step === 2 && perguntas && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+          <div>
+            <label style={{ display: 'block', fontSize: 12, fontWeight: 600, color: C.t2, marginBottom: 6 }}>Título da pesquisa</label>
+            <input value={titulo} onChange={e => setTitulo(e.target.value)} style={inp} />
+          </div>
+
+          <div style={{ padding: 14, background: C.cyanBg, borderRadius: 10, border: `1px solid ${C.cyan}30` }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, fontWeight: 700, color: C.cyan, marginBottom: 8 }}>
+              <Sparkles size={12} /> GERADO PELA IA
+            </div>
+            <p style={{ margin: 0, fontSize: 13, color: '#0e7490', lineHeight: 1.5 }}>{perguntas.descricao_curta}</p>
+          </div>
+
+          <div>
+            <div style={{ fontSize: 11, fontWeight: 600, color: C.t3, marginBottom: 6 }}>PERGUNTA PRINCIPAL (NPS)</div>
+            <div style={{ padding: 12, background: C.inputBg, borderRadius: 8, border: `1px solid ${C.border}`, fontSize: 14, color: C.text }}>
+              {perguntas.pergunta_nps?.texto}
+            </div>
+          </div>
+
+          <div>
+            <div style={{ fontSize: 11, fontWeight: 600, color: C.t3, marginBottom: 6 }}>PERGUNTAS QUALITATIVAS ({perguntas.perguntas_extras?.length || 0})</div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              {(perguntas.perguntas_extras || []).map((p, i) => (
+                <div key={p.id || i} style={{ padding: 12, background: C.inputBg, borderRadius: 8, border: `1px solid ${C.border}` }}>
+                  <div style={{ fontSize: 10, fontWeight: 700, color: C.t3, marginBottom: 4, textTransform: 'uppercase' }}>{p.tipo}</div>
+                  <div style={{ fontSize: 13, color: C.text }}>{p.texto}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+    </Modal>
+  );
+}
+
+
+
+
+
+
+function EditModal({ pesquisa, onClose, onSaved }) {
+  const { isAdmin, isDiretor, userAreas } = useAuth();
+  const restringeArea = !isAdmin && !isDiretor;
+  const minhasAreas = (userAreas || []).map(normArea).filter(Boolean);
+  const gruposArea = restringeArea
+    ? AREAS_NPS.map(g => ({ ...g, opcoes: g.opcoes.filter(o => minhasAreas.includes(o.id)) })).filter(g => g.opcoes.length)
+    : AREAS_NPS;
+
+  const [titulo, setTitulo] = useState(pesquisa.titulo || '');
+  const [objetivo, setObjetivo] = useState(pesquisa.objetivo || '');
+  const [dataFim, setDataFim] = useState(pesquisa.data_fim ? String(pesquisa.data_fim).slice(0, 10) : '');
+  const [area, setArea] = useState(pesquisa.area || 'geral');
+  const [permitePublico, setPermitePublico] = useState(pesquisa.permite_publico !== false);
+  const [npsTexto, setNpsTexto] = useState(pesquisa.perguntas?.pergunta_nps?.texto || 'De 0 a 10, o quanto você recomendaria a CBRio para um amigo ou familiar?');
+
+
+
+  const [extras, setExtras] = useState(
+    (pesquisa.perguntas?.perguntas_extras || []).map(p => ({ ...p, texto: p.texto || '', tipo: p.tipo || 'texto_longo', opcoes: Array.isArray(p.opcoes) ? p.opcoes : [] }))
+  );
+  const [salvando, setSalvando] = useState(false);
+  const temRespostas = (pesquisa.stats?.total_respostas || 0) > 0;
+  const lbl = { display: 'block', fontSize: 12, fontWeight: 600, color: C.t2, marginBottom: 6 };
+  const novoId = () => 'q' + Math.random().toString(36).slice(2, 9);
+  const COM_OPCOES = ['opcao_unica', 'multipla'];
+  const patchExtra = (i, patch) => setExtras(extras.map((x, j) => j === i ? { ...x, ...patch } : x));
+
+  const [dragIdx, setDragIdx] = useState(null);
+  const [overIdx, setOverIdx] = useState(null);
+  const [dragOn, setDragOn] = useState(false);
+  const moverExtra = (from, to) => setExtras(prev => {
+    if (from == null || to == null || from === to) return prev;
+    const arr = [...prev];
+    const [it] = arr.splice(from, 1);
+    arr.splice(to, 0, it);
+    return arr;
+  });
+
+  async function salvar() {
+    if (!titulo.trim()) return toast.error('Defina um título.');
+    if (!npsTexto.trim()) return toast.error('Defina a pergunta principal (nota 0 a 10).');
+    if (restringeArea && !minhasAreas.includes(normArea(area))) return toast.error('Escolha uma área da sua responsabilidade.');
+    setSalvando(true);
+    try {
+      await api.update(pesquisa.id, {
+        titulo: titulo.trim(),
+        objetivo: objetivo.trim() || titulo.trim(),
+        data_fim: dataFim || null,
+        area,
+        permite_publico: permitePublico,
+        perguntas: {
+          descricao_curta: objetivo.trim() || pesquisa.perguntas?.descricao_curta || null,
+          pergunta_nps: { tipo: 'nps', texto: npsTexto.trim() },
+
+
+
+          perguntas_extras: extras
+            .filter(e => (e.texto && e.texto.trim()) || (COM_OPCOES.includes(e.tipo) && (e.opcoes || []).some(o => String(o).trim())))
+            .map(e => {
+              const q = { ...e, id: e.id || novoId(), texto: (e.texto || '').trim() };
+              if (COM_OPCOES.includes(e.tipo)) {
+                q.opcoes = (e.opcoes || []).map(o => String(o).trim()).filter(Boolean);
+              } else {
+                delete q.opcoes;
+              }
+              return q;
+            }),
+        },
+      });
+      toast.success('Pesquisa atualizada.');
+      onSaved();
+    } catch (e) {
+      toast.error(e.message || 'Erro ao salvar');
+    }
+    setSalvando(false);
+  }
+
+  return (
+    <Modal open onClose={onClose} title="Editar pesquisa" width={640}
+      footer={
+        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+          <Btn variant="ghost" onClick={onClose}>Cancelar</Btn>
+          <Btn variant="cyan" onClick={salvar} disabled={salvando}>
+            {salvando ? <Loader2 size={14} className="animate-spin" /> : <Check size={14} />}Salvar
+          </Btn>
+        </div>
+      }>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+        {temRespostas && (
+          <div style={{ padding: 10, borderRadius: 8, background: '#f59e0b18', border: '1px solid #f59e0b45', fontSize: 12, color: C.t2, lineHeight: 1.5 }}>
+            Esta pesquisa já tem <strong>{pesquisa.stats.total_respostas} resposta(s)</strong>. As respostas coletadas são <strong>mantidas</strong> e a nota NPS (0-10) continua válida. Ao mudar o texto de uma pergunta, as respostas anteriores continuam ligadas a ela.
+          </div>
+        )}
+        <div>
+          <label style={lbl}>Título</label>
+          <input value={titulo} onChange={e => setTitulo(e.target.value)} style={inp} />
+        </div>
+        <div>
+          <label style={lbl}>Objetivo</label>
+          <textarea value={objetivo} onChange={e => setObjetivo(e.target.value)} style={{ ...inp, minHeight: 60 }} />
+        </div>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+          <div>
+            <label style={lbl}>Área</label>
+            <select value={area} onChange={e => setArea(e.target.value)} style={inp} disabled={restringeArea && minhasAreas.length <= 1}>
+              {gruposArea.map(grp => (
+                <optgroup key={grp.grupo} label={grp.grupo}>
+                  {grp.opcoes.map(o => <option key={o.id} value={o.id}>{o.label}</option>)}
+                </optgroup>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label style={lbl}>Encerramento (opcional)</label>
+            <DatePicker value={dataFim} onChange={setDataFim} style={inp} />
+          </div>
+        </div>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, color: C.text, cursor: 'pointer' }}>
+          <input type="checkbox" checked={permitePublico} onChange={e => setPermitePublico(e.target.checked)} />
+          Permitir link público
+        </label>
+        <div>
+          <label style={lbl}>Pergunta principal (nota 0 a 10)</label>
+          <input value={npsTexto} onChange={e => setNpsTexto(e.target.value)} style={inp} />
+        </div>
+        <div>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+            <label style={{ fontSize: 12, fontWeight: 600, color: C.t2 }}>Perguntas adicionais</label>
+            <button type="button" onClick={() => setExtras([...extras, { id: novoId(), texto: '', tipo: 'texto_longo' }])}
+              style={{ fontSize: 12, fontWeight: 600, color: C.primary, background: 'none', border: 'none', cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+              <Plus size={13} /> Adicionar
+            </button>
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            {extras.map((ex, i) => (
+              <div key={ex.id || i}
+                draggable={dragOn}
+                onDragStart={() => setDragIdx(i)}
+                onDragOver={e => { e.preventDefault(); if (overIdx !== i) setOverIdx(i); }}
+                onDrop={() => { moverExtra(dragIdx, i); setDragIdx(null); setOverIdx(null); setDragOn(false); }}
+                onDragEnd={() => { setDragIdx(null); setOverIdx(null); setDragOn(false); }}
+                style={{
+                  border: `1px solid ${overIdx === i && dragIdx !== null && dragIdx !== i ? C.cyan : C.border}`,
+                  borderRadius: 8, padding: 10, display: 'flex', flexDirection: 'column', gap: 8,
+                  background: overIdx === i && dragIdx !== null && dragIdx !== i ? C.cyanBg : 'transparent',
+                  opacity: dragIdx === i ? 0.5 : 1,
+                }}>
+                <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start' }}>
+                  <div onMouseDown={() => setDragOn(true)} onMouseUp={() => setDragOn(false)} title="Arraste para reordenar"
+                    style={{ cursor: 'grab', color: C.t3, padding: '10px 2px', flex: 'none', touchAction: 'none' }}>
+                    <GripVertical size={16} />
+                  </div>
+                  <input value={ex.texto} onChange={e => patchExtra(i, { texto: e.target.value })}
+                    placeholder={ex.tipo === 'secao' ? 'Título da seção' : `Pergunta ${i + 1}`} style={{ ...inp, flex: 1 }} />
+                  <select value={ex.tipo} onChange={e => patchExtra(i, { tipo: e.target.value })}
+                    style={{ ...inp, width: 160, flex: 'none' }}>
+                    <option value="secao">Seção (título)</option>
+                    <option value="texto_longo">Texto longo</option>
+                    <option value="texto_curto">Texto curto</option>
+                    <option value="escala_5">Escala 1 a 5</option>
+                    <option value="sim_nao">Sim / Não</option>
+                    <option value="opcao_unica">Escolha única</option>
+                    <option value="multipla">Múltipla escolha</option>
+                  </select>
+                  <button type="button" onClick={() => setExtras(extras.filter((_, j) => j !== i))}
+                    title="Remover" style={{ background: 'none', border: 'none', cursor: 'pointer', color: C.red, padding: 6 }}>
+                    <X size={15} />
+                  </button>
+                </div>
+                {COM_OPCOES.includes(ex.tipo) && (
+                  <div style={{ paddingLeft: 10, borderLeft: `2px solid ${C.border}`, display: 'flex', flexDirection: 'column', gap: 6 }}>
+                    <div style={{ fontSize: 11, fontWeight: 600, color: C.t3 }}>Opções ({ex.tipo === 'multipla' ? 'múltipla escolha' : 'escolha única'})</div>
+                    {(ex.opcoes || []).map((op, k) => (
+                      <div key={k} style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                        <input value={op} onChange={e => patchExtra(i, { opcoes: ex.opcoes.map((o, m) => m === k ? e.target.value : o) })}
+                          placeholder={`Opção ${k + 1}`} style={{ ...inp, flex: 1 }} />
+                        <button type="button" onClick={() => patchExtra(i, { opcoes: ex.opcoes.filter((_, m) => m !== k) })}
+                          title="Remover opção" style={{ background: 'none', border: 'none', cursor: 'pointer', color: C.red, padding: 4 }}>
+                          <X size={13} />
+                        </button>
+                      </div>
+                    ))}
+                    <button type="button" onClick={() => patchExtra(i, { opcoes: [...(ex.opcoes || []), ''] })}
+                      style={{ alignSelf: 'flex-start', fontSize: 11, fontWeight: 600, color: C.cyan, background: 'none', border: 'none', cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                      <Plus size={11} /> Adicionar opção
+                    </button>
+                  </div>
+                )}
+              </div>
+            ))}
+            {extras.length === 0 && <p style={{ fontSize: 12, color: C.t3, margin: 0 }}>Sem perguntas adicionais — só a nota 0 a 10.</p>}
+          </div>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+
+
+
+function DetalheModal({ id, onClose, onChanged, canWrite, onResponder }) {
+  const { user } = useAuth();
+  const [pesquisa, setPesquisa] = useState(null);
+  const [respostas, setRespostas] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [tab, setTab] = useState('resumo');
+  const [analisando, setAnalisando] = useState(false);
+  const [notificando, setNotificando] = useState(false);
+  const [excluindo, setExcluindo] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const [editOpen, setEditOpen] = useState(false);
+
+  const [turmaFiltro, setTurmaFiltro] = useState('todas');
+  const [importRespOpen, setImportRespOpen] = useState(false);
+
+  async function load() {
+    setLoading(true);
+    try {
+      const p = await api.get(id);
+      setPesquisa(p);
+      if (canWrite || (p.criado_por && p.criado_por === user?.id)) {
+        try {
+          const r = await api.respostas(id);
+          setRespostas(r || []);
+        } catch {                     }
+      }
+    } catch (e) {
+      toast.error(e.message);
+    }
+    setLoading(false);
+  }
+
+  useEffect(() => { load(); }, [id]);
+
+
+
+
+
+
+
+
+
+  const turmaNomes = useMemo(() => Object.fromEntries(
+    (respostas || [])
+      .filter((r) => r.turma_id && r.turma_nome)
+      .map((r) => [r.turma_id, r.turma_nome])
+  ), [respostas]);
+
+  const linkPublico = useMemo(() => {
+    if (!pesquisa?.link_publico_token) return null;
+    if (typeof window === 'undefined') return null;
+    return `${window.location.origin}/nps/publica/${pesquisa.link_publico_token}`;
+  }, [pesquisa]);
+
+  const [qrOpen, setQrOpen] = useState(false);
+
+  async function copiarLink() {
+    if (!linkPublico) return;
+    try {
+      await navigator.clipboard.writeText(linkPublico);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      toast.error('Não foi possível copiar');
+    }
+  }
+
+  async function analisar() {
+    setAnalisando(true);
+    try {
+      const a = await api.analisar(id);
+      toast.success('Análise atualizada');
+      setPesquisa(prev => ({ ...prev, analise_ia: a, analise_atualizada_em: a.gerado_em }));
+      setTab('analise');
+    } catch (e) {
+      toast.error(e.message);
+    }
+    setAnalisando(false);
+  }
+
+  async function reNotificar() {
+    setNotificando(true);
+    try {
+      const r = await api.notificar(id);
+      toast.success(`Lembrete enviado para ${r.enviadas || 0} pessoa(s)`);
+    } catch (e) {
+      toast.error(e.message);
+    }
+    setNotificando(false);
+  }
+
+
+
+
+
+
+  async function alternarPublicacao() {
+    const publicando = pesquisa.status !== 'ativa';
+    try {
+      await api.update(id, { status: publicando ? 'ativa' : 'rascunho' });
+      toast.success(publicando ? 'Pesquisa publicada' : 'Pesquisa despublicada — ninguém consegue responder agora');
+      onChanged?.();
+    } catch (e) {
+      toast.error(e.message);
+    }
+  }
+
+  async function encerrar() {
+    if (!confirm('Encerrar a pesquisa? Ninguém mais poderá responder.')) return;
+    try {
+      await api.update(id, { status: 'encerrada' });
+      toast.success('Pesquisa encerrada');
+      onChanged?.();
+      onClose();
+    } catch (e) {
+      toast.error(e.message);
+    }
+  }
+
+  async function excluir() {
+    if (!confirm('Excluir esta pesquisa? Ela some da lista e sai dos KPIs. As respostas coletadas ficam preservadas na base (recuperável por um administrador).')) return;
+    setExcluindo(true);
+    try {
+      await api.remove(id);
+      toast.success('Pesquisa excluída');
+      onChanged?.();
+      onClose();
+    } catch (e) {
+      toast.error(e.message);
+    }
+    setExcluindo(false);
+  }
+
+  if (loading || !pesquisa) {
+    return (
+      <Modal open onClose={onClose} title="Carregando..." width={760}>
+        <div style={{ textAlign: 'center', padding: 40, color: C.t3 }}>
+          <Loader2 size={28} className="animate-spin" style={{ display: 'inline-block' }} />
+        </div>
+      </Modal>
+    );
+  }
+
+  const v = valorMeta(pesquisa.valor);
+
+  const souCriador = !!(pesquisa.criado_por && user?.id && pesquisa.criado_por === user.id);
+  const podeGerir = canWrite || souCriador;
+  const stats = pesquisa.stats || { total_respostas: 0, score_medio: 0, nps_score: 0, promoters: 0, passives: 0, detractors: 0 };
+  const perguntasMap = {};
+  (pesquisa.perguntas?.perguntas_extras || []).forEach((p) => { if (p.tipo !== 'secao') perguntasMap[p.id] = p.texto; });
+
+
+
+
+  const turmaIdsPresentes = [...new Set(respostas.map(r => r.turma_id).filter(Boolean))];
+  const temTurmas = pesquisa.contexto_kpi === 'nps_next' || turmaIdsPresentes.length > 0;
+  const respostasFiltradas = turmaFiltro === 'todas'
+    ? respostas
+    : respostas.filter(r => r.turma_id === turmaFiltro);
+
+  return (
+    <Modal open onClose={onClose} title={pesquisa.titulo} width={820}>
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 16, flexWrap: 'wrap' }}>
+        {v && (
+          <span style={{ fontSize: 11, fontWeight: 700, color: v.color, padding: '2px 10px', borderRadius: 10, background: `${v.color}15` }}>{v.label}</span>
+        )}
+        {pesquisa.area && pesquisa.area !== 'geral' && (
+          <span style={{ fontSize: 11, fontWeight: 600, color: C.t2, padding: '2px 10px', borderRadius: 10, background: C.border }}>{AREA_LABEL[pesquisa.area] || pesquisa.area}</span>
+        )}
+        <NpsBadge status={pesquisa.status} />
+        <span style={{ fontSize: 11, color: C.t3 }}>Início: {new Date(pesquisa.data_inicio).toLocaleDateString('pt-BR')}</span>
+        {pesquisa.data_fim && <span style={{ fontSize: 11, color: C.t3 }}>Fim: {new Date(pesquisa.data_fim).toLocaleDateString('pt-BR')}</span>}
+      </div>
+
+      <p style={{ fontSize: 13, color: C.t2, margin: '0 0 16px', lineHeight: 1.5 }}>{pesquisa.objetivo}</p>
+
+      {           }
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 10, marginBottom: 16 }}>
+        <StatBox label="NPS" value={Number(stats.nps_score).toFixed(0)} color={stats.nps_score >= 50 ? C.green : stats.nps_score >= 0 ? C.amber : C.red} />
+        <StatBox label="Respostas" value={stats.total_respostas} color={C.cyan} />
+        <StatBox label="Média" value={Number(stats.score_medio).toFixed(1)} color={C.blue} />
+        <StatBox label="Promoters" value={`${stats.promoters} (${stats.detractors} det.)`} color={C.green} />
+      </div>
+
+      {           }
+      {podeGerir && (
+        <div style={{ display: 'flex', gap: 8, marginBottom: 18, flexWrap: 'wrap' }}>
+          {linkPublico && pesquisa.permite_publico && (
+            <>
+              <Btn variant="ghost" size="sm" onClick={copiarLink}>
+                {copied ? <Check size={12} /> : <Copy size={12} />}
+                {copied ? 'Copiado!' : 'Copiar link público'}
+              </Btn>
+              {
+
+                                                                             }
+              <Btn variant="ghost" size="sm" onClick={() => setQrOpen(true)}>
+                <QrCode size={12} />QR code
+              </Btn>
+            </>
+          )}
+          <Btn variant="ghost" size="sm" onClick={alternarPublicacao}>
+            {pesquisa.status === 'ativa' ? 'Despublicar' : 'Publicar'}
+          </Btn>
+          {pesquisa.status === 'ativa' && (
+            <>
+              <Btn variant="ghost" size="sm" onClick={reNotificar} disabled={notificando}>
+                {notificando ? <Loader2 size={12} className="animate-spin" /> : <Send size={12} />}
+                Reenviar lembrete
+              </Btn>
+              <Btn variant="cyan" size="sm" onClick={() => onResponder(id)}>
+                <MessageSquare size={12} />Responder agora
+              </Btn>
+            </>
+          )}
+          <Btn variant="ghost" size="sm" onClick={analisar} disabled={analisando || stats.total_respostas === 0}>
+            {analisando ? <Loader2 size={12} className="animate-spin" /> : <BrainCircuit size={12} />}
+            Analisar com IA
+          </Btn>
+          <Btn variant="ghost" size="sm" onClick={() => setEditOpen(true)}>
+            <Pencil size={12} />Editar
+          </Btn>
+          <Btn variant="ghost" size="sm" onClick={() => setImportRespOpen(true)}>
+            <Upload size={12} />Importar respostas
+          </Btn>
+          {pesquisa.status === 'ativa' && (
+            <Btn variant="danger" size="sm" onClick={encerrar}>Encerrar</Btn>
+          )}
+          <Btn variant="ghost" size="sm" onClick={excluir} disabled={excluindo}
+            style={{ marginLeft: 'auto', color: C.red }}>
+            {excluindo ? <Loader2 size={12} className="animate-spin" /> : <Trash2 size={12} />}
+            Excluir
+          </Btn>
+        </div>
+      )}
+
+      {qrOpen && linkPublico && (
+        <QrLinkDialog
+          link={linkPublico}
+          titulo={pesquisa.titulo}
+          descricao="Aponte a câmera para responder a pesquisa."
+          nomeArquivo={`qr-nps-${id}`}
+          onClose={() => setQrOpen(false)}
+        />
+      )}
+
+      {editOpen && (
+        <EditModal
+          pesquisa={pesquisa}
+          onClose={() => setEditOpen(false)}
+          onSaved={() => { setEditOpen(false); load(); onChanged?.(); }}
+        />
+      )}
+
+      {                                                                          }
+      {temTurmas && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 14, flexWrap: 'wrap' }}>
+          <span style={{ fontSize: 12, fontWeight: 600, color: C.t2 }}>Turma:</span>
+          <select
+            value={turmaFiltro}
+            onChange={(e) => setTurmaFiltro(e.target.value)}
+            style={{ padding: '6px 10px', borderRadius: 8, border: `1px solid ${C.border}`, background: C.inputBg, color: C.text, fontSize: 12, fontFamily: 'inherit' }}
+          >
+            <option value="todas">Todas as turmas (consolidado)</option>
+            {turmaIdsPresentes.map((tid) => (
+              <option key={tid} value={tid}>{turmaNomes[tid] || 'Turma (sem nome)'}</option>
+            ))}
+          </select>
+          {turmaFiltro !== 'todas' && (
+            <span style={{ fontSize: 11, color: C.t3 }}>{respostasFiltradas.length} resposta(s) nesta turma</span>
+          )}
+        </div>
+      )}
+
+      {importRespOpen && (
+        <ImportarRespostasModal
+          pesquisaId={id}
+          onClose={() => setImportRespOpen(false)}
+          onImported={() => { setImportRespOpen(false); load(); onChanged?.(); }}
+        />
+      )}
+
+      {          }
+      <div style={{ display: 'flex', gap: 4, marginBottom: 12, borderBottom: `1px solid ${C.border}` }}>
+        {['resumo', 'respostas', 'perguntas', 'analise'].map(t => (
+          <button key={t} onClick={() => setTab(t)}
+            style={{ padding: '8px 16px', fontSize: 12, fontWeight: 600, cursor: 'pointer', background: 'transparent', border: 'none', borderBottom: `2px solid ${tab === t ? C.cyan : 'transparent'}`, color: tab === t ? C.cyan : C.t2, textTransform: 'capitalize' }}>
+            {t === 'analise' ? 'Análise IA' : t}
+          </button>
+        ))}
+      </div>
+
+      {tab === 'resumo' && <ResumoTab pesquisa={pesquisa} respostas={respostasFiltradas} />}
+
+      {tab === 'respostas' && (
+        respostasFiltradas.length === 0 ? (
+          <div style={{ textAlign: 'center', padding: 30, color: C.t3, fontSize: 13 }}>Nenhuma resposta ainda</div>
+        ) : (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8, maxHeight: 360, overflowY: 'auto' }}>
+            {respostasFiltradas.map(r => <RespostaCard key={r.id} r={r} perguntasMap={perguntasMap} />)}
+          </div>
+        )
+      )}
+
+      {tab === 'perguntas' && pesquisa.perguntas && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          <div style={{ padding: 12, background: C.inputBg, borderRadius: 8, border: `1px solid ${C.border}` }}>
+            <div style={{ fontSize: 10, fontWeight: 700, color: C.cyan, marginBottom: 4 }}>NPS (0-10)</div>
+            <div style={{ fontSize: 13, color: C.text }}>{pesquisa.perguntas.pergunta_nps?.texto}</div>
+          </div>
+          {(pesquisa.perguntas.perguntas_extras || []).map((p, i) => (
+            <div key={p.id || i} style={{ padding: 12, background: C.inputBg, borderRadius: 8, border: `1px solid ${C.border}` }}>
+              <div style={{ fontSize: 10, fontWeight: 700, color: C.t3, marginBottom: 4, textTransform: 'uppercase' }}>{p.tipo}</div>
+              <div style={{ fontSize: 13, color: C.text }}>{p.texto}</div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {tab === 'analise' && (
+        !pesquisa.analise_ia ? (
+          <div style={{ textAlign: 'center', padding: 40, color: C.t3 }}>
+            <BrainCircuit size={32} style={{ opacity: 0.4, marginBottom: 10 }} />
+            <p style={{ margin: 0, fontSize: 13 }}>Sem análise gerada ainda.</p>
+            {canWrite && stats.total_respostas > 0 && (
+              <Btn variant="cyan" size="sm" onClick={analisar} disabled={analisando} style={{ marginTop: 12 }}>
+                {analisando ? <Loader2 size={12} className="animate-spin" /> : <Sparkles size={12} />}Gerar análise
+              </Btn>
+            )}
+          </div>
+        ) : (
+          <AnaliseView analise={pesquisa.analise_ia} />
+        )
+      )}
+    </Modal>
+  );
+}
+
+function StatBox({ label, value, color }) {
+  return (
+    <div style={{ position: 'relative', overflow: 'hidden', padding: 12, background: 'var(--panel)', WebkitBackdropFilter: 'blur(14px) saturate(140%)', backdropFilter: 'blur(14px) saturate(140%)', borderRadius: 16, border: '1px solid var(--hairline)', boxShadow: 'var(--shadow), var(--hi)', textAlign: 'center' }}>
+      <div style={{ position: 'absolute', inset: 0, background: `linear-gradient(135deg, ${color}22, transparent 58%)`, pointerEvents: 'none' }} />
+      <div style={{ position: 'absolute', top: 0, left: 0, right: 0, height: 3, background: color, opacity: 0.9 }} />
+      <div style={{ position: 'relative', zIndex: 1 }}>
+        <div style={{ fontSize: 10, color: 'var(--cbrio-text2)', fontWeight: 600, textTransform: 'uppercase', marginBottom: 4 }}>{label}</div>
+        <div style={{ fontSize: 22, fontWeight: 800, color }}>{value}</div>
+      </div>
+    </div>
+  );
+}
+
+function AnaliseView({ analise }) {
+  const sentMap = {
+    positivo: { color: C.green, bg: '#10b98115', label: 'Positivo' },
+    misto:    { color: C.amber, bg: '#f59e0b15', label: 'Misto' },
+    negativo: { color: C.red,   bg: '#ef444415', label: 'Negativo' },
+    neutro:   { color: C.t2,    bg: C.border,    label: 'Neutro' },
+  };
+  const s = sentMap[analise.sentimento] || sentMap.neutro;
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <span style={{ fontSize: 11, color: C.t3 }}>
+          Gerado em {new Date(analise.gerado_em).toLocaleString('pt-BR')} · {analise.total_analisado} respostas
+        </span>
+        <span style={{ padding: '2px 10px', borderRadius: 10, fontSize: 11, fontWeight: 600, color: s.color, background: s.bg }}>
+          {s.label}
+        </span>
+      </div>
+
+      <div style={{ padding: 14, background: C.cyanBg, borderRadius: 10, border: `1px solid ${C.cyan}30` }}>
+        <div style={{ fontSize: 11, fontWeight: 700, color: C.cyan, marginBottom: 6, display: 'flex', alignItems: 'center', gap: 4 }}>
+          <BrainCircuit size={12} /> RESUMO
+        </div>
+        <p style={{ margin: 0, fontSize: 13, color: '#0e7490', lineHeight: 1.6 }}>{analise.resumo}</p>
+      </div>
+
+      {analise.temas?.length > 0 && (
+        <div>
+          <div style={{ fontSize: 11, fontWeight: 700, color: C.t3, marginBottom: 8 }}>TEMAS RECORRENTES</div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            {analise.temas.map((t, i) => (
+              <div key={i} style={{ padding: 12, background: C.inputBg, borderRadius: 8, border: `1px solid ${C.border}` }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
+                  <span style={{ fontSize: 13, fontWeight: 600, color: C.text }}>{t.tema}</span>
+                  <span style={{ fontSize: 10, color: C.t3, textTransform: 'uppercase' }}>{t.frequencia}</span>
+                </div>
+                {t.exemplos?.length > 0 && (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 3, marginTop: 4 }}>
+                    {t.exemplos.slice(0, 3).map((ex, ei) => (
+                      <div key={ei} style={{ fontSize: 11, color: C.t2, fontStyle: 'italic', paddingLeft: 8, borderLeft: `2px solid ${C.border}` }}>"{ex}"</div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {analise.acoes_sugeridas?.length > 0 && (
+        <div>
+          <div style={{ fontSize: 11, fontWeight: 700, color: C.t3, marginBottom: 8 }}>AÇÕES SUGERIDAS</div>
+          <ul style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 6 }}>
+            {analise.acoes_sugeridas.map((a, i) => (
+              <li key={i} style={{ fontSize: 13, color: C.text, lineHeight: 1.5 }}>{a}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </div>
+  );
+}
+
+
+
+
+const RESUMO_TIPO_LABEL = {
+  escala_5: 'escala 1-5',
+  sim_nao: 'sim/não',
+  opcao_unica: 'escolha única',
+  multipla: 'múltipla escolha',
+  texto_curto: 'texto',
+  texto_longo: 'texto',
+};
+
+function diaLocal(iso) {
+  const d = new Date(iso);
+  if (isNaN(d)) return null;
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+function computarResumo(pesquisa, respostas) {
+  const total = respostas.length;
+
+  const histograma = Array.from({ length: 11 }, (_, nota) => ({
+    nota,
+    count: respostas.filter(r => Number(r.score) === nota).length,
+  }));
+  const promoters = respostas.filter(r => r.score >= 9).length;
+  const passives = respostas.filter(r => r.score >= 7 && r.score <= 8).length;
+  const detractors = respostas.filter(r => r.score <= 6).length;
+
+  const origem = {
+    logado: respostas.filter(r => r.origem !== 'publico').length,
+    publico: respostas.filter(r => r.origem === 'publico').length,
+  };
+
+  const porDiaMap = new Map();
+  respostas.forEach(r => {
+    const dia = diaLocal(r.created_at);
+    if (dia) porDiaMap.set(dia, (porDiaMap.get(dia) || 0) + 1);
+  });
+  const porDia = [...porDiaMap.entries()]
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .map(([dia, count]) => ({ dia, count }));
+
+  const vazio = v => v == null || v === '' || (Array.isArray(v) && v.length === 0);
+
+  const blocos = (pesquisa.perguntas?.perguntas_extras || []).map(p => {
+    if (p.tipo === 'secao') return { ...p, bloco: 'secao' };
+    const valores = respostas.map(r => r.respostas?.[p.id]).filter(v => !vazio(v));
+
+    if (p.tipo === 'escala_5') {
+      const nums = valores.map(Number).filter(x => Number.isFinite(x) && x >= 1 && x <= 5);
+      const dist = [1, 2, 3, 4, 5].map(nota => ({
+        label: String(nota),
+        count: nums.filter(x => Math.round(x) === nota).length,
+      }));
+      const media = nums.length ? nums.reduce((s, x) => s + x, 0) / nums.length : null;
+      return { ...p, bloco: 'barras', n: nums.length, dist, media };
+    }
+
+    if (p.tipo === 'sim_nao') {
+      const counts = new Map([['Sim', 0], ['Não', 0]]);
+      valores.forEach(v => {
+        const s = String(v).trim();
+        const low = s.toLowerCase();
+        const k = low === 'sim' || low === 's' ? 'Sim' : (low === 'não' || low === 'nao' || low === 'n' ? 'Não' : s);
+        counts.set(k, (counts.get(k) || 0) + 1);
+      });
+      const dist = [...counts.entries()].map(([label, count]) => ({ label, count }));
+      return { ...p, bloco: 'barras', n: valores.length, dist, media: null };
+    }
+
+    if (p.tipo === 'opcao_unica' || p.tipo === 'multipla') {
+      const listas = p.tipo === 'multipla'
+        ? valores.map(v => (Array.isArray(v) ? v : [v]))
+        : valores.map(v => [v]);
+
+
+      const counts = new Map();
+      (p.opcoes || []).forEach(op => counts.set(String(op), 0));
+      listas.forEach(arr => arr.forEach(v => {
+        const k = String(v).trim();
+        if (!k) return;
+        counts.set(k, (counts.get(k) || 0) + 1);
+      }));
+      const dist = [...counts.entries()].map(([label, count]) => ({ label, count }));
+      return { ...p, bloco: 'barras', n: listas.length, dist, media: null };
+    }
+
+
+    return {
+      ...p,
+      bloco: 'texto',
+      n: valores.length,
+      valores: valores.map(v => (Array.isArray(v) ? v.join(', ') : String(v))),
+    };
+  });
+
+  const comentarios = respostas
+    .map(r => (r.comentario ? String(r.comentario).trim() : ''))
+    .filter(Boolean);
+
+  return { total, histograma, promoters, passives, detractors, origem, porDia, blocos, comentarios };
+}
+
+function BlocoPergunta({ titulo, tipoLabel, n, children }) {
+  return (
+    <div style={{ padding: 14, background: C.inputBg, borderRadius: 10, border: `1px solid ${C.border}` }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 10, marginBottom: 10 }}>
+        <div style={{ fontSize: 13, fontWeight: 600, color: C.text, lineHeight: 1.4 }}>{titulo}</div>
+        <span style={{ fontSize: 10.5, color: C.t3, whiteSpace: 'nowrap' }}>
+          {n} resposta{n === 1 ? '' : 's'}{tipoLabel ? ` · ${tipoLabel}` : ''}
+        </span>
+      </div>
+      {children}
+    </div>
+  );
+}
+
+function SemRespostas() {
+  return <div style={{ fontSize: 12, color: C.t3 }}>Nenhuma resposta para esta pergunta.</div>;
+}
+
+function BarraLinha({ label, count, total }) {
+  const pct = total > 0 ? (count / total) * 100 : 0;
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+      <span title={label} style={{ flex: '0 0 34%', fontSize: 12, color: C.t2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{label}</span>
+      <div style={{ flex: 1, height: 14, background: C.border, borderRadius: 7, overflow: 'hidden' }}>
+        <div style={{ width: `${pct}%`, minWidth: count > 0 ? 4 : 0, height: '100%', background: C.cyan, borderRadius: 7 }} />
+      </div>
+      <span style={{ flex: '0 0 74px', fontSize: 12, color: C.text, fontWeight: 600, textAlign: 'right' }}>{count} ({pct.toFixed(0)}%)</span>
+    </div>
+  );
+}
+
+function HistogramaScore({ histograma }) {
+  const max = Math.max(1, ...histograma.map(h => h.count));
+  const corDe = nota => (nota >= 9 ? C.green : nota >= 7 ? C.amber : C.red);
+  return (
+    <div style={{ display: 'flex', alignItems: 'flex-end', gap: 4 }}>
+      {histograma.map(h => (
+        <div key={h.nota} style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 3 }}>
+          <span style={{ fontSize: 10, color: C.t3, fontWeight: 600, minHeight: 13 }}>{h.count > 0 ? h.count : ''}</span>
+          <div style={{
+            width: '100%', maxWidth: 34,
+            height: h.count > 0 ? Math.max(4, Math.round((h.count / max) * 70)) : 2,
+            background: h.count > 0 ? corDe(h.nota) : C.border,
+            borderRadius: '4px 4px 0 0',
+            opacity: h.count > 0 ? 1 : 0.6,
+          }} />
+          <span style={{ fontSize: 10, color: C.t2, fontWeight: 600 }}>{h.nota}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function FaixaNps({ promoters, passives, detractors, total }) {
+  if (!total) return null;
+  const seg = [
+    { label: 'Detratores (0-6)', count: detractors, cor: C.red },
+    { label: 'Neutros (7-8)', count: passives, cor: C.amber },
+    { label: 'Promotores (9-10)', count: promoters, cor: C.green },
+  ];
+  return (
+    <div>
+      <div style={{ display: 'flex', height: 12, borderRadius: 6, overflow: 'hidden', background: C.border }}>
+        {seg.map(s => s.count > 0 && (
+          <div key={s.label} style={{ width: `${(s.count / total) * 100}%`, background: s.cor }} />
+        ))}
+      </div>
+      <div style={{ display: 'flex', gap: 14, marginTop: 6, flexWrap: 'wrap' }}>
+        {seg.map(s => (
+          <span key={s.label} style={{ fontSize: 11, color: C.t2, display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+            <span style={{ width: 8, height: 8, borderRadius: 4, background: s.cor, display: 'inline-block' }} />
+            {s.label}: <strong style={{ color: C.text }}>{s.count}</strong> ({((s.count / total) * 100).toFixed(0)}%)
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function RespostasPorDia({ porDia }) {
+  const ultimos = porDia.slice(-30);
+  const max = Math.max(1, ...ultimos.map(d => d.count));
+  const fmt = dia => `${dia.slice(8, 10)}/${dia.slice(5, 7)}`;
+  return (
+    <div style={{ padding: '10px 14px', background: C.inputBg, borderRadius: 10, border: `1px solid ${C.border}` }}>
+      <div style={{ fontSize: 10.5, fontWeight: 700, color: C.t3, textTransform: 'uppercase', marginBottom: 8 }}>
+        Respostas por dia{porDia.length > 30 ? ' (últimos 30 dias com resposta)' : ''}
+      </div>
+      <div style={{ display: 'flex', alignItems: 'flex-end', gap: 3 }}>
+        {ultimos.map(d => (
+          <div key={d.dia} title={`${fmt(d.dia)}: ${d.count}`} style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2 }}>
+            <div style={{ width: '100%', maxWidth: 26, height: Math.max(3, Math.round((d.count / max) * 42)), background: C.cyan, borderRadius: '3px 3px 0 0' }} />
+            <span style={{ fontSize: 8.5, color: C.t3, whiteSpace: 'nowrap' }}>{fmt(d.dia)}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function ListaTextos({ itens }) {
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 5, maxHeight: 190, overflowY: 'auto' }}>
+      {itens.map((t, i) => (
+        <div key={i} style={{ fontSize: 12, color: C.t2, lineHeight: 1.45, padding: '5px 8px', background: C.card, borderRadius: 6, border: `1px solid ${C.border}` }}>{t}</div>
+      ))}
+    </div>
+  );
+}
+
+function ResumoTab({ pesquisa, respostas }) {
+  const resumo = useMemo(() => computarResumo(pesquisa, respostas), [pesquisa, respostas]);
+
+  if (!respostas.length) {
+    return <div style={{ textAlign: 'center', padding: 30, color: C.t3, fontSize: 13 }}>Nenhuma resposta ainda</div>;
+  }
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+      <div style={{ fontSize: 11.5, color: C.t3 }}>
+        {resumo.total} resposta{resumo.total === 1 ? '' : 's'} · {resumo.origem.logado} de colaboradores · {resumo.origem.publico} pelo link público
+      </div>
+
+      {resumo.porDia.length > 1 && <RespostasPorDia porDia={resumo.porDia} />}
+
+      <BlocoPergunta
+        titulo={pesquisa.perguntas?.pergunta_nps?.texto || 'Nota NPS'}
+        tipoLabel="nota 0-10"
+        n={resumo.total}
+      >
+        <HistogramaScore histograma={resumo.histograma} />
+        <div style={{ marginTop: 10 }}>
+          <FaixaNps promoters={resumo.promoters} passives={resumo.passives} detractors={resumo.detractors} total={resumo.total} />
+        </div>
+      </BlocoPergunta>
+
+      {resumo.blocos.map((b, i) => {
+        if (b.bloco === 'secao') {
+          return (
+            <div key={b.id || i} style={{ marginTop: 6 }}>
+              <div style={{ fontSize: 11, fontWeight: 700, color: C.cyan, textTransform: 'uppercase', letterSpacing: 0.4 }}>{b.texto}</div>
+              {b.descricao && <div style={{ fontSize: 11.5, color: C.t3, marginTop: 2 }}>{b.descricao}</div>}
+            </div>
+          );
+        }
+        if (b.bloco === 'barras') {
+          return (
+            <BlocoPergunta key={b.id || i} titulo={b.texto} tipoLabel={RESUMO_TIPO_LABEL[b.tipo]} n={b.n}>
+              {b.media != null && (
+                <div style={{ fontSize: 12, color: C.t2, marginBottom: 8 }}>
+                  Média: <strong style={{ color: C.text, fontSize: 14 }}>{b.media.toFixed(1)}</strong>
+                </div>
+              )}
+              {b.n === 0 ? <SemRespostas /> : (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+                  {b.dist.map(d => <BarraLinha key={d.label} label={d.label} count={d.count} total={b.n} />)}
+                </div>
+              )}
+              {b.tipo === 'multipla' && b.n > 0 && (
+                <div style={{ fontSize: 10.5, color: C.t3, marginTop: 6 }}>Múltipla escolha — a soma pode passar de 100%.</div>
+              )}
+            </BlocoPergunta>
+          );
+        }
+        return (
+          <BlocoPergunta key={b.id || i} titulo={b.texto} tipoLabel={RESUMO_TIPO_LABEL[b.tipo]} n={b.n}>
+            {b.n === 0 ? <SemRespostas /> : <ListaTextos itens={b.valores} />}
+          </BlocoPergunta>
+        );
+      })}
+
+      <BlocoPergunta titulo="Comentários" tipoLabel="campo aberto" n={resumo.comentarios.length}>
+        {resumo.comentarios.length === 0 ? <SemRespostas /> : <ListaTextos itens={resumo.comentarios} />}
+      </BlocoPergunta>
+    </div>
+  );
+}

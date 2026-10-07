@@ -1,0 +1,2148 @@
+import { useState, useEffect, useCallback, useRef } from 'react';
+import { useAuth } from '../../../contexts/AuthContext';
+import { logistica, ml, arquivei, solicitacoes as solicitacoesApi } from '../../../api';
+import { supabase } from '../../../supabaseClient';
+import { Button } from '../../../components/ui/button';
+import { DatePicker } from '@/components/ui/date-picker';
+import { Copy } from 'lucide-react';
+import { toast } from 'sonner';
+import LogisticaEstoque from './LogisticaEstoque';
+import LogisticaCompras from './LogisticaCompras';
+
+
+
+
+const MOTIVO_NF = {
+  nao_e_nfe: 'arquivo não é NF-e',
+  arquivo_vazio: 'arquivo vazio',
+  sem_chave_de_acesso: 'sem chave de acesso',
+  nao_autorizada: 'cancelada ou denegada (não vira despesa)',
+  destinatario_diferente: 'endereçada a outro CNPJ',
+  sem_valor_total: 'sem valor total legível',
+  sem_data_emissao: 'sem data de emissão',
+};
+
+
+const C = {
+  bg: 'var(--cbrio-bg)', card: 'var(--cbrio-card)', primary: '#00B39D', primaryBg: '#00B39D18',
+  text: 'var(--cbrio-text)', text2: 'var(--cbrio-text2)', text3: 'var(--cbrio-text3)',
+  border: 'var(--cbrio-border)', green: '#10b981', greenBg: '#10b98118',
+  red: '#ef4444', redBg: '#ef444418', amber: '#f59e0b', amberBg: '#f59e0b18',
+  blue: '#3b82f6', blueBg: '#3b82f618', purple: '#8b5cf6', purpleBg: '#8b5cf618',
+};
+
+const PEDIDO_STATUS = {
+  aguardando: { c: C.amber, bg: C.amberBg, label: 'Aguardando' },
+  em_transito: { c: C.blue, bg: C.blueBg, label: 'Em Trânsito' },
+  recebido: { c: C.green, bg: C.greenBg, label: 'Recebido' },
+  cancelado: { c: C.red, bg: C.redBg, label: 'Cancelado' },
+};
+
+const CATEGORIAS = ['Escritório', 'Tecnologia', 'Limpeza', 'Alimentação', 'Construção', 'Serviços', 'Outros'];
+
+
+const styles = {
+  page: { maxWidth: 1600, margin: '0 auto', padding: '0 24px' },
+  header: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24, flexWrap: 'wrap', gap: 12 },
+  title: { fontSize: 20, fontWeight: 700, color: C.text, letterSpacing: -0.5, lineHeight: 1.25 },
+  subtitle: { fontSize: 14, color: C.text2, marginTop: 2, lineHeight: 1.5 },
+  tabs: { display: 'flex', gap: 0, borderBottom: `2px solid ${C.border}`, marginBottom: 24, flexWrap: 'wrap' },
+  tab: (active) => ({
+    padding: '12px 16px', fontSize: 13, fontWeight: 600, cursor: 'pointer', border: 'none', background: 'none',
+    color: active ? C.primary : C.text2,
+    borderBottom: active ? `2px solid ${C.primary}` : '2px solid transparent',
+    marginBottom: -2, transition: 'all 0.15s',
+  }),
+  kpiGrid: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 12, marginBottom: 24 },
+  kpi: (color) => ({
+    background: 'var(--panel)', WebkitBackdropFilter: 'blur(14px) saturate(140%)', backdropFilter: 'blur(14px) saturate(140%)',
+    borderRadius: 16, padding: 16, border: '1px solid var(--hairline)',
+    borderLeft: `4px solid ${color}`, boxShadow: 'var(--shadow), var(--hi)',
+  }),
+  kpiValue: { fontSize: 20, fontWeight: 700, color: C.text, lineHeight: 1.25 },
+  kpiLabel: { fontSize: 12, fontWeight: 600, color: C.text2, textTransform: 'uppercase', letterSpacing: 0.5, marginTop: 2 },
+  card: { background: 'var(--cbrio-card)', borderRadius: 16, border: '1px solid var(--hairline)', boxShadow: 'var(--shadow)', overflow: 'hidden' },
+  cardHeader: { padding: 16, borderBottom: `1px solid ${C.border}`, display: 'flex', justifyContent: 'space-between', alignItems: 'center' },
+  cardTitle: { fontSize: 14, fontWeight: 700, color: C.text },
+  table: { width: '100%', borderCollapse: 'collapse' },
+  th: { padding: '12px 16px', fontSize: 12, fontWeight: 700, color: C.text2, textTransform: 'uppercase', letterSpacing: 0.5, textAlign: 'left', borderBottom: `1px solid ${C.border}`, background: 'var(--cbrio-table-header)' },
+  td: { padding: '12px 16px', fontSize: 14, color: C.text, borderBottom: `1px solid ${C.border}`, lineHeight: 1.5 },
+  badge: (color, bg) => ({ display: 'inline-block', padding: '2px 10px', borderRadius: 20, fontSize: 12, fontWeight: 600, color, background: bg }),
+  btn: (variant = 'primary') => ({
+    padding: '8px 16px', borderRadius: 8, fontSize: 14, fontWeight: 600, cursor: 'pointer', border: 'none', transition: 'all 0.15s',
+    ...(variant === 'primary' ? { background: C.primary, color: '#fff' } : {}),
+    ...(variant === 'secondary' ? { background: 'transparent', color: C.primary, border: `1px solid ${C.primary}` } : {}),
+    ...(variant === 'danger' ? { background: C.red, color: '#fff' } : {}),
+    ...(variant === 'ghost' ? { background: 'transparent', color: C.text2, padding: '6px 12px' } : {}),
+    ...(variant === 'success' ? { background: C.green, color: '#fff' } : {}),
+  }),
+  btnSm: { padding: '4px 10px', fontSize: 12 },
+  filterRow: { display: 'flex', gap: 8, marginBottom: 16, flexWrap: 'wrap', alignItems: 'center' },
+  input: { padding: '8px 12px', borderRadius: 8, border: `1px solid ${C.border}`, fontSize: 14, outline: 'none', width: '100%', transition: 'border 0.15s', background: 'var(--cbrio-input-bg)', color: 'var(--cbrio-text)' },
+  select: { padding: '8px 12px', borderRadius: 8, border: `1px solid ${C.border}`, fontSize: 14, background: 'var(--cbrio-input-bg)', color: 'var(--cbrio-text)', outline: 'none' },
+  label: { fontSize: 12, fontWeight: 600, color: C.text2, marginBottom: 4, display: 'block', textTransform: 'uppercase', letterSpacing: 0.5 },
+  formGroup: { marginBottom: 14 },
+  formRow: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 },
+  overlay: { position: 'fixed', inset: 0, background: 'var(--cbrio-overlay)', display: 'flex', justifyContent: 'center', alignItems: 'flex-start', paddingTop: 60, zIndex: 1000 },
+  modal: { background: 'var(--panel)', WebkitBackdropFilter: 'blur(18px) saturate(140%)', backdropFilter: 'blur(18px) saturate(140%)', border: '1px solid var(--hairline)', borderRadius: 16, width: '95%', maxWidth: 560, maxHeight: '85vh', overflowY: 'auto', boxShadow: 'var(--shadow-hover), var(--hi)' },
+  modalHeader: { padding: '20px 24px 12px', borderBottom: `1px solid ${C.border}`, display: 'flex', justifyContent: 'space-between', alignItems: 'center' },
+  modalTitle: { fontSize: 18, fontWeight: 700, color: C.text },
+  modalBody: { padding: '16px 24px 24px' },
+  modalFooter: { padding: '12px 24px 20px', display: 'flex', gap: 8, justifyContent: 'flex-end' },
+  empty: { textAlign: 'center', padding: 40, color: C.text3, fontSize: 14, lineHeight: 1.5 },
+  clickRow: { cursor: 'pointer', transition: 'background 0.1s' },
+};
+
+
+const fmtDate = (d) => d ? new Date(d + 'T12:00:00').toLocaleDateString('pt-BR') : '—';
+const fmtDateTime = (d) => d ? new Date(d).toLocaleString('pt-BR') : '—';
+const fmtMoney = (v) => v != null ? `R$ ${Number(v).toLocaleString('pt-BR', { minimumFractionDigits: 2 })}` : '—';
+
+
+function Modal({ open, onClose, title, children, footer, wide }) {
+  if (!open) return null;
+  return (
+    <div style={styles.overlay} onClick={onClose}>
+      <div style={{ ...styles.modal, ...(wide ? { maxWidth: 720 } : {}) }} onClick={e => e.stopPropagation()}>
+        <div style={styles.modalHeader}>
+          <div style={styles.modalTitle}>{title}</div>
+          <Button variant="ghost" className="text-lg" onClick={onClose}>&#x2715;</Button>
+        </div>
+        <div style={styles.modalBody}>{children}</div>
+        {footer && <div style={styles.modalFooter}>{footer}</div>}
+      </div>
+    </div>
+  );
+}
+
+function Input({ label, ...props }) {
+  return (<div style={styles.formGroup}>{label && <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-1 block">{label}</label>}<input className="flex h-9 w-full rounded-lg border border-input bg-background px-3 py-2 text-sm shadow-sm shadow-black/5 placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" {...props} /></div>);
+}
+function Select({ label, children, ...props }) {
+  return (<div style={styles.formGroup}>{label && <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-1 block">{label}</label>}<select className="flex h-9 w-full rounded-lg border border-input bg-background px-3 py-2 text-sm shadow-sm shadow-black/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" {...props}>{children}</select></div>);
+}
+function Textarea({ label, ...props }) {
+  return (<div style={styles.formGroup}>{label && <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-1 block">{label}</label>}<textarea className="flex w-full rounded-lg border border-input bg-background px-3 py-2 text-sm shadow-sm shadow-black/5 placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" style={{ minHeight: 70, resize: 'vertical' }} {...props} /></div>);
+}
+function Badge({ status, map }) {
+  const s = map[status] || { c: C.text3, bg: '#73737318', label: status || '—' };
+  return <span style={styles.badge(s.c, s.bg)}>{s.label}</span>;
+}
+
+
+
+
+
+
+
+const TABS = ['Dashboard', 'Fornecedores', 'Pedidos', 'Notas Fiscais', 'Compras', 'Compras ML', 'Rastreio', 'Estoque'];
+
+
+
+
+export default function Logistica() {
+  const { isDiretor } = useAuth();
+  const [tab, setTab] = useState(0);
+  const [dash, setDash] = useState(null);
+  const [fornecedores, setFornecedores] = useState([]);
+  const [pedidos, setPedidos] = useState([]);
+  const [notas, setNotas] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+
+
+  const [filtroFornAtivo, setFiltroFornAtivo] = useState('');
+  const [filtroPedStatus, setFiltroPedStatus] = useState('');
+
+  const [modalForn, setModalForn] = useState(null);
+  const [modalPed, setModalPed] = useState(null);
+  const [modalReceber, setModalReceber] = useState(null);
+  const [modalNota, setModalNota] = useState(null);
+  const [modalItens, setModalItens] = useState(null);
+  const [saving, setSaving] = useState(false);
+  const [scanning, setScanning] = useState(false);
+  const [categorias, setCategorias] = useState({ planos: [], centros: [] });
+
+
+  const fetchDash = useCallback(async (refresh = false) => {
+    try {
+      const data = await logistica.dashboard(refresh);
+      console.log('[Logistica] dashboard:', data);
+      setDash(data);
+    } catch (e) { console.error(e); }
+  }, []);
+
+  const fetchFornecedores = useCallback(async () => {
+    setLoading(true);
+    try {
+      const params = filtroFornAtivo !== '' ? { ativo: filtroFornAtivo } : undefined;
+      setFornecedores(await logistica.fornecedores.list(params) || []);
+    } catch (e) { setError(e.message); }
+    setLoading(false);
+  }, [filtroFornAtivo]);
+
+  const fetchPedidos = useCallback(async () => {
+    setLoading(true);
+    try {
+      const params = filtroPedStatus ? { status: filtroPedStatus } : undefined;
+      setPedidos(await logistica.pedidos.list(params) || []);
+    } catch (e) { setError(e.message); }
+    setLoading(false);
+  }, [filtroPedStatus]);
+
+  const fetchNotas = useCallback(async () => {
+    setLoading(true);
+    try { setNotas(await logistica.notas.list() || []); } catch (e) { setError(e.message); }
+    setLoading(false);
+  }, []);
+
+  const fetchCategorias = useCallback(async () => {
+    try { setCategorias(await logistica.notas.categorias()); } catch (e) { console.error(e); }
+  }, []);
+
+  useEffect(() => {
+    if (tab === 0) fetchDash();
+    if (tab === 1) fetchFornecedores();
+    if (tab === 2) { fetchPedidos(); fetchFornecedores(); }
+    if (tab === 3) { fetchNotas(); fetchFornecedores(); fetchPedidos(); fetchCategorias(); }
+  }, [tab, fetchDash, fetchFornecedores, fetchPedidos, fetchNotas, fetchCategorias]);
+
+
+  const saveFornecedor = async () => {
+    if (!modalForn?.razao_social?.trim()) { setError('Razão Social é obrigatória'); return; }
+    if (modalForn.cnpj && modalForn.cnpj.replace(/\D/g, '').length > 0 && modalForn.cnpj.replace(/\D/g, '').length !== 14) { setError('CNPJ deve ter 14 dígitos'); return; }
+    if (modalForn.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(modalForn.email)) { setError('Email inválido'); return; }
+    setSaving(true);
+    try {
+      const { id, ...rest } = modalForn;
+      if (id) await logistica.fornecedores.update(id, rest);
+      else await logistica.fornecedores.create(rest);
+      setModalForn(null); fetchFornecedores();
+    } catch (e) { setError(e.message); }
+    setSaving(false);
+  };
+
+  const deleteFornecedor = async (id) => {
+    if (!confirm('Excluir este fornecedor?')) return;
+    try { await logistica.fornecedores.remove(id); fetchFornecedores(); } catch (e) { setError(e.message); }
+  };
+
+  const [enriquecendo, setEnriquecendo] = useState(false);
+  const enriquecerForn = async () => {
+    if (!modalForn?.id) { setError('Salve o fornecedor antes de buscar os dados.'); return; }
+    setEnriquecendo(true); setError('');
+    try {
+      const r = await logistica.fornecedores.enriquecer(modalForn.id);
+      if (r.ok) {
+        setModalForn(prev => ({ ...prev, ...(r.fornecedor || {}) }));
+        fetchFornecedores();
+        if (!r.preenchidos?.length) setError('Já estava completo (nada novo a preencher).');
+      } else {
+        setError(r.mensagem || 'Não encontrei dados oficiais pra este fornecedor.');
+      }
+    } catch (e) { setError(e.message); }
+    setEnriquecendo(false);
+  };
+  const enriquecerLote = async () => {
+    if (!confirm('Buscar dados oficiais (Receita) de TODOS os fornecedores incompletos? Processo em lotes — pode levar alguns minutos. Pode deixar rodando.')) return;
+    setEnriquecendo(true); setError('');
+    let totEnr = 0; let totNao = 0;
+    try {
+      for (let i = 0; i < 80; i++) {
+        const r = await logistica.fornecedores.enriquecerIncompletos();
+        totEnr += (r.enriquecidos || 0); totNao += (r.naoEncontrados || 0);
+        fetchFornecedores();
+        setError(`🔎 Buscando na Receita… ${totEnr} preenchidos · ${totNao} sem dados · ${r.restam} restantes`);
+        if (r.rateLimited) { await new Promise(res => setTimeout(res, 4000)); continue; }
+        if ((r.restam || 0) <= 0 || (r.processados || 0) === 0) break;
+      }
+      setError(`✓ Concluído: ${totEnr} preenchidos · ${totNao} sem dados na Receita (marcados pra você completar à mão).`);
+    } catch (e) { setError(e.message); }
+    setEnriquecendo(false);
+  };
+
+  const toggleFornecedorAtivo = async (forn) => {
+    try { await logistica.fornecedores.update(forn.id, { ativo: !forn.ativo }); fetchFornecedores(); } catch (e) { setError(e.message); }
+  };
+
+
+  const savePedido = async () => {
+    if (!modalPed?.descricao?.trim()) { setError('Descrição é obrigatória'); return; }
+    if (modalPed.valor_total && Number(modalPed.valor_total) < 0) { setError('Valor não pode ser negativo'); return; }
+    setSaving(true);
+    try {
+      const { id, log_fornecedores, ...rest } = modalPed;
+      if (id) await logistica.pedidos.update(id, rest);
+      else await logistica.pedidos.create(rest);
+      setModalPed(null); fetchPedidos(); fetchDash();
+    } catch (e) { setError(e.message); }
+    setSaving(false);
+  };
+
+  const deletePedido = async (id) => {
+    if (!confirm('Excluir este pedido?')) return;
+    try { await logistica.pedidos.remove(id); fetchPedidos(); fetchDash(); } catch (e) { setError(e.message); }
+  };
+
+  const receberPedido = async () => {
+    setSaving(true);
+    try {
+      await logistica.pedidos.receber(modalReceber.id, modalReceber);
+      setModalReceber(null); fetchPedidos(); fetchDash();
+    } catch (e) { setError(e.message); }
+    setSaving(false);
+  };
+
+
+  const notaPayload = (n) => ({
+    numero: n.numero, serie: n.serie, fornecedor_id: n.fornecedor_id || null,
+    pedido_id: n.pedido_id || null, valor: n.valor, data_emissao: n.data_emissao,
+    chave_acesso: n.chave_acesso, emitente_nome: n.emitente_nome, emitente_cnpj: n.emitente_cnpj,
+    descricao: n.descricao, observacoes: n.observacoes, storage_path: n.storage_path,
+    sugestao_plano_contas_id: n.sugestao_plano_contas_id || null,
+    sugestao_centro_custo_id: n.sugestao_centro_custo_id || null,
+  });
+
+  const saveNota = async (enviarDepois = false) => {
+    if (!modalNota?.numero?.trim()) { setError('Número da nota é obrigatório'); return; }
+    if (!modalNota?.valor || Number(modalNota.valor) <= 0) { setError('Valor é obrigatório e deve ser positivo'); return; }
+    if (!modalNota?.data_emissao) { setError('Data de emissão é obrigatória'); return; }
+    setSaving(true);
+    try {
+      let salva;
+      if (modalNota.id) salva = await logistica.notas.update(modalNota.id, notaPayload(modalNota));
+      else salva = await logistica.notas.create(notaPayload(modalNota));
+      if (enviarDepois && salva?.id) await logistica.notas.enviarFinanceiro(salva.id);
+      setModalNota(null); fetchNotas();
+    } catch (e) { setError(e.message); }
+    setSaving(false);
+  };
+
+  const escanearNota = async (file) => {
+    if (!file) return;
+    setScanning(true); setError('');
+    try {
+      const { nota, extracao_ok } = await logistica.notas.escanear(file);
+      fetchNotas();
+      setModalNota({ ...nota });
+      if (!extracao_ok) setError('Não consegui ler os dados da nota — confira a imagem e preencha manualmente.');
+    } catch (e) { setError(e.message); }
+    setScanning(false);
+  };
+
+  const enviarNotaFinanceiro = async (id) => {
+    if (!confirm('Enviar esta nota pro financeiro lançar?')) return;
+    try { await logistica.notas.enviarFinanceiro(id); fetchNotas(); } catch (e) { setError(e.message); }
+  };
+
+  const deleteNota = async (id) => {
+    if (!confirm('Excluir esta nota fiscal?')) return;
+    try { await logistica.notas.remove(id); fetchNotas(); } catch (e) { setError(e.message); }
+  };
+
+
+  const upForn = (k, v) => setModalForn(prev => ({ ...prev, [k]: v }));
+  const upPed = (k, v) => setModalPed(prev => ({ ...prev, [k]: v }));
+  const upRec = (k, v) => setModalReceber(prev => ({ ...prev, [k]: v }));
+  const upNota = (k, v) => setModalNota(prev => ({ ...prev, [k]: v }));
+
+  return (
+    <div style={styles.page}>
+      <div style={styles.header}>
+        <div>
+          <div style={styles.title}>🚚 Logística</div>
+          <div style={styles.subtitle}>Fornecedores, compras, pedidos e notas fiscais</div>
+        </div>
+      </div>
+
+      {error && (
+        <div style={{ background: C.redBg, color: C.red, padding: '10px 16px', borderRadius: 8, marginBottom: 16, fontSize: 13, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          {error}
+          <Button variant="ghost" onClick={() => setError('')}>&#x2715;</Button>
+        </div>
+      )}
+
+      <div style={styles.tabs}>
+        {TABS.map((t, i) => (
+          <button key={t} style={styles.tab(tab === i)} onClick={() => setTab(i)}>{t}</button>
+        ))}
+      </div>
+
+      {tab === 0 && (
+        <DashboardTab
+          dash={dash}
+          onRefresh={() => fetchDash(true)}
+          onNavigate={(t, status) => { if (status !== undefined) setFiltroPedStatus(status); setTab(t); }}
+        />
+      )}
+      {tab === 1 && (
+        <FornecedoresTab data={fornecedores} loading={loading} isDiretor={isDiretor}
+          filtroAtivo={filtroFornAtivo} setFiltroAtivo={setFiltroFornAtivo}
+          onNew={() => setModalForn({ razao_social: '', nome_fantasia: '', cnpj: '', email: '', telefone: '', contato: '', categoria: '', endereco: '', ativo: true, observacoes: '' })}
+          onEdit={(f) => setModalForn({ ...f })} onDelete={deleteFornecedor} onToggle={toggleFornecedorAtivo}
+          onEnriquecerLote={enriquecerLote} enriquecendo={enriquecendo}
+        />
+      )}
+      {tab === 2 && (
+        <PedidosTab data={pedidos} loading={loading} isDiretor={isDiretor}
+          filtroStatus={filtroPedStatus} setFiltroStatus={setFiltroPedStatus}
+          onNew={() => setModalPed({ fornecedor_id: '', descricao: '', valor_total: '', data_prevista: '', status: 'aguardando', codigo_rastreio: '', transportadora: '' })}
+          onEdit={(p) => setModalPed({ ...p })} onDelete={deletePedido}
+          onReceber={(p) => setModalReceber({ id: p.id, observacoes: '', status: 'ok' })}
+          onItens={(p) => setModalItens(p.id)}
+          fornecedores={fornecedores}
+        />
+      )}
+      {tab === 3 && (
+        <NotasFiscaisTab data={notas} loading={loading}
+          onNew={() => setModalNota({ pedido_id: '', fornecedor_id: '', numero: '', serie: '', chave_acesso: '', valor: '', data_emissao: '', storage_path: '', emitente_nome: '', emitente_cnpj: '', descricao: '', observacoes: '' })}
+          onDelete={deleteNota} fornecedores={fornecedores} pedidos={pedidos}
+          onReload={fetchNotas}
+          onScan={escanearNota} scanning={scanning}
+          onEdit={(n) => setModalNota({ ...n })}
+          onEnviar={enviarNotaFinanceiro}
+        />
+      )}
+
+      {tab === 4 && <LogisticaCompras />}
+      {tab === 5 && <ComprasMLTab />}
+      {tab === 6 && <RastreioMLTab />}
+      {tab === 7 && <LogisticaEstoque />}
+
+      {                                                           }
+
+      {                }
+      <Modal open={modalForn !== null} onClose={() => setModalForn(null)} title={modalForn?.id ? 'Editar Fornecedor' : 'Novo Fornecedor'}
+        footer={<>{modalForn?.id && <Button variant="outline" onClick={enriquecerForn} disabled={enriquecendo} title="Busca CNPJ, endereço e telefone na Receita (e IA na web)">{enriquecendo ? 'Buscando…' : '🔍 Buscar dados'}</Button>}<div style={{ flex: 1 }} /><Button variant="outline" onClick={() => setModalForn(null)}>Cancelar</Button><Button onClick={saveFornecedor} disabled={saving}>{saving ? 'Salvando...' : 'Salvar'}</Button></>}>
+        {modalForn && (<>
+          <Input label="Razão Social *" value={modalForn.razao_social || ''} onChange={e => upForn('razao_social', e.target.value)} />
+          <Input label="Nome Fantasia" value={modalForn.nome_fantasia || ''} onChange={e => upForn('nome_fantasia', e.target.value)} />
+          <div style={styles.formRow}>
+            <Input label="CNPJ" value={modalForn.cnpj || ''} onChange={e => upForn('cnpj', e.target.value)} />
+            <Input label="Telefone" value={modalForn.telefone || ''} onChange={e => upForn('telefone', e.target.value)} />
+          </div>
+          <div style={styles.formRow}>
+            <Input label="E-mail" value={modalForn.email || ''} onChange={e => upForn('email', e.target.value)} />
+            <Input label="Contato" value={modalForn.contato || ''} onChange={e => upForn('contato', e.target.value)} />
+          </div>
+          <Input label="Endereço" value={modalForn.endereco || ''} onChange={e => upForn('endereco', e.target.value)} />
+          <Select label="Categoria" value={modalForn.categoria || ''} onChange={e => upForn('categoria', e.target.value)}>
+            <option value="">Selecione...</option>
+            {CATEGORIAS.map(c => <option key={c} value={c}>{c}</option>)}
+          </Select>
+          <Textarea label="Observações" value={modalForn.observacoes || ''} onChange={e => upForn('observacoes', e.target.value)} />
+        </>)}
+      </Modal>
+
+      {            }
+      <Modal open={modalPed !== null} onClose={() => setModalPed(null)} title={modalPed?.id ? 'Editar Pedido' : 'Novo Pedido'}
+        footer={<><Button variant="outline" onClick={() => setModalPed(null)}>Cancelar</Button><Button onClick={savePedido} disabled={saving}>{saving ? 'Salvando...' : 'Salvar'}</Button></>}>
+        {modalPed && (<>
+          <Textarea label="Descrição *" value={modalPed.descricao || ''} onChange={e => upPed('descricao', e.target.value)} />
+          <div style={styles.formRow}>
+            <Input label="Valor Total" type="number" step="0.01" value={modalPed.valor_total || ''} onChange={e => upPed('valor_total', e.target.value)} />
+            <div style={styles.formGroup}><label className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-1 block">Data Prevista</label><DatePicker value={modalPed.data_prevista || ''} onChange={v => upPed('data_prevista', v)} /></div>
+          </div>
+          <div style={styles.formRow}>
+            <Select label="Fornecedor" value={modalPed.fornecedor_id || ''} onChange={e => upPed('fornecedor_id', e.target.value)}>
+              <option value="">Selecione...</option>
+              {fornecedores.filter(f => f.ativo).map(f => <option key={f.id} value={f.id}>{f.nome_fantasia || f.razao_social}</option>)}
+            </Select>
+            <Select label="Status" value={modalPed.status || 'aguardando'} onChange={e => upPed('status', e.target.value)}>
+              <option value="aguardando">Aguardando</option><option value="em_transito">Em Trânsito</option><option value="cancelado">Cancelado</option>
+            </Select>
+          </div>
+          <div style={styles.formRow}>
+            <Input label="Código Rastreio" value={modalPed.codigo_rastreio || ''} onChange={e => upPed('codigo_rastreio', e.target.value)} />
+            <Input label="Transportadora" value={modalPed.transportadora || ''} onChange={e => upPed('transportadora', e.target.value)} />
+          </div>
+        </>)}
+      </Modal>
+
+      {                 }
+      <Modal open={modalReceber !== null} onClose={() => setModalReceber(null)} title="Registrar Recebimento"
+        footer={<><Button variant="outline" onClick={() => setModalReceber(null)}>Cancelar</Button><Button className="bg-emerald-500 hover:bg-emerald-600 text-white" onClick={receberPedido} disabled={saving}>{saving ? 'Registrando...' : 'Confirmar Recebimento'}</Button></>}>
+        {modalReceber && (<>
+          <Select label="Status do recebimento" value={modalReceber.status || 'ok'} onChange={e => upRec('status', e.target.value)}>
+            <option value="ok">OK — Tudo certo</option><option value="com_avaria">Com avaria</option><option value="incompleto">Incompleto</option>
+          </Select>
+          <Textarea label="Observações" value={modalReceber.observacoes || ''} onChange={e => upRec('observacoes', e.target.value)} />
+        </>)}
+      </Modal>
+
+      {                 }
+      <NotaFiscalModal open={modalNota !== null} data={modalNota} onClose={() => setModalNota(null)}
+        onSave={saveNota} saving={saving} fornecedores={fornecedores} pedidos={pedidos} upNota={upNota}
+        categorias={categorias} />
+
+      {                     }
+      <ItensPedidoModal open={modalItens !== null} pedidoId={modalItens} onClose={() => setModalItens(null)} />
+
+    </div>
+  );
+}
+
+
+
+
+const STAT_SVGS = [
+  <svg key="s0" style={{ position: 'absolute', right: 0, top: 0, height: '100%', width: '67%', pointerEvents: 'none', zIndex: 0 }} viewBox="0 0 300 200" fill="none"><circle cx="220" cy="100" r="90" fill="#fff" fillOpacity="0.08" /><circle cx="260" cy="60" r="60" fill="#fff" fillOpacity="0.10" /></svg>,
+  <svg key="s1" style={{ position: 'absolute', right: 0, top: 0, height: '100%', width: '67%', pointerEvents: 'none', zIndex: 0 }} viewBox="0 0 300 200" fill="none"><circle cx="200" cy="140" r="100" fill="#fff" fillOpacity="0.07" /><circle cx="270" cy="40" r="50" fill="#fff" fillOpacity="0.09" /></svg>,
+  <svg key="s2" style={{ position: 'absolute', right: 0, top: 0, height: '100%', width: '67%', pointerEvents: 'none', zIndex: 0 }} viewBox="0 0 300 200" fill="none"><circle cx="240" cy="80" r="80" fill="#fff" fillOpacity="0.08" /><circle cx="280" cy="150" r="55" fill="#fff" fillOpacity="0.10" /></svg>,
+  <svg key="s3" style={{ position: 'absolute', right: 0, top: 0, height: '100%', width: '67%', pointerEvents: 'none', zIndex: 0 }} viewBox="0 0 300 200" fill="none"><circle cx="210" cy="120" r="95" fill="#fff" fillOpacity="0.07" /><circle cx="265" cy="50" r="45" fill="#fff" fillOpacity="0.10" /></svg>,
+  <svg key="s4" style={{ position: 'absolute', right: 0, top: 0, height: '100%', width: '67%', pointerEvents: 'none', zIndex: 0 }} viewBox="0 0 300 200" fill="none"><circle cx="230" cy="90" r="85" fill="#fff" fillOpacity="0.08" /><circle cx="270" cy="160" r="50" fill="#fff" fillOpacity="0.09" /></svg>,
+  <svg key="s5" style={{ position: 'absolute', right: 0, top: 0, height: '100%', width: '67%', pointerEvents: 'none', zIndex: 0 }} viewBox="0 0 300 200" fill="none"><circle cx="200" cy="100" r="90" fill="#fff" fillOpacity="0.07" /><circle cx="260" cy="40" r="60" fill="#fff" fillOpacity="0.10" /></svg>,
+  <svg key="s6" style={{ position: 'absolute', right: 0, top: 0, height: '100%', width: '67%', pointerEvents: 'none', zIndex: 0 }} viewBox="0 0 300 200" fill="none"><circle cx="220" cy="110" r="88" fill="#fff" fillOpacity="0.08" /><circle cx="275" cy="55" r="52" fill="#fff" fillOpacity="0.09" /></svg>,
+];
+
+function StatCard({ label, value, bg, svg, hint, onClick }) {
+
+  const valueStr = String(value ?? '');
+  let fontSize = 28;
+  if (valueStr.length > 10) fontSize = 24;
+  if (valueStr.length > 13) fontSize = 20;
+  if (valueStr.length > 16) fontSize = 17;
+  return (
+    <div
+      className="cbrio-kpi"
+      onClick={onClick}
+      title={valueStr}
+      style={{
+        position: 'relative', overflow: 'hidden',
+        background: 'var(--panel)',
+        WebkitBackdropFilter: 'blur(14px) saturate(140%)', backdropFilter: 'blur(14px) saturate(140%)',
+        border: '1px solid var(--hairline)', boxShadow: 'var(--shadow), var(--hi)',
+        borderRadius: 16, padding: '20px 24px', minHeight: 100,
+        cursor: onClick ? 'pointer' : 'default',
+        transition: 'transform 0.15s ease, box-shadow 0.15s ease',
+      }}
+      onMouseEnter={(e) => { if (onClick) { e.currentTarget.style.transform = 'translateY(-2px)'; e.currentTarget.style.boxShadow = 'var(--shadow-hover)'; } }}
+      onMouseLeave={(e) => { if (onClick) { e.currentTarget.style.transform = 'translateY(0)'; e.currentTarget.style.boxShadow = 'var(--shadow), var(--hi)'; } }}
+    >
+      {                                                                 }
+      <div style={{ position: 'absolute', inset: 0, background: `linear-gradient(135deg, ${bg}22, transparent 58%)`, pointerEvents: 'none' }} />
+      <div style={{ position: 'absolute', top: 0, left: 0, right: 0, height: 3, background: bg, opacity: 0.9 }} />
+      <div style={{ position: 'absolute', right: -8, top: -4, opacity: 0.07 }}>{svg}</div>
+      <div style={{ position: 'relative', zIndex: 1 }}>
+        <div style={{ fontSize: 12, fontWeight: 600, color: C.text2, textTransform: 'uppercase', letterSpacing: 0.4, marginBottom: 8 }}>{label}</div>
+        <div style={{ fontSize, fontWeight: 800, letterSpacing: -0.5, color: C.text, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{value}</div>
+        {hint && <div style={{ fontSize: 10.5, fontWeight: 400, color: C.text3, marginTop: 4, lineHeight: 1.3 }}>{hint}</div>}
+      </div>
+    </div>
+  );
+}
+
+function DashboardTab({ dash, onRefresh, onNavigate }) {
+  if (!dash) return <div style={styles.empty}>Carregando dashboard...</div>;
+
+
+
+
+  const mlEmTransito = dash.mlPedidosEmTransito ?? 0;
+  const kpis = [
+    { label: 'Fornecedores Ativos', value: dash.fornecedoresAtivos ?? 0, bg: '#00B39D', tab: 1 },
+    { label: 'Ped. Aguardando', value: dash.pedidosAguardando ?? 0, bg: '#3b82f6', tab: 2, status: 'aguardando' },
+    {
+      label: 'Ped. Em Trânsito', value: dash.pedidosEmTransito ?? 0, bg: '#8b5cf6', tab: 2, status: 'em_transito',
+
+
+      hint: mlEmTransito ? `Inclui ${mlEmTransito} do Mercado Livre · ver aba Compras ML` : undefined,
+    },
+    { label: 'Ped. Recebidos', value: dash.pedidosRecebidos ?? 0, bg: '#10b981', tab: 2, status: 'recebido' },
+    { label: 'Compras do Mês', value: fmtMoney(dash.mlComprasMes ?? 0), bg: '#00B39D', hint: 'Apenas compras do Mercado Livre no mês corrente', tab: 5 },
+  ];
+  return (
+    <>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+        <div style={{ fontSize: 11, color: C.text3 }}>
+          {dash._cached ? '💾 Cache (válido por 30s)' : '✓ Dados atualizados'}
+          {dash._lastUpdate && ` • ${new Date(dash._lastUpdate).toLocaleTimeString('pt-BR')}`}
+        </div>
+        <Button variant="ghost" size="sm" onClick={onRefresh} title="Atualizar (ignora cache)">🔄 Atualizar</Button>
+      </div>
+      <div className="cbrio-stagger" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 12, marginBottom: 24 }}>
+        {kpis.map((k, i) => <StatCard key={k.label} label={k.label} value={k.value} bg={k.bg} svg={STAT_SVGS[i % STAT_SVGS.length]} hint={k.hint} onClick={() => onNavigate(k.tab, k.status)} />)}
+      </div>
+    </>
+  );
+}
+
+
+
+
+function FornecedoresTab({ data, loading, isDiretor, filtroAtivo, setFiltroAtivo, onNew, onEdit, onDelete, onToggle, onEnriquecerLote, enriquecendo }) {
+  const [soIncompletos, setSoIncompletos] = useState(false);
+  const [busca, setBusca] = useState('');
+  const [pagina, setPagina] = useState(1);
+  const PAGE = 20;
+  const incompleto = (f) => !f.cnpj || !f.endereco || !f.telefone;
+  const nIncompletos = data.filter(incompleto).length;
+  const filtrados = data
+    .filter(f => !soIncompletos || incompleto(f))
+    .filter(f => !busca || `${f.razao_social || ''} ${f.nome_fantasia || ''} ${f.cnpj || ''}`.toLowerCase().includes(busca.toLowerCase()));
+  useEffect(() => { setPagina(1); }, [soIncompletos, busca, filtroAtivo, data.length]);
+  const totalPag = Math.max(1, Math.ceil(filtrados.length / PAGE));
+  const pagAtual = Math.min(pagina, totalPag);
+  const rows = filtrados.slice((pagAtual - 1) * PAGE, pagAtual * PAGE);
+  return (<>
+    <div style={styles.filterRow}>
+      <input style={{ ...styles.input, minWidth: 200, flex: 1 }} placeholder="Buscar fornecedor ou CNPJ…" value={busca} onChange={e => setBusca(e.target.value)} />
+      <select className="flex h-9 rounded-lg border border-input bg-background px-3 py-2 text-sm shadow-sm shadow-black/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" value={filtroAtivo} onChange={e => setFiltroAtivo(e.target.value)}>
+        <option value="">Todos</option><option value="true">Ativos</option><option value="false">Inativos</option>
+      </select>
+      {nIncompletos > 0 && (
+        <button onClick={() => setSoIncompletos(v => !v)}
+          style={{ ...styles.badge(C.amber, C.amberBg), cursor: 'pointer', padding: '6px 12px', border: soIncompletos ? `1px solid ${C.amber}` : '1px solid transparent' }}>
+          ⚠️ Dados incompletos ({nIncompletos})
+        </button>
+      )}
+      {isDiretor && nIncompletos > 0 && onEnriquecerLote && (
+        <Button variant="outline" onClick={onEnriquecerLote} disabled={enriquecendo} title="Busca CNPJ/endereço/telefone na Receita pros incompletos">
+          {enriquecendo ? 'Buscando…' : '🔍 Buscar dados (Receita)'}
+        </Button>
+      )}
+      {isDiretor && <Button onClick={onNew}>+ Novo Fornecedor</Button>}
+    </div>
+    <div style={styles.card}><table style={styles.table}><thead><tr>
+      <th style={styles.th}>Nome</th><th style={styles.th}>CNPJ</th><th style={styles.th}>Categoria</th><th style={styles.th}>Contato</th><th style={styles.th}>Status</th>
+      {isDiretor && <th style={styles.th}>Ações</th>}
+    </tr></thead><tbody>
+      {loading ? <tr><td colSpan={6}><div className="flex items-center justify-center py-6 gap-2"><div className="h-4 w-4 animate-spin rounded-full border-2 border-muted-foreground/25 border-t-primary" /><span className="text-xs text-muted-foreground">Carregando...</span></div></td></tr>
+      : rows.length === 0 ? <tr><td colSpan={6}><div className="flex flex-col items-center py-10 gap-2"><div className="h-10 w-10 rounded-full bg-muted flex items-center justify-center mb-1"><svg className="h-5 w-5 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M20 13V6a2 2 0 00-2-2H6a2 2 0 00-2 2v7m16 0v5a2 2 0 01-2 2H6a2 2 0 01-2-2v-5m16 0h-2.586a1 1 0 00-.707.293l-2.414 2.414a1 1 0 01-.707.293h-3.172a1 1 0 01-.707-.293l-2.414-2.414A1 1 0 006.586 13H4" /></svg></div><span className="text-sm font-medium text-foreground">Nenhum fornecedor</span></div></td></tr>
+      : rows.map(f => (
+        <tr key={f.id} style={{ cursor: 'pointer' }} onClick={() => onEdit(f)} className="hover:bg-muted/40">
+          <td style={styles.td}><div style={{ fontWeight: 600 }}>{f.nome_fantasia || f.razao_social}</div>{f.nome_fantasia && <div style={{ fontSize: 11, color: C.text3 }}>{f.razao_social}</div>}</td>
+          <td style={styles.td}>{f.cnpj || '—'}</td>
+          <td style={styles.td}>{f.categoria || '—'}</td>
+          <td style={styles.td}><div>{f.contato || '—'}</div>{f.email && <div style={{ fontSize: 11, color: C.text3 }}>{f.email}</div>}{f.telefone && <div style={{ fontSize: 11, color: C.text3 }}>{f.telefone}</div>}</td>
+          <td style={styles.td}>
+            <span style={styles.badge(f.ativo ? C.green : C.text3, f.ativo ? C.greenBg : '#73737318')}>{f.ativo ? 'Ativo' : 'Inativo'}</span>
+            {incompleto(f) && <span style={{ ...styles.badge(C.amber, C.amberBg), marginLeft: 6 }} title={`Faltando: ${[!f.cnpj && 'CNPJ', !f.endereco && 'endereço', !f.telefone && 'telefone'].filter(Boolean).join(', ')}`}>Incompleto</span>}
+            {f.enriquecimento_status === 'nao_encontrado' && <span style={{ ...styles.badge(C.text3, '#73737318'), marginLeft: 6 }} title="A Receita não tinha dados desse CNPJ — complete à mão">🔍 sem dados</span>}
+          </td>
+          {isDiretor && <td style={styles.td} onClick={e => e.stopPropagation()}><div style={{ display: 'flex', gap: 4 }}>
+            <Button variant="ghost" size="sm" onClick={() => onToggle(f)}>{f.ativo ? '⏸' : '▶'}</Button>
+            <Button variant="ghost" size="sm" onClick={() => onEdit(f)}>✏️</Button>
+            <Button variant="ghost" size="sm" onClick={() => onDelete(f.id)}>🗑</Button>
+          </div></td>}
+        </tr>
+      ))}
+    </tbody></table>
+      {totalPag > 1 && (
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 12, padding: 12, flexWrap: 'wrap', borderTop: `1px solid ${C.border}` }}>
+          <Button variant="outline" size="sm" disabled={pagAtual <= 1} onClick={() => setPagina(p => Math.max(1, p - 1))}>‹ Anterior</Button>
+          <span style={{ fontSize: 13, color: C.text2 }}>Página {pagAtual} de {totalPag} · {filtrados.length} fornecedores</span>
+          <Button variant="outline" size="sm" disabled={pagAtual >= totalPag} onClick={() => setPagina(p => Math.min(totalPag, p + 1))}>Próxima ›</Button>
+        </div>
+      )}
+    </div>
+  </>);
+}
+
+
+
+
+function PedidosTab({ data, loading, isDiretor, filtroStatus, setFiltroStatus, onNew, onEdit, onDelete, onReceber, onItens, fornecedores }) {
+  const [selected, setSelected] = useState([]);
+
+  function toggleSelect(id) { setSelected(s => s.includes(id) ? s.filter(x => x !== id) : [...s, id]); }
+  function toggleAll() { setSelected(s => s.length === data.length ? [] : data.map(p => p.id)); }
+
+  async function bulkDelete() {
+    if (!selected.length || !confirm(`Excluir ${selected.length} pedido(s)?`)) return;
+
+
+
+    let falhas = 0, ultimoErro = '';
+    for (const id of selected) {
+      try { await onDelete(id); }
+      catch (e) { falhas++; ultimoErro = e?.message || 'erro ao excluir'; }
+    }
+    if (falhas) alert(`${falhas} de ${selected.length} não foram excluídos. ${ultimoErro}`);
+    setSelected([]);
+  }
+
+  function exportPedidosCSV() {
+    const headers = ['Descrição','Fornecedor','Valor','Data Prevista','Rastreio','Transportadora','Status'];
+    const rows = data.map(p => [p.descricao, p.log_fornecedores?.nome_fantasia||p.log_fornecedores?.razao_social||'', p.valor_total||0, p.data_prevista||'', p.codigo_rastreio||'', p.transportadora||'', p.status]);
+    const csv = [headers,...rows].map(r => r.map(c => `"${c}"`).join(',')).join('\n');
+    const blob = new Blob(['\uFEFF'+csv], { type: 'text/csv;charset=utf-8;' });
+    const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
+    a.download = `pedidos_${new Date().toISOString().slice(0,10)}.csv`; a.click();
+  }
+
+  return (<>
+    <div style={styles.filterRow}>
+      <select className="flex h-9 w-full rounded-lg border border-input bg-background px-3 py-2 text-sm shadow-sm shadow-black/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" value={filtroStatus} onChange={e => setFiltroStatus(e.target.value)}>
+        <option value="">Todos</option>
+        {Object.entries(PEDIDO_STATUS).map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}
+      </select>
+      <div style={{ display: 'flex', gap: 8, marginLeft: 'auto', alignItems: 'center' }}>
+        {selected.length > 0 && <Button variant="destructive" size="sm" onClick={bulkDelete}>{selected.length} selecionado(s) — Excluir</Button>}
+        <Button variant="outline" size="sm" onClick={exportPedidosCSV}>Exportar CSV</Button>
+        {isDiretor && <Button onClick={onNew}>+ Novo Pedido</Button>}
+      </div>
+    </div>
+    <div style={styles.card}><table style={styles.table}><thead><tr>
+      <th style={{ ...styles.th, width: 36 }}><input type="checkbox" checked={selected.length === data.length && data.length > 0} onChange={toggleAll} /></th>
+      <th style={styles.th}>Descrição</th><th style={styles.th}>Fornecedor</th><th style={styles.th}>Valor</th><th style={styles.th}>Data Prev.</th><th style={styles.th}>Rastreio</th><th style={styles.th}>Status</th><th style={styles.th}>Ações</th>
+    </tr></thead><tbody>
+      {loading ? <tr><td colSpan={8}><div className="flex items-center justify-center py-6 gap-2"><div className="h-4 w-4 animate-spin rounded-full border-2 border-muted-foreground/25 border-t-primary" /><span className="text-xs text-muted-foreground">Carregando...</span></div></td></tr>
+      : data.length === 0 ? <tr><td colSpan={8}><div className="flex flex-col items-center py-10 gap-2"><div className="h-10 w-10 rounded-full bg-muted flex items-center justify-center mb-1"><svg className="h-5 w-5 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M20 13V6a2 2 0 00-2-2H6a2 2 0 00-2 2v7m16 0v5a2 2 0 01-2 2H6a2 2 0 01-2-2v-5m16 0h-2.586a1 1 0 00-.707.293l-2.414 2.414a1 1 0 01-.707.293h-3.172a1 1 0 01-.707-.293l-2.414-2.414A1 1 0 006.586 13H4" /></svg></div><span className="text-sm font-medium text-foreground">Nenhum pedido</span></div></td></tr>
+      : data.map(p => (
+        <tr key={p.id} style={{ background: selected.includes(p.id) ? '#00B39D08' : 'transparent' }}>
+          <td style={{ ...styles.td, width: 36 }}><input type="checkbox" checked={selected.includes(p.id)} onChange={() => toggleSelect(p.id)} /></td>
+          <td style={{ ...styles.td, fontWeight: 600, maxWidth: 200 }}>{p.descricao}</td>
+          <td style={styles.td}>{p.log_fornecedores?.nome_fantasia || p.log_fornecedores?.razao_social || '—'}</td>
+          <td style={styles.td}>{fmtMoney(p.valor_total)}</td>
+          <td style={styles.td}>{fmtDate(p.data_prevista)}</td>
+          <td style={styles.td}>{p.codigo_rastreio || '—'}</td>
+          <td style={styles.td}><Badge status={p.status} map={PEDIDO_STATUS} /></td>
+          <td style={styles.td}><div style={{ display: 'flex', gap: 4 }}>
+            <Button variant="ghost" size="sm" onClick={() => onItens(p)} title="Itens">📦</Button>
+            {['aguardando', 'em_transito'].includes(p.status) && <>
+              <Button size="sm" className="bg-emerald-500 hover:bg-emerald-600 text-white" onClick={() => onReceber(p)} title="Receber">✓</Button>
+              <Button variant="ghost" size="sm" onClick={() => onEdit(p)}>✏️</Button>
+            </>}
+            {p.status !== 'recebido' && <Button variant="ghost" size="sm" onClick={() => onDelete(p.id)}>🗑</Button>}
+          </div></td>
+        </tr>
+      ))}
+    </tbody></table></div>
+  </>);
+}
+
+
+
+
+const NF_ORIGEM = {
+  manual: { c: C.text3, bg: '#73737318', label: 'Manual' },
+  mercadolivre: { c: '#FFE600', bg: '#FFE60020', label: 'Mercado Livre' },
+  arquivei: { c: C.blue, bg: C.blueBg, label: 'Arquivei' },
+  scan: { c: C.primary, bg: `${C.primary}18`, label: 'Escaneada' },
+};
+
+const NF_STATUS = {
+  registrada: { c: '#f59e0b', bg: '#f59e0b18', label: 'A revisar' },
+  enviada_financeiro: { c: C.blue, bg: C.blueBg, label: 'No financeiro' },
+  lancada: { c: C.green, bg: C.greenBg, label: 'Lançada' },
+  rejeitada: { c: C.red, bg: C.redBg, label: 'Devolvida' },
+};
+
+function NotasFiscaisTab({ data, loading, onNew, onDelete, onReload, onScan, scanning, onEdit, onEnviar }) {
+  const scanRef = useRef(null);
+  const xmlRef = useRef(null);
+  const [impNf, setImpNf] = useState({ rodando: false, feitos: 0, total: 0 });
+
+
+
+
+
+  async function importarXmls(fileList) {
+    const files = [...(fileList || [])];
+    if (!files.length) return;
+    setLocalError(''); setSuccessMsg('');
+
+    let arquivos = [];
+    const pdfs = [];
+
+
+    const comoBase64 = (buf) => {
+      let bin = ''; const b = new Uint8Array(buf);
+      for (let i = 0; i < b.length; i += 1) bin += String.fromCharCode(b[i]);
+      return btoa(bin);
+    };
+    try {
+      for (const f of files) {
+        if (/\.zip$/i.test(f.name)) {
+          const JSZip = (await import('jszip')).default;
+          const zip = await JSZip.loadAsync(f);
+          for (const z of Object.values(zip.files)) {
+            if (z.dir) continue;
+            if (/\.xml$/i.test(z.name)) arquivos.push({ nome: z.name, xml: await z.async('string') });
+            else if (/\.pdf$/i.test(z.name)) pdfs.push({ nome: z.name, base64: await z.async('base64') });
+          }
+        } else if (/\.pdf$/i.test(f.name)) {
+          pdfs.push({ nome: f.name, base64: comoBase64(await f.arrayBuffer()) });
+        } else {
+          arquivos.push({ nome: f.name, xml: await f.text() });
+        }
+      }
+    } catch (e) {
+      setLocalError('Não foi possível abrir o arquivo: ' + e.message);
+      return;
+    }
+    if (!arquivos.length && !pdfs.length) { setLocalError('Nenhum XML ou PDF encontrado no que você enviou.'); return; }
+
+
+
+
+    const LOTE = 25;
+    let importadas = 0, repetidas = 0, vinculadas = 0;
+    const recusadas = [], falhas = [];
+    setImpNf({ rodando: true, feitos: 0, total: arquivos.length + pdfs.length });
+    try {
+      for (let i = 0; i < arquivos.length; i += LOTE) {
+        const r = await logistica.notas.importarXml(arquivos.slice(i, i + LOTE));
+        importadas += r.importadas || 0;
+        repetidas += r.repetidas || 0;
+        vinculadas += r.vinculadas || 0;
+        recusadas.push(...(r.recusadas || []));
+        falhas.push(...(r.falhas || []));
+        setImpNf({ rodando: true, feitos: Math.min(i + LOTE, arquivos.length), total: arquivos.length });
+      }
+    } catch (e) {
+      setLocalError(`Importação interrompida: ${e.message}. ${importadas} nota(s) já foram gravadas.`);
+      setImpNf({ rodando: false, feitos: 0, total: 0 });
+      onReload();
+      return;
+    }
+
+
+    let anexados = 0, jaTinham = 0;
+    const semNota = [];
+    if (pdfs.length) {
+      const LOTE_PDF = 6;
+      try {
+        for (let i = 0; i < pdfs.length; i += LOTE_PDF) {
+          const r = await logistica.notas.importarDanfe(pdfs.slice(i, i + LOTE_PDF));
+          anexados += r.anexados || 0;
+          jaTinham += r.jaTinham || 0;
+          semNota.push(...(r.semNota || []));
+          setImpNf({ rodando: true, feitos: arquivos.length + Math.min(i + LOTE_PDF, pdfs.length),
+            total: arquivos.length + pdfs.length });
+        }
+      } catch (e) {
+        setLocalError(`DANFEs interrompidos: ${e.message}. ${anexados} já foram anexados.`);
+      }
+    }
+    setImpNf({ rodando: false, feitos: 0, total: 0 });
+
+
+
+
+
+
+
+
+
+    const semXml = semNota.filter(s => s.motivo === 'sem_xml_importado').length;
+    const semPedido = semNota.filter(s => s.motivo === 'nome_sem_pedido').length;
+
+    const partes = [];
+    if (arquivos.length) partes.push(`${importadas} nota(s) importada(s)`);
+    if (vinculadas) partes.push(`${vinculadas} nota(s) ganharam o nº do pedido`);
+    if (anexados) partes.push(`${anexados} DANFE anexado(s)`);
+    if (jaTinham) partes.push(`${jaTinham} DANFE já estavam`);
+    if (semXml) partes.push(`${semXml} PDF sem o XML da nota`);
+    if (semPedido) partes.push(`${semPedido} PDF com nome fora do padrão`);
+    if (repetidas) partes.push(`${repetidas} nota(s) já estavam`);
+    if (recusadas.length) partes.push(`${recusadas.length} recusada(s)`);
+    if (falhas.length) partes.push(`${falhas.length} falhou/falharam`);
+    setSuccessMsg(partes.join(' · '));
+
+
+    const avisos = [];
+    if (recusadas.length) {
+      const porMotivo = {};
+      for (const r of recusadas) porMotivo[r.erro] = (porMotivo[r.erro] || 0) + 1;
+      avisos.push(Object.entries(porMotivo).map(([k, v]) => `${v}× ${MOTIVO_NF[k] || k}`).join(' · '));
+    }
+    if (semXml) {
+      avisos.push(`${semXml} DANFE não achou a nota: importe o ZIP de XML do mesmo período — é ele que traz o número do pedido que casa os dois.`);
+    }
+    if (semPedido) {
+      const exemplo = semNota.find(s => s.motivo === 'nome_sem_pedido')?.nome;
+      avisos.push(`${semPedido} PDF sem a chave de acesso nem o nº do pedido no nome${exemplo ? ` (ex.: ${exemplo})` : ''} — baixe o ZIP pelo "Baixar NF-e disponíveis" do Mercado Livre, que já nomeia certo.`);
+    }
+    if (falhas.length) avisos.push(`${falhas.length} erro(s) ao gravar`);
+    if (avisos.length) setLocalError(avisos.join(' · '));
+    onReload();
+  }
+
+  const [syncing, setSyncing] = useState(false);
+  const [arquiveiStatus, setArquiveiStatus] = useState(null);
+  const [arquiveiForm, setArquiveiForm] = useState({ api_id: '', api_key: '', cnpj: '07023068000135' });
+  const [configuring, setConfiguring] = useState(false);
+  const [localError, setLocalError] = useState('');
+  const [successMsg, setSuccessMsg] = useState('');
+  const [nfEstoque, setNfEstoque] = useState(null);
+  const [espelhoId, setEspelhoId] = useState(null);
+
+
+
+  async function abrirDanfe(n) {
+    setEspelhoId(n.id); setLocalError('');
+    try {
+      const { logistica: apiLog } = await import('../../../api');
+      const r = await apiLog.notas.danfeUrl(n.id);
+      if (!window.open(r.url, '_blank')) {
+        setLocalError('O navegador bloqueou a janela. Libere pop-ups para este site.');
+      }
+    } catch (e) {
+      setLocalError(e?.message || 'Não foi possível abrir o DANFE.');
+    }
+    setEspelhoId(null);
+  }
+
+
+
+  async function abrirEspelho(n) {
+    setEspelhoId(n.id); setLocalError('');
+    try {
+
+
+
+
+
+
+
+      const r = await logistica.notas.nfe(n.id);
+      const { imprimirNfe } = await import('../../../lib/imprimirNfe');
+
+
+      if (!imprimirNfe(r.nota)) {
+        setLocalError('O navegador bloqueou a janela. Libere pop-ups para este site e tente de novo.');
+      }
+    } catch (e) {
+      setLocalError(e?.message || 'Não foi possível abrir a NF-e.');
+    }
+    setEspelhoId(null);
+  }
+
+
+  useEffect(() => { checkArquivei(); }, []);
+
+  async function checkArquivei() {
+    try { setArquiveiStatus(await arquivei.status()); } catch (e) { setArquiveiStatus({ connected: false }); }
+  }
+
+  async function syncML() {
+    setSyncing(true); setLocalError(''); setSuccessMsg('');
+    try {
+      const result = await ml.syncNotas();
+      setSuccessMsg(`${result.imported} nota(s) importada(s) do Mercado Livre`);
+      onReload();
+    } catch (e) { setLocalError(e.message); }
+    setSyncing(false);
+  }
+
+  async function syncArquiveiNFs() {
+    setSyncing(true); setLocalError(''); setSuccessMsg('');
+    try {
+      const result = await arquivei.sync();
+      setSuccessMsg(`${result.imported} nota(s) importada(s) do Arquivei`);
+      onReload();
+    } catch (e) { setLocalError(e.message); }
+    setSyncing(false);
+  }
+
+  async function connectArquivei() {
+    setConfiguring(true); setLocalError(''); setSuccessMsg('');
+    try {
+      await arquivei.config(arquiveiForm);
+      checkArquivei();
+      setSuccessMsg('Arquivei conectado com sucesso!');
+    } catch (e) { setLocalError(e.message); }
+    setConfiguring(false);
+  }
+
+  return (<>
+    {localError && (
+      <div style={{ background: C.redBg, color: C.red, padding: '10px 16px', borderRadius: 8, marginBottom: 12, fontSize: 13, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        {localError}
+        <Button variant="ghost" onClick={() => setLocalError('')}>&#x2715;</Button>
+      </div>
+    )}
+    {successMsg && (
+      <div style={{ background: C.greenBg, color: C.green, padding: '10px 16px', borderRadius: 8, marginBottom: 12, fontSize: 13, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        {successMsg}
+        <Button variant="ghost" onClick={() => setSuccessMsg('')}>&#x2715;</Button>
+      </div>
+    )}
+    {                    }
+    <div style={styles.filterRow}>
+      <input ref={scanRef} type="file" accept="image/jpeg,image/png,image/webp,application/pdf"
+        style={{ display: 'none' }}
+        onChange={e => { onScan(e.target.files?.[0]); e.target.value = ''; }} />
+      <Button onClick={() => scanRef.current?.click()} disabled={scanning}>
+        {scanning ? '⏳ Lendo a nota...' : '📷 Escanear nota fiscal'}
+      </Button>
+      <Button variant="outline" onClick={onNew}>+ Nova Nota Fiscal</Button>
+      {
+
+
+                                                                             }
+      <input ref={xmlRef} type="file" accept=".xml,.pdf,.zip" multiple style={{ display: 'none' }}
+        onChange={e => { importarXmls(e.target.files); e.target.value = ''; }} />
+      <Button variant="outline" onClick={() => xmlRef.current?.click()} disabled={impNf.rodando}
+        title="Aceita .xml, .pdf (DANFE) e .zip — o ZIP é aberto aqui no navegador">
+        {impNf.rodando
+          ? `⏳ Importando ${impNf.feitos}/${impNf.total}...`
+          : '📄 Importar NF-e (XML, DANFE ou ZIP)'}
+      </Button>
+      {arquiveiStatus?.connected ? (
+        <Button variant="outline" onClick={syncArquiveiNFs} disabled={syncing}>
+          {syncing ? '⏳ Sincronizando...' : '📋 Importar do Arquivei'}
+        </Button>
+      ) : (
+        <Button variant="ghost" onClick={() => setConfiguring(c => !c)}>
+          ⚙️ Configurar Arquivei
+        </Button>
+      )}
+    </div>
+
+    {                            }
+    {configuring && !arquiveiStatus?.connected && (
+      <div style={{ ...styles.card, padding: 20, marginBottom: 16 }}>
+        <div style={{ fontSize: 14, fontWeight: 700, color: C.text, marginBottom: 12 }}>Conectar Arquivei — Importar NFs por CNPJ</div>
+        <div style={{ fontSize: 12, color: C.text2, marginBottom: 12 }}>
+          O Arquivei captura automaticamente todas as NFs emitidas contra o CNPJ da igreja na Sefaz.
+          Crie uma conta em <a href="https://app.arquivei.com.br" target="_blank" rel="noopener noreferrer" style={{ color: C.primary }}>app.arquivei.com.br</a> e gere as credenciais da API.
+        </div>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 12 }}>
+          <Input label="API ID" value={arquiveiForm.api_id} onChange={e => setArquiveiForm(f => ({ ...f, api_id: e.target.value }))} />
+          <Input label="API Key" value={arquiveiForm.api_key} onChange={e => setArquiveiForm(f => ({ ...f, api_key: e.target.value }))} />
+          <Input label="CNPJ" value={arquiveiForm.cnpj} onChange={e => setArquiveiForm(f => ({ ...f, cnpj: e.target.value }))} />
+        </div>
+        <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+          <Button onClick={connectArquivei} disabled={!arquiveiForm.api_id || !arquiveiForm.api_key}>Conectar</Button>
+          <Button variant="ghost" onClick={() => setConfiguring(false)}>Cancelar</Button>
+        </div>
+      </div>
+    )}
+
+    {                            }
+    {arquiveiStatus?.connected && (
+      <div style={{ display: 'flex', gap: 12, marginBottom: 12, fontSize: 12, color: C.text2 }}>
+        <span>📋 Arquivei: <strong style={{ color: C.green }}>Conectado</strong> (CNPJ: {arquiveiStatus.cnpj})</span>
+        {arquiveiStatus.last_sync && <span>• Último sync: {fmtDateTime(arquiveiStatus.last_sync)}</span>}
+      </div>
+    )}
+
+    {            }
+    <div style={styles.card}><table style={styles.table}><thead><tr>
+      <th style={styles.th}>Número</th><th style={styles.th}>Emitente</th><th style={styles.th}>Valor</th><th style={styles.th}>Emissão</th><th style={styles.th}>Status</th><th style={styles.th}>Origem</th><th style={styles.th}>PDF</th><th style={styles.th}>Ações</th>
+    </tr></thead><tbody>
+      {loading ? <tr><td colSpan={8}><div className="flex items-center justify-center py-6 gap-2"><div className="h-4 w-4 animate-spin rounded-full border-2 border-muted-foreground/25 border-t-primary" /><span className="text-xs text-muted-foreground">Carregando...</span></div></td></tr>
+      : data.length === 0 ? <tr><td colSpan={8}><div className="flex flex-col items-center py-10 gap-2"><div className="h-10 w-10 rounded-full bg-muted flex items-center justify-center mb-1"><svg className="h-5 w-5 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M20 13V6a2 2 0 00-2-2H6a2 2 0 00-2 2v7m16 0v5a2 2 0 01-2 2H6a2 2 0 01-2-2v-5m16 0h-2.586a1 1 0 00-.707.293l-2.414 2.414a1 1 0 01-.707.293h-3.172a1 1 0 01-.707-.293l-2.414-2.414A1 1 0 006.586 13H4" /></svg></div><span className="text-sm font-medium text-foreground">Nenhuma nota fiscal</span><span className="text-xs text-muted-foreground">Escaneie uma nota ou importe do ML/Arquivei</span></div></td></tr>
+      : data.map(n => (
+        <tr key={n.id}>
+          <td style={{ ...styles.td, fontWeight: 600 }}>
+            {n.numero}
+            {n.serie && n.origem !== 'mercadolivre' ? `/${n.serie}` : ''}
+            {n.origem === 'mercadolivre' && n.serie && <div style={{ fontSize: 11, color: C.text3, maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{n.serie}</div>}
+            {n.descricao && <div style={{ fontSize: 11, color: C.text3, maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{n.descricao}</div>}
+          </td>
+          <td style={styles.td}>
+            {n.emitente_nome || n.log_fornecedores?.nome_fantasia || n.log_fornecedores?.razao_social || '—'}
+            {n.emitente_cnpj && <div style={{ fontSize: 11, color: C.text3 }}>{n.emitente_cnpj}</div>}
+          </td>
+          <td style={{ ...styles.td, fontWeight: 600 }}>{fmtMoney(n.valor)}</td>
+          <td style={styles.td}>{fmtDate(n.data_emissao)}</td>
+          <td style={styles.td}>
+            <Badge status={n.status || 'registrada'} map={NF_STATUS} />
+            {n.status === 'rejeitada' && n.rejeitada_motivo && <div style={{ fontSize: 11, color: C.red, maxWidth: 180 }}>{n.rejeitada_motivo}</div>}
+          </td>
+          <td style={styles.td}><Badge status={n.origem || 'manual'} map={NF_ORIGEM} /></td>
+          <td style={styles.td}>
+            {n.storage_path && !/^https?:\/\//i.test(n.storage_path) ? (
+
+
+
+              <button onClick={() => abrirDanfe(n)} disabled={espelhoId === n.id}
+                title="Abre o DANFE oficial (PDF) desta nota"
+                style={{ background: 'none', border: 0, padding: 0, cursor: 'pointer',
+                  color: C.primary, fontSize: 12, fontWeight: 600 }}>
+                {espelhoId === n.id ? '⏳ abrindo...' : '📕 DANFE'}
+              </button>
+            ) : n.storage_path ? (
+              <span style={{ display: 'inline-flex', gap: 10, whiteSpace: 'nowrap' }}>
+                <a href={n.storage_path} target="_blank" rel="noopener noreferrer" style={{ color: C.primary }}>📄 Ver</a>
+                {                                                                                     }
+                <a href={`${n.storage_path}${n.storage_path.includes('?') ? '&' : '?'}download`} style={{ color: C.primary, fontSize: 12 }}>⬇ Baixar</a>
+              </span>
+            ) : n.chave_acesso ? (
+
+
+
+              <button onClick={() => abrirEspelho(n)} disabled={espelhoId === n.id}
+                title="Abre o espelho da NF-e para imprimir ou salvar em PDF"
+                style={{ background: 'none', border: 0, padding: 0, cursor: 'pointer',
+                  color: C.primary, fontSize: 12 }}>
+                {espelhoId === n.id ? '⏳ abrindo...' : '📄 Ver NF-e'}
+              </button>
+            ) : n.origem === 'mercadolivre' && n.ml_order_id ? (
+              <a href={`https://www.mercadolivre.com.br/purchases/${n.ml_order_id}`} target="_blank" rel="noopener noreferrer" style={{ color: C.primary, fontSize: 12 }}>🛒 Ver no ML</a>
+            ) : '—'}
+          </td>
+          <td style={styles.td}>
+            <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
+              {['registrada', 'rejeitada'].includes(n.status) && (
+                <Button variant="outline" size="sm" onClick={() => onEnviar(n.id)}>Enviar pro financeiro</Button>
+              )}
+              {n.itens?.length > 0 && (
+                <Button variant="ghost" size="sm" title="Lançar itens no estoque" onClick={() => setNfEstoque(n)}>📦 Estoque</Button>
+              )}
+              {n.status !== 'lancada' && <Button variant="ghost" size="sm" onClick={() => onEdit(n)}>✏️</Button>}
+              {n.status !== 'lancada' && <Button variant="ghost" size="sm" onClick={() => onDelete(n.id)}>🗑</Button>}
+            </div>
+          </td>
+        </tr>
+      ))}
+    </tbody></table></div>
+
+    {nfEstoque && (
+      <NfEstoqueModal
+        nota={nfEstoque}
+        onClose={() => setNfEstoque(null)}
+        onDone={(count) => { setNfEstoque(null); setSuccessMsg(`${count} item(ns) lançado(s) no estoque a partir da NF.`); }}
+      />
+    )}
+  </>);
+}
+
+
+
+
+function NfEstoqueModal({ nota, onClose, onDone }) {
+  const [produtos, setProdutos] = useState([]);
+  const [linhas, setLinhas] = useState([]);
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState('');
+
+  useEffect(() => {
+    logistica.estoque.produtos().then(prods => {
+      const ps = Array.isArray(prods) ? prods : [];
+      setProdutos(ps);
+      const norm = s => String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
+      const match = (desc) => {
+        const toks = norm(desc).split(/\s+/).filter(w => w.length > 2);
+        let best = null, bs = 0;
+        for (const p of ps) { const pn = norm(p.nome); let s = 0; for (const w of toks) if (pn.includes(w)) s++; if (s > bs) { bs = s; best = p; } }
+        return bs >= 1 ? best : null;
+      };
+      setLinhas((nota.itens || []).map(it => {
+        const m = match(it.descricao);
+        return { desc: it.descricao, produto_id: m?.id || '', quantidade: it.quantidade || 1, validade: '', incluir: !!m };
+      }));
+    }).catch(e => setErr(e.message));
+  }, [nota]);
+
+  const prodMap = useMemo(() => Object.fromEntries(produtos.map(p => [p.id, p])), [produtos]);
+  const upd = (i, k, v) => setLinhas(L => L.map((l, j) => (j === i ? { ...l, [k]: v } : l)));
+
+  async function lancar() {
+    const movs = linhas
+      .filter(l => l.incluir && l.produto_id && Number(l.quantidade) > 0)
+      .map(l => ({ produto_id: l.produto_id, tipo: 'entrada', quantidade: Number(l.quantidade), validade: l.validade || null, motivo: `Entrada da NF ${nota.numero || ''}`.trim() }));
+    if (!movs.length) { setErr('Marque ao menos um item com produto e quantidade.'); return; }
+    setSaving(true); setErr('');
+    try { await logistica.estoque.lancar(movs); onDone(movs.length); }
+    catch (e) { setErr(e.message); } finally { setSaving(false); }
+  }
+
+  return (
+    <div style={{ position: 'fixed', inset: 0, background: 'var(--cbrio-overlay)', display: 'flex', justifyContent: 'center', alignItems: 'flex-start', paddingTop: 50, zIndex: 1100 }} onClick={onClose}>
+      <div style={{ background: 'var(--cbrio-modal-bg)', borderRadius: 12, width: '95%', maxWidth: 760, maxHeight: '85vh', overflowY: 'auto', padding: 24 }} onClick={e => e.stopPropagation()}>
+        <div style={{ fontSize: 18, fontWeight: 700, color: C.text, marginBottom: 6 }}>Lançar NF no estoque</div>
+        <div style={{ fontSize: 13, color: C.text2, marginBottom: 16 }}>Confirme o produto de cada item da nota {nota.numero ? `nº ${nota.numero}` : ''} e a quantidade. Itens sem produto ficam de fora (cadastre na aba Produtos antes).</div>
+        {err && <div style={{ background: C.redBg, color: C.red, padding: '8px 12px', borderRadius: 8, marginBottom: 12, fontSize: 13 }}>{err}</div>}
+        <table style={styles.table}>
+          <thead><tr>
+            <th style={styles.th}></th><th style={styles.th}>Item da nota</th><th style={styles.th}>Produto no estoque</th>
+            <th style={{ ...styles.th, width: 80, textAlign: 'right' }}>Qtd</th><th style={styles.th}>Validade</th>
+          </tr></thead>
+          <tbody>
+            {linhas.length === 0 ? <tr><td colSpan={5} style={styles.empty}>Esta nota não tem itens detalhados.</td></tr>
+              : linhas.map((l, i) => {
+                const p = prodMap[l.produto_id];
+                return (
+                  <tr key={i}>
+                    <td style={styles.td}><input type="checkbox" checked={l.incluir} onChange={e => upd(i, 'incluir', e.target.checked)} /></td>
+                    <td style={{ ...styles.td, fontSize: 12, maxWidth: 220 }}>{l.desc}</td>
+                    <td style={styles.td}>
+                      <select style={{ ...styles.select, width: '100%' }} value={l.produto_id} onChange={e => upd(i, 'produto_id', e.target.value)}>
+                        <option value="">— escolher —</option>
+                        {produtos.map(pp => <option key={pp.id} value={pp.id}>{pp.nome}</option>)}
+                      </select>
+                    </td>
+                    <td style={styles.td}><input type="number" min="0" step="any" style={{ ...styles.input, width: 70 }} value={l.quantidade} onChange={e => upd(i, 'quantidade', e.target.value)} /></td>
+                    <td style={styles.td}>{p?.controla_validade ? <DatePicker value={l.validade} onChange={v => upd(i, 'validade', v)} /> : <span style={{ color: C.text3, fontSize: 12 }}>—</span>}</td>
+                  </tr>
+                );
+              })}
+          </tbody>
+        </table>
+        <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 16 }}>
+          <Button variant="ghost" onClick={onClose}>Cancelar</Button>
+          <Button onClick={lancar} disabled={saving}>{saving ? 'Lançando...' : 'Lançar entradas'}</Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
+
+
+function NotaFiscalModal({ open, data, onClose, onSave, saving, fornecedores, pedidos, upNota, categorias }) {
+  const [uploading, setUploading] = useState(false);
+  const [localError, setLocalError] = useState('');
+  const fileRef = useRef(null);
+
+  async function handleUploadNF(file) {
+    if (!file) return;
+    setUploading(true); setLocalError('');
+    try {
+      const filePath = `notas-fiscais/${crypto.randomUUID()}_${file.name}`;
+      const { error } = await supabase.storage.from('log-arquivos').upload(filePath, file, { upsert: true });
+      if (error) throw error;
+
+
+
+
+      upNota('storage_path', filePath);
+    } catch (e) { setLocalError('Erro ao enviar arquivo: ' + e.message); }
+    finally { setUploading(false); }
+  }
+
+  const podeEnviar = data?.id && ['registrada', 'rejeitada'].includes(data.status);
+
+  return (
+    <Modal open={open} onClose={onClose} title={data?.id ? 'Revisar Nota Fiscal' : 'Nova Nota Fiscal'} wide
+      footer={<>
+        <Button variant="outline" onClick={onClose}>Cancelar</Button>
+        <Button onClick={() => onSave(false)} disabled={saving || uploading}>{saving ? 'Salvando...' : 'Salvar'}</Button>
+        {podeEnviar && (
+          <Button className="bg-emerald-500 hover:bg-emerald-600 text-white" onClick={() => onSave(true)} disabled={saving || uploading}>
+            {saving ? 'Enviando...' : 'Salvar e enviar pro financeiro'}
+          </Button>
+        )}
+      </>}>
+      {data && (<>
+        {localError && (
+          <div style={{ background: C.redBg, color: C.red, padding: '10px 16px', borderRadius: 8, marginBottom: 12, fontSize: 13, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            {localError}
+            <Button variant="ghost" onClick={() => setLocalError('')}>&#x2715;</Button>
+          </div>
+        )}
+        {data.status === 'rejeitada' && data.rejeitada_motivo && (
+          <div style={{ background: C.redBg, color: C.red, padding: '10px 16px', borderRadius: 8, marginBottom: 12, fontSize: 13 }}>
+            Devolvida pelo financeiro: {data.rejeitada_motivo}
+          </div>
+        )}
+        <div style={styles.formRow}>
+          <Input label="Número *" value={data.numero || ''} onChange={e => upNota('numero', e.target.value)} />
+          <Input label="Série" value={data.serie || ''} onChange={e => upNota('serie', e.target.value)} />
+        </div>
+        <div style={styles.formRow}>
+          <Input label="Valor *" type="number" step="0.01" value={data.valor || ''} onChange={e => upNota('valor', e.target.value)} />
+          <div style={styles.formGroup}><label className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-1 block">Data Emissão *</label><DatePicker value={data.data_emissao || ''} onChange={v => upNota('data_emissao', v)} /></div>
+        </div>
+        <div style={styles.formRow}>
+          <Input label="Emitente (quem vendeu)" value={data.emitente_nome || ''} onChange={e => upNota('emitente_nome', e.target.value)} />
+          <Input label="CNPJ do emitente" value={data.emitente_cnpj || ''} onChange={e => upNota('emitente_cnpj', e.target.value)} />
+        </div>
+        <Input label="O que foi comprado" value={data.descricao || ''} onChange={e => upNota('descricao', e.target.value)} />
+        <div style={styles.formRow}>
+          <Select label="Fornecedor" value={data.fornecedor_id || ''} onChange={e => upNota('fornecedor_id', e.target.value)}>
+            <option value="">Selecione...</option>
+            {fornecedores.filter(f => f.ativo).map(f => <option key={f.id} value={f.id}>{f.nome_fantasia || f.razao_social}</option>)}
+          </Select>
+          <Select label="Pedido" value={data.pedido_id || ''} onChange={e => upNota('pedido_id', e.target.value)}>
+            <option value="">Selecione...</option>
+            {pedidos.map(p => <option key={p.id} value={p.id}>{p.descricao?.slice(0, 40)}</option>)}
+          </Select>
+        </div>
+        <Input label="Chave de Acesso" value={data.chave_acesso || ''} onChange={e => upNota('chave_acesso', e.target.value)} />
+        {                                                                       }
+        {categorias?.planos?.length > 0 && (
+          <div style={{ background: `${C.primary}0d`, border: `1px solid ${C.primary}33`, borderRadius: 10, padding: 12, marginBottom: 12 }}>
+            <div style={{ fontSize: 12, fontWeight: 700, color: C.primary, marginBottom: 8 }}>Categoria sugerida pro financeiro</div>
+            {data.sugestao_explicacao && (
+              <div style={{ fontSize: 12, color: C.text2, marginBottom: 8 }}>{data.sugestao_explicacao}</div>
+            )}
+            <div style={styles.formRow}>
+              <Select label="Conta de despesa" value={data.sugestao_plano_contas_id || ''} onChange={e => upNota('sugestao_plano_contas_id', e.target.value)}>
+                <option value="">Sem sugestão (financeiro decide)</option>
+                {categorias.planos.map(p => <option key={p.id} value={p.id}>{p.codigo} · {p.nome}</option>)}
+              </Select>
+              <Select label="Centro de custo" value={data.sugestao_centro_custo_id || ''} onChange={e => upNota('sugestao_centro_custo_id', e.target.value)}>
+                <option value="">Sem centro de custo</option>
+                {categorias.centros.map(c => <option key={c.id} value={c.id}>{c.codigo} · {c.nome}</option>)}
+              </Select>
+            </div>
+          </div>
+        )}
+        {                             }
+        {Array.isArray(data.itens) && data.itens.length > 0 && (
+          <div style={{ border: `1px solid ${C.border}`, borderRadius: 10, padding: 12, marginBottom: 12, maxHeight: 160, overflowY: 'auto' }}>
+            <div style={{ fontSize: 12, fontWeight: 700, color: C.text2, marginBottom: 6 }}>Itens lidos da nota ({data.itens.length})</div>
+            {data.itens.map((it, i) => (
+              <div key={i} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, color: C.text2, padding: '2px 0' }}>
+                <span>{it.quantidade ? `${it.quantidade}× ` : ''}{it.descricao}</span>
+                <span>{fmtMoney(it.valor_total ?? it.valor_unitario)}</span>
+              </div>
+            ))}
+          </div>
+        )}
+        <Textarea label="Observações" value={data.observacoes || ''} onChange={e => upNota('observacoes', e.target.value)} />
+        {                }
+        <div style={styles.formGroup}>
+          <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-1 block">Arquivo da Nota Fiscal (foto ou PDF)</label>
+          <div
+            onDragOver={e => e.preventDefault()}
+            onDrop={e => { e.preventDefault(); handleUploadNF(e.dataTransfer.files?.[0]); }}
+            onClick={() => fileRef.current?.click()}
+            style={{ border: `2px dashed ${C.border}`, borderRadius: 10, padding: 16, textAlign: 'center', cursor: 'pointer' }}
+          >
+            <input ref={fileRef} type="file" accept="image/jpeg,image/png,image/webp,.pdf" style={{ display: 'none' }} onChange={e => handleUploadNF(e.target.files?.[0])} />
+            {data.storage_path ? (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, justifyContent: 'center' }}>
+                <span style={{ fontSize: 20 }}>📄</span>
+                <a href={data.storage_path} target="_blank" rel="noopener noreferrer" style={{ color: C.primary, fontSize: 13 }}>Arquivo enviado ↗</a>
+                <Button type="button" variant="ghost" className="text-red-500 text-xs" onClick={e => { e.stopPropagation(); upNota('storage_path', ''); }}>Remover</Button>
+              </div>
+            ) : uploading ? (
+              <div style={{ color: C.primary, fontSize: 13 }}>Enviando...</div>
+            ) : (
+              <><div style={{ fontSize: 20 }}>📄</div><div style={{ fontSize: 13, color: C.text2 }}>Arraste a foto/PDF aqui ou clique para selecionar</div></>
+            )}
+          </div>
+        </div>
+      </>)}
+    </Modal>
+  );
+}
+
+
+
+
+function ItensPedidoModal({ open, pedidoId, onClose }) {
+  const [itens, setItens] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [form, setForm] = useState({ descricao: '', quantidade: '', unidade: 'un', valor_unitario: '' });
+  const [adding, setAdding] = useState(false);
+  const [localError, setLocalError] = useState('');
+
+  useEffect(() => {
+    if (pedidoId) loadItens();
+  }, [pedidoId]);
+
+  async function loadItens() {
+    setLoading(true);
+    try { setItens(await logistica.pedidos.itens(pedidoId) || []); } catch (e) { console.error(e); }
+    setLoading(false);
+  }
+
+  async function addItem() {
+    if (!form.descricao || !form.quantidade) { setLocalError('Descrição e quantidade são obrigatórios'); return; }
+    setAdding(true); setLocalError('');
+    try {
+      await logistica.pedidos.addItem(pedidoId, form);
+      setForm({ descricao: '', quantidade: '', unidade: 'un', valor_unitario: '' });
+      loadItens();
+    } catch (e) { setLocalError(e.message); }
+    setAdding(false);
+  }
+
+  async function removeItem(id) {
+    setLocalError('');
+    try { await logistica.pedidos.removeItem(id); loadItens(); } catch (e) { setLocalError(e.message); }
+  }
+
+  const total = itens.reduce((s, i) => s + Number(i.valor_total || 0), 0);
+
+  return (
+    <Modal open={open} onClose={onClose} title="Itens do Pedido" wide>
+      {localError && (
+        <div style={{ background: C.redBg, color: C.red, padding: '10px 16px', borderRadius: 8, marginBottom: 12, fontSize: 13, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          {localError}
+          <Button variant="ghost" onClick={() => setLocalError('')}>&#x2715;</Button>
+        </div>
+      )}
+      {loading ? <div className="flex items-center justify-center py-6 gap-2"><div className="h-4 w-4 animate-spin rounded-full border-2 border-muted-foreground/25 border-t-primary" /><span className="text-xs text-muted-foreground">Carregando...</span></div> : (<>
+        <table style={styles.table}><thead><tr>
+          <th style={styles.th}>Descrição</th><th style={styles.th}>Qtd</th><th style={styles.th}>Un.</th><th style={styles.th}>V. Unit.</th><th style={styles.th}>V. Total</th><th style={styles.th}></th>
+        </tr></thead><tbody>
+          {itens.map(i => (
+            <tr key={i.id}>
+              <td style={styles.td}>{i.descricao}</td>
+              <td style={styles.td}>{i.quantidade}</td>
+              <td style={styles.td}>{i.unidade}</td>
+              <td style={styles.td}>{fmtMoney(i.valor_unitario)}</td>
+              <td style={styles.td}>{fmtMoney(i.valor_total)}</td>
+              <td style={styles.td}><Button variant="ghost" size="sm" onClick={() => removeItem(i.id)}>🗑</Button></td>
+            </tr>
+          ))}
+          {itens.length > 0 && <tr><td colSpan={4} style={{ ...styles.td, textAlign: 'right', fontWeight: 700 }}>Total:</td><td style={{ ...styles.td, fontWeight: 700 }}>{fmtMoney(total)}</td><td style={styles.td}></td></tr>}
+        </tbody></table>
+        {itens.length === 0 && <div style={{ ...styles.empty, padding: 16 }}>Nenhum item adicionado</div>}
+
+        {                   }
+        <div style={{ marginTop: 16, padding: 16, background: 'var(--cbrio-input-bg)', borderRadius: 10 }}>
+          <div style={{ fontSize: 13, fontWeight: 700, color: C.text, marginBottom: 12 }}>Adicionar Item</div>
+          <Input label="Descrição *" value={form.descricao} onChange={e => setForm(f => ({ ...f, descricao: e.target.value }))} />
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 12 }}>
+            <Input label="Quantidade *" type="number" step="0.001" value={form.quantidade} onChange={e => setForm(f => ({ ...f, quantidade: e.target.value }))} />
+            <Input label="Unidade" value={form.unidade} onChange={e => setForm(f => ({ ...f, unidade: e.target.value }))} />
+            <Input label="Valor Unitário" type="number" step="0.01" value={form.valor_unitario} onChange={e => setForm(f => ({ ...f, valor_unitario: e.target.value }))} />
+          </div>
+          <Button onClick={addItem} disabled={adding}>{adding ? 'Adicionando...' : 'Adicionar Item'}</Button>
+        </div>
+      </>)}
+    </Modal>
+  );
+}
+
+
+
+
+const ML_ORDER_STATUS = {
+  paid: { c: C.green, bg: C.greenBg, label: 'Pago' },
+  confirmed: { c: C.green, bg: C.greenBg, label: 'Confirmado' },
+  payment_required: { c: C.amber, bg: C.amberBg, label: 'Aguard. Pgto' },
+  payment_in_process: { c: C.amber, bg: C.amberBg, label: 'Pgto em Processo' },
+  cancelled: { c: C.red, bg: C.redBg, label: 'Cancelado' },
+};
+
+const ML_SHIP_STATUS = {
+  pending: { c: C.amber, bg: C.amberBg, label: 'Pendente' },
+  handling: { c: C.blue, bg: C.blueBg, label: 'Preparando' },
+  ready_to_ship: { c: C.blue, bg: C.blueBg, label: 'Pronto p/ Envio' },
+  shipped: { c: C.purple, bg: C.purpleBg, label: 'Enviado' },
+  in_transit: { c: C.purple, bg: C.purpleBg, label: 'Em Trânsito' },
+  delivered: { c: C.green, bg: C.greenBg, label: 'Entregue' },
+  not_delivered: { c: C.red, bg: C.redBg, label: 'Não Entregue' },
+  cancelled: { c: C.red, bg: C.redBg, label: 'Cancelado' },
+};
+
+
+
+
+async function copiarRastreio(codigo) {
+  try {
+    await navigator.clipboard.writeText(codigo);
+    toast.success('Código de rastreio copiado');
+  } catch {
+    toast.error('Não foi possível copiar o código');
+  }
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+function VincularSolicitacao({ order, solicitacoes: lista, carregando, erro, onVinculado, onRecarregar }) {
+  const [aberto, setAberto] = useState(false);
+  const [busca, setBusca] = useState('');
+  const [salvando, setSalvando] = useState(false);
+
+
+  const jaVinculada = (lista || []).find(s => String(s.ml_order_id || '') === String(order.id));
+
+  const filtradas = (lista || []).filter(s => {
+    if (!busca.trim()) return true;
+    const t = busca.trim().toLowerCase();
+    return [s.titulo, s.solicitante_nome, s.area_responsavel, s.area_cliente]
+      .filter(Boolean).some(v => String(v).toLowerCase().includes(t));
+  });
+
+  async function vincular(sol) {
+
+
+    if (sol.ml_order_id && String(sol.ml_order_id) !== String(order.id)) {
+      const ok = window.confirm(
+        `"${sol.titulo}" já está vinculada ao pedido #${sol.ml_order_id}.\n\n`
+        + `Vincular ao #${order.id} substitui o anterior. Continuar?`);
+      if (!ok) return;
+    }
+    setSalvando(true);
+    try {
+      await solicitacoesApi.vincularML(sol.id, String(order.id));
+      toast.success(`Pedido vinculado a "${sol.titulo}"`);
+      setAberto(false); setBusca('');
+      onVinculado?.();
+    } catch (e) {
+
+      toast.error(e?.message || 'Não foi possível vincular.');
+    }
+    setSalvando(false);
+  }
+
+  return (
+    <div style={{ marginTop: 14, paddingTop: 14, borderTop: `1px solid ${C.border}` }}>
+      <div style={{ fontSize: 11, color: C.text3, textTransform: 'uppercase', fontWeight: 600, marginBottom: 6 }}>
+        Solicitação de compra
+      </div>
+
+      {jaVinculada ? (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+          <span style={{ fontSize: 13, color: C.text }}>
+            ✅ Vinculado a <strong>{jaVinculada.titulo}</strong>
+          </span>
+          <a href={`/solicitacoes?id=${jaVinculada.id}`} style={{ fontSize: 12, color: C.primary }}>abrir ↗</a>
+        </div>
+      ) : !aberto ? (
+        <Button variant="outline" size="sm" onClick={() => { setAberto(true); onRecarregar?.(); }}>
+          🔗 Vincular a uma solicitação
+        </Button>
+      ) : (
+        <div>
+          <input value={busca} onChange={e => setBusca(e.target.value)} autoFocus
+            placeholder="Buscar por título, quem pediu ou área..."
+            style={{ width: '100%', padding: '8px 10px', borderRadius: 8, marginBottom: 8,
+              border: `1px solid ${C.border}`, background: 'var(--cbrio-input-bg)', color: C.text, fontSize: 13 }} />
+
+          {
+                                                              }
+          {erro ? (
+            <div style={{ fontSize: 13, color: C.red, padding: '10px 0' }}>
+              {erro} <button onClick={onRecarregar} style={{ color: C.primary, background: 'none', border: 0, cursor: 'pointer' }}>tentar de novo</button>
+            </div>
+          ) : carregando ? (
+            <div style={{ fontSize: 13, color: C.text3, padding: '10px 0' }}>Carregando solicitações...</div>
+          ) : filtradas.length === 0 ? (
+            <div style={{ fontSize: 13, color: C.text3, padding: '10px 0' }}>
+              {(lista || []).length === 0
+                ? 'Nenhuma solicitação de compra em aberto que você possa vincular.'
+                : 'Nada encontrado com esse texto.'}
+            </div>
+          ) : (
+            <div style={{ maxHeight: 260, overflowY: 'auto', border: `1px solid ${C.border}`, borderRadius: 8 }}>
+              {filtradas.map(s => (
+                <button key={s.id} onClick={() => vincular(s)} disabled={salvando}
+                  style={{ display: 'block', width: '100%', textAlign: 'left', padding: '10px 12px',
+                    background: 'none', border: 0, borderBottom: `1px solid ${C.border}`,
+                    cursor: salvando ? 'wait' : 'pointer', color: C.text }}>
+                  <div style={{ fontSize: 13, fontWeight: 600 }}>{s.titulo}</div>
+                  <div style={{ fontSize: 11, color: C.text3, marginTop: 2 }}>
+                    {s.solicitante_nome ? `${s.solicitante_nome} · ` : ''}
+                    {s.area_responsavel || s.area_cliente || 'sem área'} · {s.status}
+                    {s.ml_order_id ? ` · ⚠️ já tem o pedido #${s.ml_order_id}` : ''}
+                  </div>
+                </button>
+              ))}
+            </div>
+          )}
+
+          <button onClick={() => { setAberto(false); setBusca(''); }}
+            style={{ marginTop: 8, fontSize: 12, color: C.text3, background: 'none', border: 0, cursor: 'pointer' }}>
+            cancelar
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ComprasMLTab() {
+  const [mlStatus, setMlStatus] = useState(null);
+
+
+  const [solVinc, setSolVinc] = useState([]);
+  const [solLoading, setSolLoading] = useState(false);
+  const [solErro, setSolErro] = useState('');
+  const carregarVinculaveis = useCallback(async () => {
+    setSolLoading(true); setSolErro('');
+    try { setSolVinc(await solicitacoesApi.vinculaveisML() || []); }
+    catch (e) { setSolErro(e?.message || 'Não foi possível carregar as solicitações.'); }
+    setSolLoading(false);
+  }, []);
+  const [orders, setOrders] = useState([]);
+  const [paging, setPaging] = useState({ total: 0, offset: 0 });
+  const [loading, setLoading] = useState(true);
+  const [configForm, setConfigForm] = useState({ client_id: '', client_secret: '' });
+  const [configuring, setConfiguring] = useState(false);
+  const [filtroStatus, setFiltroStatus] = useState('');
+  const [busca, setBusca] = useState('');
+  const [expanded, setExpanded] = useState(null);
+  const [shipDetail, setShipDetail] = useState(null);
+  const [localError, setLocalError] = useState('');
+  const [cachedFlag, setCachedFlag] = useState(false);
+
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const code = params.get('code');
+    const isCallback = params.get('ml_callback');
+    if (isCallback && code) {
+
+      window.history.replaceState({}, '', window.location.pathname);
+      setLoading(true);
+      ml.authCallback(code)
+        .then(() => checkStatus())
+        .catch(e => { setLocalError('Erro ao autorizar ML: ' + e.message); setLoading(false); });
+    } else {
+      checkStatus();
+    }
+  }, []);
+
+  async function checkStatus() {
+    setLoading(true);
+    try {
+      const status = await ml.status();
+      setMlStatus(status);
+      if (status.connected) loadOrders();
+      else setLoading(false);
+    } catch (e) { setMlStatus({ connected: false }); setLoading(false); }
+  }
+
+  async function loadOrders(offset = 0, forceRefresh = false) {
+    setLoading(true);
+    setLocalError('');
+    try {
+      const params = { offset, limit: 20 };
+      if (filtroStatus) params.status = filtroStatus;
+      if (busca) params.q = busca;
+      if (forceRefresh) params.refresh = '1';
+      const data = await ml.orders(params);
+      setOrders(data.results || []);
+      setPaging({ total: data.paging?.total || 0, offset });
+      setCachedFlag(!!data._cached);
+    } catch (e) {
+      console.error(e);
+      setLocalError('Erro ao carregar pedidos: ' + e.message);
+    }
+    setLoading(false);
+  }
+
+  useEffect(() => { if (mlStatus?.connected) loadOrders(0); }, [filtroStatus]);
+
+
+  useEffect(() => { if (mlStatus?.connected) carregarVinculaveis(); }, [mlStatus?.connected, carregarVinculaveis]);
+
+  function handleSearch(e) {
+    if (e.key === 'Enter') loadOrders(0);
+  }
+
+  async function toggleExpand(order) {
+    if (expanded === order.id) { setExpanded(null); setShipDetail(null); return; }
+    setExpanded(order.id);
+    setShipDetail(null);
+    if (order.shipping?.id) {
+      try { setShipDetail(await ml.shipment(order.shipping.id)); } catch (e) { console.error(e); }
+    }
+  }
+
+  async function handleConfig() {
+    setConfiguring(true); setLocalError('');
+    try {
+      const data = await ml.config(configForm);
+      if (data.auth_url) window.location.href = data.auth_url;
+    } catch (e) { setLocalError(e.message); }
+    setConfiguring(false);
+  }
+
+  async function handleDisconnect() {
+    if (!confirm('Desconectar do Mercado Livre?')) return;
+    setLocalError('');
+    try { await ml.disconnect(); checkStatus(); } catch (e) { setLocalError(e.message); }
+  }
+
+  if (mlStatus && !mlStatus.connected) {
+    return (<>
+      {localError && (
+        <div style={{ background: C.redBg, color: C.red, padding: '10px 16px', borderRadius: 8, marginBottom: 12, fontSize: 13, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          {localError}
+          <Button variant="ghost" onClick={() => setLocalError('')}>&#x2715;</Button>
+        </div>
+      )}
+      <div style={{ ...styles.card, padding: 32, textAlign: 'center', maxWidth: 500, margin: '0 auto' }}>
+        <div style={{ fontSize: 48, marginBottom: 12 }}>🛒</div>
+        <div style={{ fontSize: 20, fontWeight: 700, color: C.text, marginBottom: 8 }}>Conectar ao Mercado Livre</div>
+        <div style={{ fontSize: 13, color: C.text2, marginBottom: 24 }}>Configure as credenciais do seu app do Mercado Livre para importar compras automaticamente.</div>
+        <div style={{ textAlign: 'left' }}>
+          <Input label="Client ID (App ID)" value={configForm.client_id} onChange={e => setConfigForm(f => ({ ...f, client_id: e.target.value }))} />
+          <Input label="Client Secret" type="password" value={configForm.client_secret} onChange={e => setConfigForm(f => ({ ...f, client_secret: e.target.value }))} />
+        </div>
+        <Button className="w-full mt-2 py-3 px-6 text-[15px]"
+          onClick={handleConfig} disabled={configuring || !configForm.client_id || !configForm.client_secret}>
+          {configuring ? 'Configurando...' : '🔗 Conectar ao Mercado Livre'}
+        </Button>
+        <div style={{ fontSize: 11, color: C.text3, marginTop: 16 }}>
+          Crie seu app em <a href="https://developers.mercadolivre.com.br" target="_blank" rel="noopener noreferrer" style={{ color: C.primary }}>developers.mercadolivre.com.br</a>
+        </div>
+      </div>
+    </>);
+  }
+
+  return (<>
+    {localError && (
+      <div style={{ background: C.redBg, color: C.red, padding: '10px 16px', borderRadius: 8, marginBottom: 12, fontSize: 13, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        {localError}
+        <Button variant="ghost" onClick={() => setLocalError('')}>&#x2715;</Button>
+      </div>
+    )}
+    {            }
+    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16, flexWrap: 'wrap', gap: 8 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+        <span style={{ fontSize: 20 }}>🛒</span>
+        <div>
+          <span style={{ fontSize: 14, fontWeight: 700, color: C.text }}>Mercado Livre</span>
+          {mlStatus?.nickname && <span style={{ fontSize: 12, color: C.text2, marginLeft: 8 }}>({mlStatus.nickname})</span>}
+          <span style={{ ...styles.badge(C.green, C.greenBg), marginLeft: 8 }}>Conectado</span>
+        </div>
+      </div>
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+        <input className="flex h-9 rounded-lg border border-input bg-background px-3 py-2 text-sm shadow-sm shadow-black/5 placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" style={{ width: 200 }} placeholder="Buscar por produto, ID..." value={busca}
+          onChange={e => setBusca(e.target.value)} onKeyDown={handleSearch} />
+        <select className="flex h-9 w-full rounded-lg border border-input bg-background px-3 py-2 text-sm shadow-sm shadow-black/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" value={filtroStatus} onChange={e => setFiltroStatus(e.target.value)}>
+          <option value="">Todos os status</option>
+          <option value="paid">Pagos</option>
+          <option value="confirmed">Confirmados</option>
+          <option value="cancelled">Cancelados</option>
+        </select>
+        <Button variant="ghost" size="sm" onClick={() => loadOrders(0, true)} title="Atualizar (ignora cache)">🔄 Atualizar</Button>
+        <Button variant="ghost" size="sm" className="text-red-500" onClick={handleDisconnect}>Desconectar</Button>
+      </div>
+    </div>
+    {cachedFlag && !loading && (
+      <div style={{ fontSize: 11, color: C.text3, marginBottom: 8, textAlign: 'right' }}>
+        💾 Dados em cache — clique em "Atualizar" para buscar novos pedidos
+      </div>
+    )}
+
+    {                      }
+    {loading ? <div className="flex items-center justify-center py-6 gap-2"><div className="h-4 w-4 animate-spin rounded-full border-2 border-muted-foreground/25 border-t-primary" /><span className="text-xs text-muted-foreground">Carregando compras...</span></div>
+    : orders.length === 0 ? <div className="flex flex-col items-center py-10 gap-2"><div className="h-10 w-10 rounded-full bg-muted flex items-center justify-center mb-1"><svg className="h-5 w-5 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M20 13V6a2 2 0 00-2-2H6a2 2 0 00-2 2v7m16 0v5a2 2 0 01-2 2H6a2 2 0 01-2-2v-5m16 0h-2.586a1 1 0 00-.707.293l-2.414 2.414a1 1 0 01-.707.293h-3.172a1 1 0 01-.707-.293l-2.414-2.414A1 1 0 006.586 13H4" /></svg></div><span className="text-sm font-medium text-foreground">Nenhuma compra encontrada</span></div>
+    : <div style={{ display: 'grid', gap: 12 }}>
+      {orders.map(o => {
+        const isExpanded = expanded === o.id;
+        const statusInfo = ML_ORDER_STATUS[o.status] || { c: C.text3, bg: '#73737318', label: o.status };
+        return (
+          <div key={o.id} style={{ ...styles.card, borderLeft: `4px solid ${statusInfo.c}`, cursor: 'pointer' }}
+            onClick={() => toggleExpand(o)}>
+            <div style={{ padding: '16px 20px' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12 }}>
+                {                          }
+                {(() => {
+                  const thumb = o.order_items?.[0]?.item?.thumbnail || o.order_items?.[0]?.item?.picture;
+                  return (
+                    <div style={{ width: 56, height: 56, borderRadius: 10, overflow: 'hidden', flexShrink: 0, background: 'var(--cbrio-input-bg)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                      {thumb ? <img src={thumb} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} /> : <span style={{ fontSize: 24 }}>📦</span>}
+                    </div>
+                  );
+                })()}
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  {(o.order_items || []).map((item, i) => (
+                    <div key={i} style={{ marginBottom: i < o.order_items.length - 1 ? 6 : 0 }}>
+                      <div style={{ fontSize: 14, fontWeight: 600, color: C.text }}>{item.item?.title}</div>
+                      <div style={{ fontSize: 12, color: C.text3 }}>Qtd: {item.quantity} • Unit: {fmtMoney(item.unit_price)}</div>
+                    </div>
+                  ))}
+                  <div style={{ fontSize: 12, color: C.text2, marginTop: 6 }}>
+                    <span style={{ fontFamily: 'monospace' }}>#{o.id}</span>
+                    <span style={{ marginLeft: 10 }}>Vendedor: <strong>{o.seller?.nickname || '—'}</strong></span>
+                    <span style={{ marginLeft: 10 }}>{o.date_created ? new Date(o.date_created).toLocaleDateString('pt-BR') : ''}</span>
+                  </div>
+                </div>
+                <div style={{ textAlign: 'right', flexShrink: 0 }}>
+                  <div style={{ fontSize: 18, fontWeight: 800, color: C.text }}>{fmtMoney(o.total_amount)}</div>
+                  <Badge status={o.status} map={ML_ORDER_STATUS} />
+                  <div style={{ fontSize: 14, color: C.text3, marginTop: 4, transition: 'transform 0.2s', transform: isExpanded ? 'rotate(180deg)' : '' }}>▼</div>
+                </div>
+              </div>
+
+              {
+
+
+
+
+                                                                    }
+              <div onClick={e => e.stopPropagation()}>
+                <VincularSolicitacao
+                  order={o}
+                  solicitacoes={solVinc}
+                  carregando={solLoading}
+                  erro={solErro}
+                  onRecarregar={carregarVinculaveis}
+                  onVinculado={carregarVinculaveis}
+                />
+              </div>
+            </div>
+
+            {                         }
+            {isExpanded && (
+              <div style={{ padding: '0 20px 16px', borderTop: `1px solid ${C.border}` }} onClick={e => e.stopPropagation()}>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: '12px 20px', paddingTop: 16 }}>
+                  <div>
+                    <div style={{ fontSize: 11, color: C.text3, textTransform: 'uppercase', fontWeight: 600 }}>Pagamento</div>
+                    <div style={{ fontSize: 14, color: C.text }}>{o.payments?.[0]?.payment_type === 'credit_card' ? '💳 Cartão' : o.payments?.[0]?.payment_type || '—'}</div>
+                    {o.payments?.[0]?.installments > 1 && <div style={{ fontSize: 12, color: C.text2 }}>{o.payments[0].installments}x de {fmtMoney(o.payments[0].installment_amount)}</div>}
+                  </div>
+                  <div>
+                    <div style={{ fontSize: 11, color: C.text3, textTransform: 'uppercase', fontWeight: 600 }}>Data da Compra</div>
+                    <div style={{ fontSize: 14, color: C.text }}>{o.date_created ? fmtDateTime(o.date_created) : '—'}</div>
+                  </div>
+                  <div>
+                    <div style={{ fontSize: 11, color: C.text3, textTransform: 'uppercase', fontWeight: 600 }}>Envio</div>
+                    {o.shipping?.id ? (
+                      <div style={{ fontSize: 14, color: C.text }}>#{o.shipping.id}</div>
+                    ) : <div style={{ fontSize: 14, color: C.text3 }}>Sem envio</div>}
+                  </div>
+                  <div>
+                    <div style={{ fontSize: 11, color: C.text3, textTransform: 'uppercase', fontWeight: 600 }}>Ver no ML</div>
+                    <a href={`https://www.mercadolivre.com.br/purchases/${o.id}`} target="_blank" rel="noopener noreferrer"
+                      style={{ fontSize: 13, color: C.primary, textDecoration: 'none' }}>Abrir compra ↗</a>
+                  </div>
+                </div>
+
+
+                {                            }
+                {shipDetail && (
+                  <div style={{ marginTop: 16, padding: 16, background: 'var(--cbrio-input-bg)', borderRadius: 10 }}>
+                    <div style={{ fontSize: 13, fontWeight: 700, color: C.text, marginBottom: 10 }}>📦 Informações de Envio</div>
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: '10px 16px' }}>
+                      <div>
+                        <div style={{ fontSize: 11, color: C.text3, fontWeight: 600 }}>STATUS</div>
+                        <Badge status={shipDetail.status} map={ML_SHIP_STATUS} />
+                        {shipDetail.substatus && <div style={{ fontSize: 11, color: C.text2, marginTop: 2 }}>{shipDetail.substatus}</div>}
+                      </div>
+                      {shipDetail.tracking_number && <div style={{ minWidth: 0 }}>
+                        <div style={{ fontSize: 11, color: C.text3, fontWeight: 600 }}>RASTREIO</div>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+                          <div
+                            title={shipDetail.tracking_number}
+                            style={{ fontSize: 14, fontFamily: 'monospace', fontWeight: 600, color: C.text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', minWidth: 0 }}
+                          >
+                            {shipDetail.tracking_number}
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => copiarRastreio(shipDetail.tracking_number)}
+                            title="Copiar código de rastreio"
+                            style={{ flexShrink: 0, padding: 3, background: 'none', border: 'none', cursor: 'pointer', color: C.text3, display: 'flex', alignItems: 'center' }}
+                          >
+                            <Copy size={14} />
+                          </button>
+                        </div>
+                      </div>}
+                      {shipDetail.tracking_method && <div>
+                        <div style={{ fontSize: 11, color: C.text3, fontWeight: 600 }}>TRANSPORTADORA</div>
+                        <div style={{ fontSize: 14, color: C.text }}>{shipDetail.tracking_method}</div>
+                      </div>}
+                      {shipDetail.date_created && <div>
+                        <div style={{ fontSize: 11, color: C.text3, fontWeight: 600 }}>CRIADO EM</div>
+                        <div style={{ fontSize: 14, color: C.text }}>{fmtDateTime(shipDetail.date_created)}</div>
+                      </div>}
+                      {shipDetail.last_updated && <div>
+                        <div style={{ fontSize: 11, color: C.text3, fontWeight: 600 }}>ATUALIZADO</div>
+                        <div style={{ fontSize: 14, color: C.text }}>{fmtDateTime(shipDetail.last_updated)}</div>
+                      </div>}
+                      {shipDetail.receiver_address && <div style={{ gridColumn: '1 / -1' }}>
+                        <div style={{ fontSize: 11, color: C.text3, fontWeight: 600 }}>ENDEREÇO DE ENTREGA</div>
+                        <div style={{ fontSize: 13, color: C.text }}>
+                          {[shipDetail.receiver_address.street_name, shipDetail.receiver_address.street_number].filter(Boolean).join(', ')}
+                          {shipDetail.receiver_address.city?.name && ` — ${shipDetail.receiver_address.city.name}`}
+                          {shipDetail.receiver_address.state?.name && ` / ${shipDetail.receiver_address.state.name}`}
+                          {shipDetail.receiver_address.zip_code && ` — CEP: ${shipDetail.receiver_address.zip_code}`}
+                        </div>
+                      </div>}
+                    </div>
+
+                    {                        }
+                    <div style={{ display: 'flex', gap: 4, marginTop: 12 }}>
+                      {['pending', 'handling', 'ready_to_ship', 'shipped', 'delivered'].map((step, i) => {
+                        const steps = ['pending', 'handling', 'ready_to_ship', 'shipped', 'delivered'];
+                        const currentIdx = steps.indexOf(shipDetail.status);
+                        const active = i <= currentIdx;
+                        const shipColor = (ML_SHIP_STATUS[shipDetail.status] || {}).c || C.text3;
+                        return <div key={step} style={{ flex: 1, height: 4, borderRadius: 2, background: active ? shipColor : C.border }} />;
+                      })}
+                    </div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 4 }}>
+                      {['Pendente', 'Preparando', 'Pronto', 'Enviado', 'Entregue'].map(l => <span key={l} style={{ fontSize: 9, color: C.text3 }}>{l}</span>)}
+                    </div>
+                  </div>
+                )}
+                {o.shipping?.id && !shipDetail && <div style={{ marginTop: 12, fontSize: 13, color: C.text3 }}>Carregando envio...</div>}
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </div>}
+
+    {               }
+    {paging.total > 20 && (
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 16 }}>
+        <span style={{ fontSize: 12, color: C.text2 }}>Mostrando {paging.offset + 1}–{Math.min(paging.offset + 20, paging.total)} de {paging.total}</span>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <Button variant="ghost" size="sm" disabled={paging.offset === 0} onClick={() => loadOrders(paging.offset - 20)}>← Anterior</Button>
+          <Button variant="ghost" size="sm" disabled={paging.offset + 20 >= paging.total} onClick={() => loadOrders(paging.offset + 20)}>Próximo →</Button>
+        </div>
+      </div>
+    )}
+  </>);
+}
+
+
+
+
+function RastreioMLTab() {
+  const [shipments, setShipments] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [expanded, setExpanded] = useState(null);
+  const [detail, setDetail] = useState(null);
+
+  useEffect(() => { loadShipments(); }, []);
+
+
+  useEffect(() => {
+    const hasActive = shipments.some(s => !['delivered', 'cancelled'].includes(s.status));
+    if (!hasActive) return;
+    const interval = setInterval(loadShipments, 60000);
+    return () => clearInterval(interval);
+  }, [shipments]);
+
+  const [shipError, setShipError] = useState('');
+
+  async function loadShipments(forceRefresh = false) {
+    setLoading(true);
+    setShipError('');
+    try {
+      const params = forceRefresh ? { refresh: 1 } : undefined;
+      const data = await ml.shipments(params);
+      setShipments(data || []);
+    } catch (e) {
+      console.error(e);
+      setShipError('Erro ao carregar rastreios: ' + e.message);
+    }
+    setLoading(false);
+  }
+
+  async function toggleDetail(shipId) {
+    if (expanded === shipId) { setExpanded(null); setDetail(null); return; }
+    setExpanded(shipId);
+    try {
+      const data = await ml.shipment(shipId);
+      setDetail(data);
+    } catch (e) { console.error(e); }
+  }
+
+
+  const emTransito = shipments.filter(s => ['shipped', 'in_transit', 'ready_to_ship', 'handling', 'pending'].includes(s.status));
+  const concluidos = shipments.filter(s => ['delivered', 'not_delivered', 'cancelled'].includes(s.status));
+
+  if (loading) return <div style={styles.empty}>Carregando rastreios...</div>;
+  if (shipments.length === 0) return (
+    <div style={{ ...styles.card, padding: 40, textAlign: 'center' }}>
+      <div style={{ fontSize: 48, marginBottom: 12 }}>📦</div>
+      <div style={{ fontSize: 16, fontWeight: 600, color: C.text }}>{shipError ? 'Erro ao carregar rastreios' : 'Nenhum envio encontrado'}</div>
+      <div style={{ fontSize: 13, color: shipError ? C.red : C.text2, marginTop: 4 }}>{shipError || 'Conecte ao Mercado Livre na aba "Compras ML" para ver os rastreios.'}</div>
+      <Button variant="outline" size="sm" style={{ marginTop: 16 }} onClick={() => loadShipments(true)}>🔄 Tentar novamente</Button>
+    </div>
+  );
+
+  return (<>
+    {shipError && (
+      <div style={{ background: C.redBg, color: C.red, padding: '10px 16px', borderRadius: 8, marginBottom: 12, fontSize: 13, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        {shipError}
+        <Button variant="ghost" onClick={() => setShipError('')}>&#x2715;</Button>
+      </div>
+    )}
+    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+      <div style={{ fontSize: 14, fontWeight: 700, color: C.text }}>📦 {emTransito.length} envio(s) em andamento</div>
+      <Button variant="ghost" size="sm" onClick={() => loadShipments(true)}>🔄 Atualizar</Button>
+    </div>
+
+    {                 }
+    {emTransito.length > 0 && (
+      <div style={{ display: 'grid', gap: 12, marginBottom: 24 }}>
+        {emTransito.map(s => (
+          <ShipmentCard key={s.id} ship={s} expanded={expanded === s.id}
+            detail={expanded === s.id ? detail : null}
+            onToggle={() => toggleDetail(s.id)} />
+        ))}
+      </div>
+    )}
+
+    {                }
+    {concluidos.length > 0 && (<>
+      <div style={{ fontSize: 13, fontWeight: 700, color: C.text2, textTransform: 'uppercase', marginBottom: 12, marginTop: 24 }}>
+        Concluídos ({concluidos.length})
+      </div>
+      <div style={{ display: 'grid', gap: 12 }}>
+        {concluidos.map(s => (
+          <ShipmentCard key={s.id} ship={s} expanded={expanded === s.id}
+            detail={expanded === s.id ? detail : null}
+            onToggle={() => toggleDetail(s.id)} />
+        ))}
+      </div>
+    </>)}
+  </>);
+}
+
+
+const TRACK_STEPS = [
+  { key: 'pending', label: 'Pedido Realizado', desc: 'Aguardando processamento' },
+  { key: 'handling', label: 'Preparando Envio', desc: 'Produto sendo separado' },
+  { key: 'ready_to_ship', label: 'Pronto para Envio', desc: 'Aguardando coleta' },
+  { key: 'shipped', label: 'Enviado', desc: 'Em trânsito' },
+  { key: 'delivered', label: 'Entregue', desc: 'Pedido finalizado' },
+];
+
+function ShipmentCard({ ship, expanded, detail, onToggle }) {
+  const items = ship.order_items || [];
+  const statusInfo = ML_SHIP_STATUS[ship.status] || { c: C.text3, bg: '#73737318', label: ship.status };
+  const currentStepIdx = TRACK_STEPS.findIndex(s => s.key === ship.status);
+  const itemImg = items[0]?.item?.thumbnail || items[0]?.item?.picture || null;
+
+  return (
+    <div style={{ ...styles.card, overflow: 'hidden', borderRadius: 14 }}>
+      {                                     }
+      <div style={{ display: 'flex', alignItems: 'center', gap: 14, padding: '14px 18px', cursor: 'pointer' }} onClick={onToggle}>
+        <div style={{ width: 48, height: 48, borderRadius: 8, background: statusInfo.bg, flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden' }}>
+          {itemImg ? <img src={itemImg} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} /> : <span style={{ fontSize: 22 }}>📦</span>}
+        </div>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontSize: 14, fontWeight: 600, color: C.text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {items[0]?.item?.title || 'Produto'}
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 2 }}>
+            <span style={{ fontSize: 14, fontWeight: 700, color: C.text }}>{fmtMoney(ship.total_amount)}</span>
+            <span style={{ fontSize: 11, color: C.text3 }}>#{ship.order_id}</span>
+          </div>
+        </div>
+        <span style={styles.badge(statusInfo.c, statusInfo.bg)}>{statusInfo.label}</span>
+        <span style={{ fontSize: 13, color: C.text3, transition: 'transform 0.2s', transform: expanded ? 'rotate(180deg)' : '' }}>▼</span>
+      </div>
+
+      {                                   }
+      <div style={{ padding: '0 18px 12px' }}>
+        <div style={{ display: 'flex', gap: 3 }}>
+          {TRACK_STEPS.map((step, i) => (
+            <div key={step.key} style={{ flex: 1, height: 3, borderRadius: 2, background: i <= currentStepIdx ? (i < currentStepIdx ? '#10b981' : statusInfo.c) : C.border }} />
+          ))}
+        </div>
+      </div>
+
+      {                                   }
+      {expanded && (
+        <div style={{ borderTop: `1px solid ${C.border}` }}>
+          {                       }
+          <div style={{ display: 'flex', alignItems: 'flex-start', gap: 16, padding: '16px 18px' }}>
+            <div style={{ width: 72, height: 72, borderRadius: 10, background: statusInfo.bg, flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden' }}>
+              {itemImg ? <img src={itemImg} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} /> : <span style={{ fontSize: 28 }}>📦</span>}
+            </div>
+            <div style={{ flex: 1 }}>
+              {items.map((item, i) => (
+                <div key={i} style={{ fontSize: 14, fontWeight: 700, color: C.text, lineHeight: 1.3 }}>{item.item?.title || 'Produto'}</div>
+              ))}
+              <div style={{ fontSize: 18, fontWeight: 700, color: C.text, marginTop: 4 }}>{fmtMoney(ship.total_amount)}</div>
+              {items[0]?.quantity > 1 && <div style={{ fontSize: 12, color: C.text2 }}>Qtd: {items[0].quantity}</div>}
+            </div>
+          </div>
+
+          {              }
+          <div style={{ padding: '0 18px 16px' }}>
+            <ul style={{ listStyle: 'none', margin: 0, padding: 0 }}>
+              {TRACK_STEPS.map((step, i) => {
+                const isCompleted = i < currentStepIdx;
+                const isActive = i === currentStepIdx;
+                const isPending = i > currentStepIdx;
+                const isLast = i === TRACK_STEPS.length - 1;
+                const dotColor = isCompleted ? '#10b981' : isActive ? statusInfo.c : C.border;
+
+                return (
+                  <li key={step.key} style={{ display: 'flex', alignItems: 'flex-start', gap: 12 }}>
+                    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', minWidth: 24 }}>
+                      <div style={{
+                        width: 24, height: 24, borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center',
+                        background: isCompleted ? '#10b98120' : isActive ? `${statusInfo.c}20` : 'var(--cbrio-input-bg)',
+                        border: `2px solid ${dotColor}`,
+                      }}>
+                        {isCompleted ? (
+                          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#10b981" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12" /></svg>
+                        ) : isActive ? (
+                          <div style={{ width: 8, height: 8, borderRadius: '50%', background: statusInfo.c }} />
+                        ) : (
+                          <div style={{ width: 6, height: 6, borderRadius: '50%', background: C.text3, opacity: 0.3 }} />
+                        )}
+                      </div>
+                      {!isLast && <div style={{ width: 2, height: 24, background: isCompleted ? '#10b981' : C.border, marginTop: 1 }} />}
+                    </div>
+                    <div style={{ paddingBottom: isLast ? 0 : 10, paddingTop: 2 }}>
+                      <div style={{ fontSize: 13, fontWeight: 600, color: isPending ? C.text3 : C.text }}>{step.label}</div>
+                      <div style={{ fontSize: 11, color: isPending ? C.text3 : C.text2 }}>{step.desc}</div>
+                    </div>
+                  </li>
+                );
+              })}
+            </ul>
+          </div>
+
+          {                      }
+          {detail && (
+            <div style={{ padding: '0 18px 16px' }}>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))', gap: '8px 16px', padding: '12px 14px', background: 'var(--cbrio-input-bg)', borderRadius: 10 }}>
+                {detail.tracking_number && (
+                  <div style={{ minWidth: 0 }}>
+                    <div style={{ fontSize: 10, color: C.text3, textTransform: 'uppercase', fontWeight: 600 }}>Rastreio</div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+                      <div
+                        title={detail.tracking_number}
+                        style={{ fontSize: 12, fontWeight: 600, fontFamily: 'monospace', color: C.text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', minWidth: 0 }}
+                      >
+                        {detail.tracking_number}
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => copiarRastreio(detail.tracking_number)}
+                        title="Copiar código de rastreio"
+                        style={{ flexShrink: 0, padding: 2, background: 'none', border: 'none', cursor: 'pointer', color: C.text3, display: 'flex', alignItems: 'center' }}
+                      >
+                        <Copy size={12} />
+                      </button>
+                    </div>
+                  </div>
+                )}
+                {detail.tracking_method && (
+                  <div><div style={{ fontSize: 10, color: C.text3, textTransform: 'uppercase', fontWeight: 600 }}>Transportadora</div>
+                    <div style={{ fontSize: 12, color: C.text }}>{detail.tracking_method}</div></div>
+                )}
+                {detail.date_created && (
+                  <div><div style={{ fontSize: 10, color: C.text3, textTransform: 'uppercase', fontWeight: 600 }}>Criação</div>
+                    <div style={{ fontSize: 12, color: C.text }}>{fmtDateTime(detail.date_created)}</div></div>
+                )}
+                {detail.last_updated && (
+                  <div><div style={{ fontSize: 10, color: C.text3, textTransform: 'uppercase', fontWeight: 600 }}>Atualização</div>
+                    <div style={{ fontSize: 12, color: C.text }}>{fmtDateTime(detail.last_updated)}</div></div>
+                )}
+                {detail.receiver_address && (
+                  <div style={{ gridColumn: '1 / -1' }}><div style={{ fontSize: 10, color: C.text3, textTransform: 'uppercase', fontWeight: 600 }}>Endereço</div>
+                    <div style={{ fontSize: 12, color: C.text }}>
+                      {[detail.receiver_address.street_name, detail.receiver_address.street_number].filter(Boolean).join(', ')}
+                      {detail.receiver_address.city?.name && ` — ${detail.receiver_address.city.name}`}
+                      {detail.receiver_address.state?.name && ` / ${detail.receiver_address.state.name}`}
+                      {detail.receiver_address.zip_code && ` • CEP: ${detail.receiver_address.zip_code}`}
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {                   }
+          <div style={{ padding: '0 18px 16px' }}>
+            <a href={`https://www.mercadolivre.com.br/purchases/${ship.order_id}`} target="_blank" rel="noopener noreferrer"
+              style={{ display: 'block', textAlign: 'center', padding: '10px 0', background: C.primary, color: '#fff', borderRadius: 8, fontWeight: 600, fontSize: 13, textDecoration: 'none' }}>
+              Ver no Mercado Livre ↗
+            </a>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+

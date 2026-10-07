@@ -1,0 +1,1364 @@
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+const express = require('express');
+const crypto = require('crypto');
+const router = express.Router();
+const { authenticate, authorizeModule } = require('../middleware/auth');
+const { nivelGuardNext, ROUTE_KEY: NEXT_ROUTE_KEY } = require('../utils/nextGuardNivel');
+const { supabase } = require('../utils/supabase');
+const { notificar } = require('../services/notificar');
+const { coletarTodos } = require('../services/kpiAutoCollector');
+const { escapePostgrestValue } = require('../utils/sanitize');
+const { direcionarMatricula, signDirecionarToken } = require('../services/nextDirecionar');
+
+
+const { horariosDisponiveis } = require('../utils/batismoHorario');
+const {
+  horariosConfigurados: batismoHorariosConfigurados,
+  ocupacaoPorHorario: batismoOcupacaoPorHorario,
+  dataProximoBatismo,
+} = require('../services/batismoHorarios');
+
+
+
+function recalcularKpisNext() {
+  setImmediate(async () => {
+    try {
+      await coletarTodos({ fontes: ['next.'] });
+    } catch (e) {
+      console.error('[next] erro ao recalcular KPIs:', e.message);
+    }
+  });
+}
+
+router.use(authenticate);
+
+
+
+
+
+
+
+const guardNextLeitura = authorizeModule(NEXT_ROUTE_KEY, 1);
+const guardNextEscrita = authorizeModule(NEXT_ROUTE_KEY, 2);
+router.use((req, res, next) => (
+  nivelGuardNext(req.method) === 2
+    ? guardNextEscrita(req, res, next)
+    : guardNextLeitura(req, res, next)
+));
+
+
+
+
+router.get('/eventos', async (req, res) => {
+  const { ano, mes, status } = req.query;
+  let q = supabase.from('next_eventos').select('*').order('data', { ascending: false });
+  if (status) q = q.eq('status', status);
+  if (ano) {
+    const start = `${ano}-01-01`;
+    const end = `${Number(ano) + 1}-01-01`;
+    q = q.gte('data', start).lt('data', end);
+  }
+  if (mes && ano) {
+    const m = String(mes).padStart(2, '0');
+    const start = `${ano}-${m}-01`;
+    const next = new Date(Date.UTC(Number(ano), Number(mes), 1)).toISOString().slice(0, 10);
+    q = q.gte('data', start).lt('data', next);
+  }
+  const { data, error } = await q.limit(500);
+  if (error) return res.status(500).json({ error: error.message });
+
+
+
+  const ids = (data || []).map(e => e.id);
+  let counts = {};
+  if (ids.length) {
+    const { data: rows } = await supabase
+      .from('vw_next_eventos_counts')
+      .select('evento_id, inscritos, checkins')
+      .in('evento_id', ids);
+    for (const row of (rows || [])) {
+      counts[row.evento_id] = { inscritos: Number(row.inscritos) || 0, checkins: Number(row.checkins) || 0 };
+    }
+  }
+  res.json((data || []).map(e => ({
+    ...e,
+    inscritos: counts[e.id]?.inscritos || 0,
+    checkins: counts[e.id]?.checkins || 0,
+  })));
+});
+
+router.post('/eventos', async (req, res) => {
+  const { data, titulo, observacoes, total_lista, presentes_impressa, presentes_manuscritos, arquivo_origem } = req.body || {};
+  if (!data) return res.status(400).json({ error: 'data obrigatoria' });
+  const { data: row, error } = await supabase
+    .from('next_eventos')
+    .insert({
+      data, titulo: titulo || null, observacoes: observacoes || null,
+      total_lista: total_lista ?? null,
+      presentes_impressa: presentes_impressa ?? null,
+      presentes_manuscritos: presentes_manuscritos ?? null,
+      arquivo_origem: arquivo_origem || null,
+    })
+    .select()
+    .single();
+  if (error) return res.status(500).json({ error: error.message });
+  res.json(row);
+});
+
+router.put('/eventos/:id', async (req, res) => {
+  const allowed = [
+    'data', 'titulo', 'observacoes', 'status',
+    'total_lista', 'presentes_impressa', 'presentes_manuscritos', 'arquivo_origem',
+  ];
+  const update = { updated_at: new Date().toISOString() };
+  for (const [k, v] of Object.entries(req.body || {})) {
+    if (allowed.includes(k)) update[k] = v;
+  }
+  const { data, error } = await supabase
+    .from('next_eventos').update(update).eq('id', req.params.id).select().single();
+  if (error) return res.status(500).json({ error: error.message });
+  res.json(data);
+});
+
+
+router.post('/eventos/auto-create-mes', async (req, res) => {
+  const ano = Number(req.body?.ano) || new Date().getFullYear();
+  const mes = Number(req.body?.mes) || (new Date().getMonth() + 1);
+
+  const datas = [];
+  let cursor = new Date(Date.UTC(ano, mes - 1, 1));
+
+  while (cursor.getUTCDay() !== 0) cursor.setUTCDate(cursor.getUTCDate() + 1);
+  for (let i = 0; i < 3; i++) {
+    datas.push(cursor.toISOString().slice(0, 10));
+    cursor.setUTCDate(cursor.getUTCDate() + 7);
+  }
+
+  const created = [];
+  for (const d of datas) {
+    const { data: row, error } = await supabase
+      .from('next_eventos')
+      .upsert({ data: d, titulo: `NEXT ${d}` }, { onConflict: 'data', ignoreDuplicates: true })
+      .select();
+    if (!error && row && row[0]) created.push(row[0]);
+  }
+  res.json({ ano, mes, datas, created: created.length });
+});
+
+
+
+
+router.get('/inscricoes', async (req, res) => {
+  const { evento_id, search, com_checkin, com_indicacao, origem_lista, limit } = req.query;
+  const maxLimit = Math.min(Number(limit) || 500, 5000);
+  let q = supabase.from('next_inscricoes').select('*, evento:next_eventos(id, data, titulo)')
+    .order('created_at', { ascending: false }).limit(maxLimit);
+  if (evento_id) q = q.eq('evento_id', evento_id);
+  if (com_checkin === 'true') q = q.not('check_in_at', 'is', null);
+  if (com_checkin === 'false') q = q.is('check_in_at', null);
+  if (origem_lista && ['impressa', 'manuscrito'].includes(origem_lista)) q = q.eq('origem_lista', origem_lista);
+  if (com_indicacao === 'true') {
+    q = q.or('indicou_batismo.eq.true,indicou_servir.eq.true,indicou_grupo.eq.true,indicou_dizimo.eq.true');
+  }
+  if (search) {
+    const s = `%${escapePostgrestValue(search)}%`;
+    q = q.or(`nome.ilike.${s},sobrenome.ilike.${s},email.ilike.${s},cpf.ilike.${s}`);
+  }
+  const { data, error } = await q;
+  if (error) return res.status(500).json({ error: error.message });
+  res.json(data || []);
+});
+
+router.get('/inscricoes/:id', async (req, res) => {
+  const { data, error } = await supabase
+    .from('next_inscricoes')
+    .select('*, evento:next_eventos(*), indicacoes:next_indicacoes(*)')
+    .eq('id', req.params.id)
+    .maybeSingle();
+  if (error) return res.status(500).json({ error: error.message });
+  if (!data) return res.status(404).json({ error: 'Inscrição não encontrada' });
+  res.json(data);
+});
+
+const { acharOuCriarGuardado } = require('../services/membroMatch');
+const { reconciliarCpfTardio } = require('../services/cpfReconciliar');
+const { normalizarCpf, cpfValido } = require('../utils/cpf');
+
+router.post('/inscricoes', async (req, res) => {
+  const { evento_id, nome, sobrenome, cpf, telefone, email, data_nascimento, observacoes, origem_lista } = req.body || {};
+  if (!nome || !evento_id) return res.status(400).json({ error: 'nome e evento_id obrigatórios' });
+  const cleanCpf = cpf ? String(cpf).replace(/\D/g, '') : null;
+  const validOrigemLista = ['impressa', 'manuscrito'].includes(origem_lista) ? origem_lista : null;
+
+
+
+
+  let membro_id = null;
+  try {
+    const r = await acharOuCriarGuardado({
+      cpf: cleanCpf, email, telefone,
+      nome: [nome, sobrenome].filter(Boolean).join(' '),
+      dataNascimento: data_nascimento || null,
+      status: 'visitante',
+      origem: 'next_inscricao_interna',
+    });
+    membro_id = r.membro_id;
+  } catch (e) {
+    console.error('next/inscricoes acharOuCriarGuardado failed:', e.message);
+
+  }
+
+  const { data, error } = await supabase
+    .from('next_inscricoes')
+    .insert({
+      evento_id, nome, sobrenome: sobrenome || null, cpf: cleanCpf,
+      telefone: telefone || null, email: email ? String(email).toLowerCase() : null,
+      data_nascimento: data_nascimento || null, observacoes: observacoes || null,
+      origem: 'manual', origem_lista: validOrigemLista,
+      registered_by: req.user?.id || null,
+      membro_id,
+    })
+    .select().single();
+  if (error) return res.status(500).json({ error: error.message });
+  res.json(data);
+});
+
+router.put('/inscricoes/:id', async (req, res) => {
+  const allowed = [
+    'nome', 'sobrenome', 'cpf', 'telefone', 'email', 'data_nascimento',
+    'observacoes', 'evento_id', 'ja_batizado', 'ja_voluntario', 'ja_doador',
+    'origem_lista',
+  ];
+  const update = { updated_at: new Date().toISOString() };
+  for (const [k, v] of Object.entries(req.body || {})) {
+    if (allowed.includes(k)) update[k] = v;
+  }
+  const { data, error } = await supabase
+    .from('next_inscricoes').update(update).eq('id', req.params.id).select().single();
+  if (error) return res.status(500).json({ error: error.message });
+  res.json(data);
+});
+
+
+
+
+router.post('/inscricoes/:id/checkin', async (req, res) => {
+  const { data, error } = await supabase
+    .from('next_inscricoes')
+    .update({
+      check_in_at: new Date().toISOString(),
+      check_in_by: req.user?.id || null,
+      updated_at: new Date().toISOString(),
+    })
+    .eq('id', req.params.id)
+    .select()
+    .single();
+  if (error) return res.status(500).json({ error: error.message });
+  res.json(data);
+});
+
+router.delete('/inscricoes/:id/checkin', async (req, res) => {
+  const { error } = await supabase
+    .from('next_inscricoes')
+    .update({ check_in_at: null, check_in_by: null, updated_at: new Date().toISOString() })
+    .eq('id', req.params.id);
+  if (error) return res.status(500).json({ error: error.message });
+  res.json({ ok: true });
+});
+
+
+
+
+const TIPOS_AREA = {
+  batismo: { area: 'integracao', flag: 'indicou_batismo', titulo: 'Nova indicacao de batismo no NEXT' },
+  servir: { area: 'voluntariado', flag: 'indicou_servir', titulo: 'Nova indicacao para servir no NEXT' },
+  grupo: { area: 'grupos', flag: 'indicou_grupo', titulo: 'Nova indicacao de grupo no NEXT' },
+  dizimo: { area: 'generosidade', flag: 'indicou_dizimo', titulo: 'Nova indicacao de dizimo no NEXT' },
+};
+
+router.post('/inscricoes/:id/indicacoes', async (req, res) => {
+  try {
+    const { tipos = [], observacoes } = req.body || {};
+    if (!Array.isArray(tipos) || tipos.length === 0) {
+      return res.status(400).json({ error: 'Informe ao menos um tipo' });
+    }
+    const validos = tipos.filter(t => TIPOS_AREA[t]);
+    if (validos.length === 0) return res.status(400).json({ error: 'Nenhum tipo valido' });
+
+
+    const update = {
+      indicacao_observacoes: observacoes || null,
+      indicacao_marcada_em: new Date().toISOString(),
+      indicacao_marcada_por: req.user?.id || null,
+      updated_at: new Date().toISOString(),
+    };
+    for (const t of validos) update[TIPOS_AREA[t].flag] = true;
+
+    const { data: insc, error: e1 } = await supabase
+      .from('next_inscricoes')
+      .update(update)
+      .eq('id', req.params.id)
+      .select()
+      .single();
+    if (e1) return res.status(500).json({ error: e1.message });
+
+
+    const linhas = validos.map(t => ({
+      inscricao_id: req.params.id,
+      tipo: t,
+      area_destino: TIPOS_AREA[t].area,
+      observacoes: observacoes || null,
+      status: 'pendente',
+    }));
+
+    for (const linha of linhas) {
+      await supabase
+        .from('next_indicacoes')
+        .upsert(linha, { onConflict: 'inscricao_id,tipo' });
+    }
+
+
+
+
+
+    const CONVERGE = {
+      grupo:  { destino: 'grupos',      valor_alvo: 'conectar', link: '/grupos' },
+      servir: { destino: 'voluntarios', valor_alvo: 'servir',   link: '/ministerial/voluntariado/encaminhados' },
+    };
+    const nomeCompleto = `${insc.nome || ''} ${insc.sobrenome || ''}`.trim() || insc.nome || 'Sem nome';
+    for (const t of validos) {
+      const cv = CONVERGE[t];
+      if (!cv) continue;
+      try {
+
+        const { data: jaTem } = await supabase
+          .from('jornada_encaminhamentos')
+          .select('id')
+          .eq('next_inscricao_id', req.params.id)
+          .eq('destino', cv.destino)
+          .is('deleted_at', null)
+          .limit(1).maybeSingle();
+        if (jaTem) continue;
+        await supabase.from('jornada_encaminhamentos').insert({
+          origem: 'next',
+          next_inscricao_id: req.params.id,
+          membro_id: insc.membro_id || null,
+          nome: nomeCompleto,
+          telefone: insc.telefone || null,
+          destino: cv.destino,
+          valor_alvo: cv.valor_alvo,
+          observacao: observacoes || null,
+          encaminhado_por: req.user?.id || null,
+        });
+      } catch (e) { console.error('[next] encaminhamento:', e.message); }
+    }
+
+
+    for (const t of validos) {
+      try {
+        await notificar({
+          modulo: TIPOS_AREA[t].area,
+          titulo: TIPOS_AREA[t].titulo,
+          mensagem: `${insc.nome} ${insc.sobrenome || ''} indicou ${t} no NEXT.`,
+          link: CONVERGE[t]?.link || '/ministerial/next?tab=indicacoes',
+        });
+      } catch (e) { console.error('[next] notificar:', e.message); }
+    }
+
+
+    recalcularKpisNext();
+
+    res.json({ ok: true, indicacoes: linhas.length });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+
+
+
+
+
+
+
+
+
+
+router.post('/matriculas/:id/direcionar', async (req, res) => {
+  try {
+    const b = req.body || {};
+    const r = await direcionarMatricula({
+      matriculaId: req.params.id,
+      destinos: b.destinos || [],
+      areas: b.areas || [],
+
+
+      horarioBatismo: b.horario_batismo || null,
+      userId: req.user?.id || null,
+    });
+    recalcularKpisNext();
+    res.json(r);
+  } catch (e) {
+    res.status(e.status || 500).json({ error: e.message, codigo: e.codigo, campo: e.campo });
+  }
+});
+
+
+
+
+
+
+router.get('/batismo-horarios', async (_req, res) => {
+  try {
+    const dataBatismo = await dataProximoBatismo();
+    const configurados = await batismoHorariosConfigurados();
+
+
+
+    if (!dataBatismo || configurados === null) {
+      return res.json({ data_batismo: dataBatismo || null, horarios: [], indisponivel: true });
+    }
+    const ocup = await batismoOcupacaoPorHorario(dataBatismo);
+    res.json({ data_batismo: dataBatismo, horarios: horariosDisponiveis(configurados, ocup) });
+  } catch (e) {
+    console.error('[next] batismo-horarios:', e.message);
+    res.json({ data_batismo: null, horarios: [], indisponivel: true });
+  }
+});
+
+
+router.get('/direcionar-qr', async (_req, res) => {
+  try {
+    const token = signDirecionarToken();
+    if (!token) return res.status(503).json({ error: 'QR indisponível (CRON_SECRET ausente no servidor)' });
+    res.json({ token });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+router.get('/indicacoes', async (req, res) => {
+  const { tipo, status, area } = req.query;
+  let q = supabase
+    .from('next_indicacoes')
+    .select('*, inscricao:next_inscricoes(id, nome, sobrenome, email, telefone, evento_id, evento:next_eventos(data))')
+    .order('created_at', { ascending: false })
+    .limit(500);
+  if (tipo) q = q.eq('tipo', tipo);
+  if (status) q = q.eq('status', status);
+  if (area) q = q.eq('area_destino', area);
+  const { data, error } = await q;
+  if (error) return res.status(500).json({ error: error.message });
+  res.json(data || []);
+});
+
+router.put('/indicacoes/:id', async (req, res) => {
+  const allowed = ['status', 'observacoes', 'atendido_por', 'atendido_em'];
+  const update = { updated_at: new Date().toISOString() };
+  for (const [k, v] of Object.entries(req.body || {})) {
+    if (allowed.includes(k)) update[k] = v;
+  }
+  if (req.body?.status === 'concluido' && !update.atendido_em) {
+    update.atendido_em = new Date().toISOString();
+    update.atendido_por = req.user?.id || null;
+  }
+  const { data, error } = await supabase
+    .from('next_indicacoes').update(update).eq('id', req.params.id).select().single();
+  if (error) return res.status(500).json({ error: error.message });
+  res.json(data);
+});
+
+
+
+
+router.get('/dashboard', async (_req, res) => {
+  const hoje = new Date();
+  const inicioMes = new Date(Date.UTC(hoje.getFullYear(), hoje.getMonth(), 1)).toISOString().slice(0, 10);
+  const inicioProxMes = new Date(Date.UTC(hoje.getFullYear(), hoje.getMonth() + 1, 1)).toISOString().slice(0, 10);
+
+  const [eventos, inscricoesMes, checkinsMes, indicPendentes] = await Promise.all([
+    supabase.from('next_eventos').select('id, data, status').gte('data', inicioMes).lt('data', inicioProxMes),
+    supabase.from('next_inscricoes').select('id', { count: 'exact', head: true })
+      .gte('created_at', inicioMes).lt('created_at', inicioProxMes),
+    supabase.from('next_inscricoes').select('id', { count: 'exact', head: true })
+      .not('check_in_at', 'is', null)
+      .gte('check_in_at', inicioMes).lt('check_in_at', inicioProxMes),
+    supabase.from('next_indicacoes').select('id', { count: 'exact', head: true }).eq('status', 'pendente'),
+  ]);
+
+  res.json({
+    eventos_mes: eventos.data || [],
+    inscricoes_mes: inscricoesMes.count || 0,
+    checkins_mes: checkinsMes.count || 0,
+    indicacoes_pendentes: indicPendentes.count || 0,
+  });
+});
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+async function recomputarStatusTurma(turmaId) {
+  if (!turmaId) return;
+  const { data: encontros } = await supabase.from('next_encontros').select('id').eq('turma_id', turmaId);
+  const encIds = (encontros || []).map(e => e.id);
+  const totalEnc = encIds.length;
+  const { data: mats } = await supabase
+    .from('next_matriculas').select('id, status').eq('turma_id', turmaId).is('deleted_at', null);
+  if (!mats || !mats.length) return;
+  const presByMat = {};
+  if (encIds.length) {
+    const { data: pres } = await supabase.from('next_presencas').select('matricula_id, presente').in('encontro_id', encIds);
+    (pres || []).forEach(p => { if (p.presente) presByMat[p.matricula_id] = (presByMat[p.matricula_id] || 0) + 1; });
+  }
+  for (const m of mats) {
+    if (m.status === 'desistiu') continue;
+    const n = presByMat[m.id] || 0;
+    const completo = totalEnc > 0 && n >= totalEnc;
+    if (m.status === 'incompleto') {
+
+      if (completo) {
+        await supabase.from('next_matriculas').update({ status: 'formado', updated_at: new Date().toISOString() }).eq('id', m.id);
+      }
+      continue;
+    }
+    const novo = completo ? 'formado' : 'matriculado';
+    if (novo !== m.status) {
+      await supabase.from('next_matriculas').update({ status: novo, updated_at: new Date().toISOString() }).eq('id', m.id);
+    }
+  }
+}
+
+
+router.get('/turmas', async (req, res) => {
+  const { status } = req.query;
+  let q = supabase.from('next_turmas').select('*').is('deleted_at', null).order('created_at', { ascending: false });
+  if (status) q = q.eq('status', status);
+  const { data: turmas, error } = await q.limit(500);
+  if (error) return res.status(500).json({ error: error.message });
+  const ids = (turmas || []).map(t => t.id);
+  const cont = {};
+  if (ids.length) {
+
+    const mats = [];
+    for (let from = 0; ; from += 1000) {
+      const { data: chunk, error: e2 } = await supabase
+        .from('next_matriculas').select('turma_id, status').is('deleted_at', null)
+        .in('turma_id', ids).order('id').range(from, from + 999);
+      if (e2 || !chunk || !chunk.length) break;
+      mats.push(...chunk);
+      if (chunk.length < 1000) break;
+    }
+    mats.forEach(m => {
+      const c = cont[m.turma_id] || (cont[m.turma_id] = { total: 0, formado: 0, matriculado: 0, incompleto: 0, desistiu: 0, encontros: 0 });
+      c.total += 1; if (c[m.status] !== undefined) c[m.status] += 1;
+    });
+    const { data: encs } = await supabase.from('next_encontros').select('turma_id, data').in('turma_id', ids);
+    (encs || []).forEach(e => {
+      const c = cont[e.turma_id] || (cont[e.turma_id] = { total: 0, encontros: 0 });
+      c.encontros = (c.encontros || 0) + 1;
+
+      if (e.data && (!c.primeiro_encontro || e.data < c.primeiro_encontro)) c.primeiro_encontro = e.data;
+    });
+  }
+  const lista = (turmas || []).map(t => ({ ...t, contagem: cont[t.id] || { total: 0, encontros: 0 } }));
+
+
+
+
+  const chave = t => t.origem_mes
+    || (t.contagem?.primeiro_encontro ? String(t.contagem.primeiro_encontro).slice(0, 7) : '')
+    || String(t.created_at || '').slice(0, 7);
+  lista.sort((a, b) => {
+    const ka = chave(a), kb = chave(b);
+    if (ka !== kb) return kb < ka ? -1 : 1;
+    return String(a.nome || '').localeCompare(String(b.nome || ''), 'pt');
+  });
+  res.json(lista);
+});
+
+
+
+
+
+
+router.get('/satisfacao', async (req, res) => {
+  try {
+
+
+    const buscar = () => supabase
+      .from('nps_pesquisas')
+      .select('id, titulo, link_publico_token, status, permite_publico')
+      .eq('contexto_kpi', 'nps_next')
+      .eq('area', 'next')
+      .is('deleted_at', null)
+      .order('created_at', { ascending: true })
+      .limit(1)
+      .maybeSingle();
+
+    let { data: pesquisa, error } = await buscar();
+    if (error) throw error;
+
+    if (!pesquisa) {
+
+      const token = crypto.randomBytes(18).toString('base64url');
+      const insert = {
+        titulo: 'Satisfação do Next',
+        valor: null,
+        objetivo: 'Medir a satisfação de quem passou pelo Next, por turma.',
+        contexto_kpi: 'nps_next',
+        area: 'next',
+        perguntas: {
+          descricao_curta: 'Conta pra gente como foi sua experiência no Next.',
+          pergunta_nps: {
+            id: 'nps',
+            tipo: 'nps',
+            texto: 'De 0 a 10, o quanto você recomendaria o Next para um amigo?',
+          },
+          perguntas_extras: [
+            { id: crypto.randomUUID(), tipo: 'escala_5', texto: 'Como você avalia os encontros?' },
+            { id: crypto.randomUUID(), tipo: 'texto_longo', texto: 'O que podemos melhorar?' },
+          ],
+        },
+        link_publico_token: token,
+        permite_publico: true,
+        data_inicio: new Date().toISOString().slice(0, 10),
+        data_fim: null,
+        status: 'ativa',
+        criado_por: req.user?.id || null,
+      };
+      const { data: criada, error: insErr } = await supabase
+        .from('nps_pesquisas')
+        .insert(insert)
+        .select('id, titulo, link_publico_token, status, permite_publico')
+        .single();
+      if (insErr) {
+
+        const { data: reBusca } = await buscar();
+        if (reBusca) pesquisa = reBusca;
+        else throw insErr;
+      } else {
+        pesquisa = criada;
+      }
+    }
+
+    res.json({
+      id: pesquisa.id,
+      titulo: pesquisa.titulo,
+      link_publico_token: pesquisa.link_publico_token,
+      status: pesquisa.status,
+      permite_publico: pesquisa.permite_publico,
+    });
+  } catch (e) {
+    console.error('[next] satisfacao:', e.message);
+    res.status(500).json({ error: 'Erro ao obter a pesquisa de satisfação' });
+  }
+});
+
+
+
+router.get('/lista-espera', async (req, res) => {
+
+
+  const { data, error } = await supabase.from('next_matriculas')
+    .select('id, nome, sobrenome, telefone, email, cpf, membro_id, observacoes, created_at')
+    .is('turma_id', null).is('deleted_at', null)
+    .order('created_at', { ascending: true })
+    .limit(1000);
+  if (error) return res.status(500).json({ error: error.message });
+  res.json({ count: (data || []).length, pessoas: data || [] });
+});
+
+
+router.post('/turmas', async (req, res) => {
+  const { nome, responsavel_id, observacoes, encontros } = req.body || {};
+  if (!nome || !String(nome).trim()) return res.status(400).json({ error: 'nome obrigatório' });
+
+
+
+
+  const { data: turma, error } = await supabase
+    .from('next_turmas')
+    .insert({ nome: String(nome).trim(), responsavel_id: responsavel_id || null, observacoes: observacoes || null })
+    .select().single();
+  if (error) return res.status(500).json({ error: error.message });
+
+
+
+  const base = Array.isArray(encontros) && encontros.length ? encontros : [{ numero: 1 }];
+  const rows = base.map((e, i) => ({ turma_id: turma.id, numero: e.numero || (i + 1), data: e.data || null, tema: e.tema || null }));
+  const { error: encErr } = await supabase.from('next_encontros').insert(rows);
+  if (encErr) return res.status(500).json({ error: encErr.message });
+
+
+
+
+
+  let puxados = 0;
+  const { count: outrasAbertas } = await supabase.from('next_turmas')
+    .select('id', { count: 'exact', head: true })
+    .eq('status', 'aberta').is('deleted_at', null).neq('id', turma.id);
+  if (!outrasAbertas) try {
+    const { data: espera } = await supabase.from('next_matriculas')
+      .select('id').is('turma_id', null).is('deleted_at', null);
+    for (const m of (espera || [])) {
+      const { error: upErr } = await supabase.from('next_matriculas')
+        .update({ turma_id: turma.id, status: 'matriculado', updated_at: new Date().toISOString() })
+        .eq('id', m.id).is('turma_id', null);
+      if (!upErr) puxados += 1;
+      else if (upErr.code !== '23505') console.error('[next] puxar espera:', upErr.message);
+    }
+  } catch (e) { console.error('[next] puxar lista de espera:', e.message); }
+
+  res.status(201).json({ ...turma, puxados_da_espera: puxados });
+});
+
+
+router.get('/turmas/:id', async (req, res) => {
+  const { id } = req.params;
+  const { data: turma, error } = await supabase.from('next_turmas').select('*').eq('id', id).is('deleted_at', null).maybeSingle();
+  if (error) return res.status(500).json({ error: error.message });
+  if (!turma) return res.status(404).json({ error: 'Turma não encontrada' });
+  const { data: encontros } = await supabase.from('next_encontros').select('*').eq('turma_id', id).order('numero');
+  const { data: matriculas } = await supabase.from('next_matriculas').select('*').eq('turma_id', id).is('deleted_at', null).order('nome');
+  const encIds = (encontros || []).map(e => e.id);
+  let presencas = [];
+  if (encIds.length) {
+    const { data: pres } = await supabase.from('next_presencas').select('*').in('encontro_id', encIds);
+    presencas = pres || [];
+  }
+  res.json({ ...turma, encontros: encontros || [], matriculas: matriculas || [], presencas });
+});
+
+
+router.patch('/turmas/:id', async (req, res) => {
+  const b = req.body || {};
+
+  const patch = {};
+  ['nome', 'status', 'responsavel_id', 'observacoes'].forEach(k => { if (k in b) patch[k] = b[k]; });
+  patch.updated_at = new Date().toISOString();
+  const { data, error } = await supabase.from('next_turmas').update(patch).eq('id', req.params.id).is('deleted_at', null).select().maybeSingle();
+  if (error) return res.status(500).json({ error: error.message });
+  if (b.status === 'encerrada') {
+    await recomputarStatusTurma(req.params.id);
+    await supabase.from('next_matriculas')
+      .update({ status: 'incompleto', updated_at: new Date().toISOString() })
+      .eq('turma_id', req.params.id).is('deleted_at', null)
+      .not('status', 'in', '("formado","desistiu")');
+  } else if (b.status === 'aberta') {
+
+
+    await supabase.from('next_matriculas')
+      .update({ status: 'matriculado', updated_at: new Date().toISOString() })
+      .eq('turma_id', req.params.id).is('deleted_at', null)
+      .eq('status', 'incompleto');
+    await recomputarStatusTurma(req.params.id);
+  }
+  res.json(data);
+});
+
+
+router.delete('/turmas/:id', async (req, res) => {
+  const { error } = await supabase.rpc('app_soft_delete', { p_table_name: 'next_turmas', p_row_id: req.params.id, p_deleted_by: req.user?.id ?? null });
+  if (error) return res.status(500).json({ error: error.message });
+  res.json({ ok: true });
+});
+
+
+router.patch('/encontros/:id', async (req, res) => {
+  const b = req.body || {};
+  const patch = {};
+  ['numero', 'data', 'tema', 'observacoes'].forEach(k => { if (k in b) patch[k] = b[k]; });
+  const { data, error } = await supabase.from('next_encontros').update(patch).eq('id', req.params.id).select().maybeSingle();
+  if (error) return res.status(500).json({ error: error.message });
+  res.json(data);
+});
+
+
+
+router.put('/encontros/:id/presencas', async (req, res) => {
+  const encontroId = req.params.id;
+  const presentes = Array.isArray(req.body?.matricula_ids) ? req.body.matricula_ids : [];
+  const { data: enc } = await supabase.from('next_encontros').select('id, turma_id').eq('id', encontroId).maybeSingle();
+  if (!enc) return res.status(404).json({ error: 'Encontro não encontrado' });
+  await supabase.from('next_presencas').delete().eq('encontro_id', encontroId);
+  if (presentes.length) {
+    const rows = presentes.map(mid => ({ encontro_id: encontroId, matricula_id: mid, presente: true }));
+    const { error: insErr } = await supabase.from('next_presencas').insert(rows);
+    if (insErr) return res.status(500).json({ error: insErr.message });
+  }
+  await recomputarStatusTurma(enc.turma_id);
+  recalcularKpisNext();
+  res.json({ ok: true });
+});
+
+
+
+
+router.post('/encontros/:id/presenca', async (req, res) => {
+  const encontroId = req.params.id;
+  const matriculaId = req.body?.matricula_id;
+  const presente = req.body?.presente !== false;
+  if (!matriculaId) return res.status(400).json({ error: 'matricula_id obrigatório' });
+  const { data: enc } = await supabase.from('next_encontros').select('id, turma_id').eq('id', encontroId).maybeSingle();
+  if (!enc) return res.status(404).json({ error: 'Encontro não encontrado' });
+
+  await supabase.from('next_presencas').delete().eq('encontro_id', encontroId).eq('matricula_id', matriculaId);
+  if (presente) {
+    const { error: insErr } = await supabase.from('next_presencas')
+      .insert({ encontro_id: encontroId, matricula_id: matriculaId, presente: true });
+    if (insErr) return res.status(500).json({ error: insErr.message });
+  }
+  await supabase.from('next_matriculas')
+    .update({ check_in_at: presente ? new Date().toISOString() : null, updated_at: new Date().toISOString() })
+    .eq('id', matriculaId);
+  await recomputarStatusTurma(enc.turma_id);
+  recalcularKpisNext();
+  res.json({ ok: true, presente });
+});
+
+
+router.get('/matriculas', async (req, res) => {
+  const { turma_id, fila, search } = req.query;
+  let q = supabase.from('next_matriculas').select('*').is('deleted_at', null);
+  if (fila === 'true') q = q.is('turma_id', null);
+  else if (turma_id) q = q.eq('turma_id', turma_id);
+  if (search) {
+    const s = escapePostgrestValue(String(search));
+    q = q.or(`nome.ilike.%${s}%,sobrenome.ilike.%${s}%,email.ilike.%${s}%,telefone.ilike.%${s}%`);
+  }
+  const { data, error } = await q.order('created_at', { ascending: false }).limit(1000);
+  if (error) return res.status(500).json({ error: error.message });
+  res.json(data || []);
+});
+
+
+router.post('/matriculas', async (req, res) => {
+  const b = req.body || {};
+  if (!b.nome || !String(b.nome).trim()) return res.status(400).json({ error: 'nome obrigatório' });
+  if (b.cpf && String(b.cpf).replace(/\D/g, '') && !cpfValido(b.cpf)) {
+    return res.status(400).json({ error: 'CPF inválido — confira os dígitos' });
+  }
+
+
+
+  let membro_id = b.membro_id || null;
+  if (!membro_id) {
+    try {
+      const r = await acharOuCriarGuardado({
+        cpf: b.cpf, email: b.email, telefone: b.telefone,
+        nome: [b.nome, b.sobrenome].filter(Boolean).join(' '),
+        dataNascimento: b.data_nascimento || null, status: 'visitante',
+        origem: 'next_matricula', origemId: b.id,
+      });
+      membro_id = r.membro_id;
+    } catch (e) { console.error('[next/matriculas] matcher:', e.message);                                         }
+  }
+  const row = {
+    turma_id: b.turma_id || null,
+    nome: String(b.nome).trim(), sobrenome: b.sobrenome || null,
+
+    cpf: normalizarCpf(b.cpf), telefone: b.telefone || null, email: b.email || null,
+    data_nascimento: b.data_nascimento || null, observacoes: b.observacoes || null,
+    membro_id,
+    ja_batizado: !!b.ja_batizado, ja_voluntario: !!b.ja_voluntario, ja_doador: !!b.ja_doador,
+    indicou_batismo: !!b.indicou_batismo, indicou_servir: !!b.indicou_servir,
+    indicou_grupo: !!b.indicou_grupo, indicou_dizimo: !!b.indicou_dizimo,
+    origem: 'manual', registered_by: req.user?.id ?? null,
+  };
+  const { data, error } = await supabase.from('next_matriculas').insert(row).select().single();
+  if (error) return res.status(500).json({ error: error.message });
+  recalcularKpisNext();
+  res.status(201).json(data);
+});
+
+
+function podeBackfillNext(req) {
+  const r = req.user?.role;
+  if (r === 'admin' || r === 'diretor') return true;
+  const mp = req.user?.granular?.modulePerms || {};
+  return (mp.next?.escrita || 0) >= 3 || (mp.integracao?.escrita || 0) >= 3;
+}
+
+
+
+
+router.post('/matriculas/backfill-membros', async (req, res) => {
+  if (!podeBackfillNext(req)) return res.status(403).json({ error: 'Sem permissão para vincular em lote' });
+  try {
+    const orfas = await fetchAllNext('next_matriculas',
+      'id, nome, sobrenome, cpf, telefone, email, data_nascimento',
+      (q) => q.is('deleted_at', null).is('membro_id', null));
+    let vinculados = 0, criados = 0, falhas = 0;
+    for (const m of orfas) {
+      try {
+        const r = await acharOuCriarGuardado({
+          cpf: m.cpf, email: m.email, telefone: m.telefone,
+          nome: [m.nome, m.sobrenome].filter(Boolean).join(' '),
+          dataNascimento: m.data_nascimento || null, status: 'visitante',
+          origem: 'next_reconciliacao', origemId: m.id,
+        });
+        if (!r?.membro_id) { falhas += 1; continue; }
+        const { error } = await supabase.from('next_matriculas')
+          .update({ membro_id: r.membro_id, updated_at: new Date().toISOString() })
+          .eq('id', m.id).is('membro_id', null);
+        if (error) { falhas += 1; continue; }
+        if (r.created) criados += 1; else vinculados += 1;
+      } catch { falhas += 1; }
+    }
+    recalcularKpisNext();
+    res.json({ total: orfas.length, vinculados, criados, falhas });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+
+router.patch('/matriculas/:id', async (req, res) => {
+  const b = req.body || {};
+  const patch = {};
+  ['turma_id', 'nome', 'sobrenome', 'cpf', 'telefone', 'email', 'data_nascimento', 'observacoes', 'membro_id',
+    'ja_batizado', 'ja_voluntario', 'ja_doador', 'indicou_batismo', 'indicou_servir', 'indicou_grupo', 'indicou_dizimo',
+    'status'].forEach(k => { if (k in b) patch[k] = b[k]; });
+  if ('cpf' in patch) {
+    if (patch.cpf && String(patch.cpf).replace(/\D/g, '') && !cpfValido(patch.cpf)) {
+      return res.status(400).json({ error: 'CPF inválido — confira os dígitos' });
+    }
+    patch.cpf = normalizarCpf(patch.cpf);
+  }
+  patch.updated_at = new Date().toISOString();
+  const { data, error } = await supabase.from('next_matriculas').update(patch).eq('id', req.params.id).is('deleted_at', null).select().maybeSingle();
+  if (error) return res.status(500).json({ error: error.message });
+
+
+
+
+
+  if (patch.cpf && data && !('membro_id' in patch)) {
+    (async () => {
+      try {
+        if (data.membro_id) {
+          await reconciliarCpfTardio({
+            membroId: data.membro_id, cpf: patch.cpf,
+            origem: 'next_matricula_edicao', origemId: data.id,
+            dataNascimento: data.data_nascimento || null,
+          });
+        } else {
+          const r = await acharOuCriarGuardado({
+            cpf: data.cpf, email: data.email, telefone: data.telefone,
+            nome: [data.nome, data.sobrenome].filter(Boolean).join(' '),
+            dataNascimento: data.data_nascimento || null, status: 'visitante',
+            origem: 'next_matricula_edicao', origemId: data.id,
+          });
+          if (r?.membro_id) {
+            await supabase.from('next_matriculas')
+              .update({ membro_id: r.membro_id, updated_at: new Date().toISOString() })
+              .eq('id', data.id).is('membro_id', null);
+          }
+        }
+      } catch (e2) {
+        console.error('[next/matriculas PATCH] reconciliar cpf:', e2.message);
+      }
+    })();
+  }
+
+  if ('turma_id' in b && b.turma_id) await recomputarStatusTurma(b.turma_id);
+  recalcularKpisNext();
+  res.json(data);
+});
+
+
+
+
+
+
+router.post('/matriculas/:id/transferir', async (req, res) => {
+  const destinoId = req.body?.turma_id;
+  if (!destinoId) return res.status(400).json({ error: 'turma_id de destino obrigatório' });
+
+
+  const { data: mat } = await supabase.from('next_matriculas')
+    .select('id, turma_id, nome').eq('id', req.params.id).is('deleted_at', null).maybeSingle();
+  if (!mat) return res.status(404).json({ error: 'Matrícula não encontrada' });
+  if (mat.turma_id === destinoId) return res.status(400).json({ error: 'A pessoa já está nessa turma' });
+
+
+  const { data: destino } = await supabase.from('next_turmas')
+    .select('id, nome, status').eq('id', destinoId).is('deleted_at', null).maybeSingle();
+  if (!destino) return res.status(404).json({ error: 'Turma de destino não encontrada' });
+
+  const origemId = mat.turma_id;
+
+
+
+  if (origemId) {
+    const { data: encsOrigem } = await supabase.from('next_encontros').select('id').eq('turma_id', origemId);
+    const encIds = (encsOrigem || []).map(e => e.id);
+    if (encIds.length) {
+      await supabase.from('next_presencas').delete().eq('matricula_id', mat.id).in('encontro_id', encIds);
+    }
+  }
+
+
+  const { data: atualizada, error } = await supabase.from('next_matriculas')
+    .update({ turma_id: destinoId, status: 'matriculado', check_in_at: null, updated_at: new Date().toISOString() })
+    .eq('id', mat.id).is('deleted_at', null).select().maybeSingle();
+  if (error) return res.status(500).json({ error: error.message });
+
+
+  if (origemId) await recomputarStatusTurma(origemId);
+  await recomputarStatusTurma(destinoId);
+  recalcularKpisNext();
+  res.json({ ...atualizada, turma_destino_nome: destino.nome });
+});
+
+
+
+router.patch('/matriculas/:id/contato', async (req, res) => {
+  const feito = req.body?.feito !== false;
+  const patch = feito
+    ? { contato_em: new Date().toISOString(), contato_por: req.user?.id ?? null }
+    : { contato_em: null, contato_por: null };
+  const { data, error } = await supabase.from('next_matriculas')
+    .update(patch).eq('id', req.params.id).is('deleted_at', null)
+    .select('id, contato_em, contato_por').maybeSingle();
+  if (error) return res.status(500).json({ error: error.message });
+  if (!data) return res.status(404).json({ error: 'Matrícula não encontrada' });
+  res.json(data);
+});
+
+
+router.delete('/matriculas/:id', async (req, res) => {
+  const { error } = await supabase.rpc('app_soft_delete', { p_table_name: 'next_matriculas', p_row_id: req.params.id, p_deleted_by: req.user?.id ?? null });
+  if (error) return res.status(500).json({ error: error.message });
+  recalcularKpisNext();
+  res.json({ ok: true });
+});
+
+
+
+
+
+
+
+
+const MESES_PT = ['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'];
+function nomeMesAtual() { const d = new Date(); return `${MESES_PT[d.getMonth()]} ${d.getFullYear()}`; }
+
+async function fetchAllNext(table, columns, applyFilter) {
+  const out = []; let from = 0; const page = 1000;
+  while (true) {
+    let q = supabase.from(table).select(columns).range(from, from + page - 1);
+    if (applyFilter) q = applyFilter(q);
+    const { data, error } = await q;
+    if (error) throw error;
+    out.push(...(data || []));
+    if (!data || data.length < page) break;
+    from += page;
+  }
+  return out;
+}
+
+router.get('/pessoas', async (req, res) => {
+  try {
+    const { area } = req.query;
+    const DIA = 86400000; const agora = Date.now();
+    const digits = (v) => String(v || '').replace(/\D/g, '');
+    const nomeKey = (s) => String(s || '').trim().toLowerCase() || null;
+
+    const convertidos = await fetchAllNext('cui_convertidos',
+      'id, nome, telefone, cpf, membro_id, data_culto, area, next_resolucao, next_resolucao_em',
+      (q) => { q = q.is('deleted_at', null); return area ? q.eq('area', area) : q; });
+    const matriculas = await fetchAllNext('next_matriculas',
+      'id, turma_id, nome, sobrenome, cpf, telefone, email, membro_id, status, indicou_grupo, indicou_servir, indicou_batismo, indicou_devocional',
+      (q) => q.is('deleted_at', null));
+    const turmas = await fetchAllNext('next_turmas', 'id, nome', (q) => q.is('deleted_at', null));
+    const turmaNome = new Map(turmas.map(t => [t.id, t.nome]));
+
+
+
+
+
+    const formadosPessoa = await fetchAllNext('vw_next_formado_pessoa', 'membro_id, cpf');
+    const fMembro = new Set(), fCpf = new Set();
+    for (const f of formadosPessoa) {
+      if (f.membro_id) fMembro.add(f.membro_id);
+      const c = digits(f.cpf); if (c.length === 11) fCpf.add(c);
+    }
+    const fezNext = (p) => {
+      if (p && p.membro_id && fMembro.has(p.membro_id)) return true;
+      const c = digits(p && p.cpf); return c.length === 11 && fCpf.has(c);
+    };
+
+    const dirFlags = (mm) => ({
+      indicou_grupo: !!(mm && mm.indicou_grupo), indicou_servir: !!(mm && mm.indicou_servir),
+      indicou_batismo: !!(mm && mm.indicou_batismo), indicou_devocional: !!(mm && mm.indicou_devocional),
+    });
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    const primeiroNome = (s) => nomeKey(String(s || '').trim().split(/\s+/)[0]);
+    const tel8 = (v) => { const d = digits(v); return d.length >= 10 ? d.slice(-8) : null; };
+    const mByMembro = new Map(), mByCpf = new Map(), mByNome = new Map(), mByTel = new Map();
+    for (const m of matriculas) {
+      if (m.membro_id && !mByMembro.has(m.membro_id)) mByMembro.set(m.membro_id, m);
+      const c = digits(m.cpf); if (c.length === 11 && !mByCpf.has(c)) mByCpf.set(c, m);
+      const nk = nomeKey(`${m.nome || ''} ${m.sobrenome || ''}`); if (nk && !mByNome.has(nk)) mByNome.set(nk, m);
+      const t = tel8(m.telefone);
+      if (t) { if (!mByTel.has(t)) mByTel.set(t, []); mByTel.get(t).push(m); }
+    }
+    const matchMatricula = (cv) => {
+      if (cv.membro_id && mByMembro.has(cv.membro_id)) return mByMembro.get(cv.membro_id);
+      const c = digits(cv.cpf); if (c.length === 11 && mByCpf.has(c)) return mByCpf.get(c);
+      const nk = nomeKey(cv.nome); if (nk && mByNome.has(nk)) return mByNome.get(nk);
+      const t = tel8(cv.telefone), pn = primeiroNome(cv.nome);
+      if (t && pn && mByTel.has(t)) {
+        const m = mByTel.get(t).find((x) => primeiroNome(x.nome) === pn);
+        if (m) return m;
+      }
+      return null;
+    };
+
+    const usados = new Set();
+    const itens = [];
+
+    for (const cv of convertidos) {
+      const m = matchMatricula(cv);
+      if (m) usados.add(m.id);
+      const dias = cv.data_culto ? Math.floor((agora - new Date(cv.data_culto + 'T12:00:00').getTime()) / DIA) : null;
+      let next_status; let bucket = null;
+      if (cv.next_resolucao) next_status = 'resolvido';
+      else if (fezNext(cv) || fezNext(m) || (m && m.status === 'formado')) next_status = 'formado';
+      else if (m) next_status = 'matriculado';
+      else { next_status = 'nao_inscrito'; bucket = dias == null ? 'no_prazo' : dias > 90 ? 'fora_prazo' : dias > 75 ? 'vencendo' : 'no_prazo'; }
+      itens.push({
+        tipo: 'convertido', convertido_id: cv.id, matricula_id: m ? m.id : null,
+        nome: cv.nome, telefone: cv.telefone, email: null, membro_id: cv.membro_id,
+        area: cv.area, data_nsm: cv.data_culto, dias_desde_conversao: dias,
+        turma_id: m ? m.turma_id : null, turma_nome: m && m.turma_id ? (turmaNome.get(m.turma_id) || null) : null,
+        next_status, bucket, next_resolucao: cv.next_resolucao || null, next_resolucao_em: cv.next_resolucao_em || null,
+        ...dirFlags(m),
+      });
+    }
+
+    for (const m of matriculas) {
+      if (usados.has(m.id)) continue;
+      itens.push({
+        tipo: 'externo', convertido_id: null, matricula_id: m.id,
+        nome: `${m.nome || ''}${m.sobrenome ? ' ' + m.sobrenome : ''}`.trim(), telefone: m.telefone, email: m.email, membro_id: m.membro_id,
+        area: null, data_nsm: null, dias_desde_conversao: null,
+        turma_id: m.turma_id, turma_nome: m.turma_id ? (turmaNome.get(m.turma_id) || null) : null,
+        next_status: (fezNext(m) || m.status === 'formado') ? 'formado' : 'matriculado', bucket: null, next_resolucao: null, next_resolucao_em: null,
+        ...dirFlags(m),
+      });
+    }
+
+
+    itens.sort((a, b) => {
+      if (a.tipo !== b.tipo) return a.tipo === 'convertido' ? -1 : 1;
+      const da = a.data_nsm || ''; const db = b.data_nsm || '';
+      return db < da ? -1 : db > da ? 1 : 0;
+    });
+
+    const resumo = {
+      total: itens.length,
+      convertidos: itens.filter(i => i.tipo === 'convertido').length,
+      externos: itens.filter(i => i.tipo === 'externo').length,
+      formados: itens.filter(i => i.next_status === 'formado').length,
+      nao_inscritos: itens.filter(i => i.next_status === 'nao_inscrito').length,
+      no_prazo: itens.filter(i => i.bucket === 'no_prazo' || i.bucket === 'vencendo').length,
+      fora_prazo: itens.filter(i => i.bucket === 'fora_prazo').length,
+      resolvidos: itens.filter(i => i.next_status === 'resolvido').length,
+    };
+    res.json({ itens, resumo });
+  } catch (e) {
+    console.error('[next/pessoas]', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+
+
+router.post('/convertidos/:id/resolver', async (req, res) => {
+  const { resolucao } = req.body || {};
+  const VALID = ['contatado', 'sem_interesse', 'encerrado'];
+  if (!VALID.includes(resolucao)) return res.status(400).json({ error: 'resolucao inválida' });
+  const { data, error } = await supabase.from('cui_convertidos')
+    .update({ next_resolucao: resolucao, next_resolucao_em: new Date().toISOString(), next_resolucao_por: req.user?.id ?? null })
+    .eq('id', req.params.id).is('deleted_at', null).select('id').maybeSingle();
+  if (error) return res.status(500).json({ error: error.message });
+  if (!data) return res.status(404).json({ error: 'Convertido não encontrado' });
+  res.json({ ok: true });
+});
+
+
+router.delete('/convertidos/:id/resolver', async (req, res) => {
+  const { error } = await supabase.from('cui_convertidos')
+    .update({ next_resolucao: null, next_resolucao_em: null, next_resolucao_por: null })
+    .eq('id', req.params.id);
+  if (error) return res.status(500).json({ error: error.message });
+  res.json({ ok: true });
+});
+
+
+
+
+
+
+
+
+router.get('/curso', async (_req, res) => {
+  try {
+    const DIA = 86400000, agora = Date.now();
+    const digits = (v) => String(v || '').replace(/\D/g, '');
+    const nomeKey = (s) => String(s || '').trim().toLowerCase() || null;
+
+    const matriculas = await fetchAllNext('next_matriculas',
+      'id, membro_id, cpf, nome, sobrenome, telefone, status, created_at',
+      (q) => q.is('deleted_at', null));
+    const encontros = await fetchAllNext('next_encontros', 'id, numero', null);
+    const numByEnc = new Map(encontros.map(e => [e.id, e.numero]));
+    const presencas = await fetchAllNext('next_presencas', 'matricula_id, encontro_id, presente', null);
+    const a1ByMat = new Set(), a2ByMat = new Set();
+    for (const p of presencas) {
+      if (!p.presente) continue;
+      const num = numByEnc.get(p.encontro_id);
+      if (num === 1) a1ByMat.add(p.matricula_id);
+      else if (num === 2) a2ByMat.add(p.matricula_id);
+    }
+    const manual = await fetchAllNext('next_pessoa_aula_manual', 'membro_id, fez_aula1, fez_aula2, observacao', null);
+    const manByMembro = new Map(manual.map(m => [m.membro_id, m]));
+
+
+
+    const cpfToMembro = new Map(), nomeToMembro = new Map();
+    for (const m of matriculas) {
+      if (!m.membro_id) continue;
+      const c = digits(m.cpf); if (c.length === 11 && !cpfToMembro.has(c)) cpfToMembro.set(c, m.membro_id);
+      const nk = nomeKey(`${m.nome || ''} ${m.sobrenome || ''}`); if (nk && !nomeToMembro.has(nk)) nomeToMembro.set(nk, m.membro_id);
+    }
+
+
+    const byKey = new Map();
+    for (const m of matriculas) {
+      const c = digits(m.cpf);
+      const nk = nomeKey(`${m.nome || ''} ${m.sobrenome || ''}`);
+      const key = m.membro_id
+        || (c.length === 11 && cpfToMembro.get(c))
+        || (nk && nomeToMembro.get(nk))
+        || (c.length === 11 ? 'cpf:' + c : 'nome:' + (nk || m.id));
+      let g = byKey.get(key);
+      if (!g) { g = { membro_id: null, cpf: null, nome: null, telefone: null, n: 0, primeira: null, a1p: false, a2p: false, formado_legacy: false }; byKey.set(key, g); }
+      g.n += 1;
+      if (!g.membro_id && m.membro_id) g.membro_id = m.membro_id;
+      const temCpf = c.length === 11;
+      if (!g.cpf && temCpf) g.cpf = c;
+      if (!g.nome || temCpf) g.nome = `${m.nome || ''}${m.sobrenome ? ' ' + m.sobrenome : ''}`.trim() || g.nome;
+      if (!g.telefone && m.telefone) g.telefone = m.telefone;
+      const dt = m.created_at ? String(m.created_at).slice(0, 10) : null;
+      if (dt && (!g.primeira || dt < g.primeira)) g.primeira = dt;
+      if (a1ByMat.has(m.id)) g.a1p = true;
+      if (a2ByMat.has(m.id)) g.a2p = true;
+      if (m.status === 'formado') g.formado_legacy = true;
+    }
+
+    const itens = [];
+    for (const g of byKey.values()) {
+      const man = g.membro_id ? manByMembro.get(g.membro_id) : null;
+      const a1m = !!(man && man.fez_aula1), a2m = !!(man && man.fez_aula2);
+      const fez_aula1 = g.a1p || a1m, fez_aula2 = g.a2p || a2m;
+      const concluiu = (fez_aula1 && fez_aula2) || g.formado_legacy;
+      const dias = g.primeira ? Math.floor((agora - new Date(g.primeira + 'T12:00:00').getTime()) / DIA) : null;
+      const nao_concluiu_90d = !concluiu && dias != null && dias >= 90;
+      itens.push({
+        membro_id: g.membro_id, nome: g.nome || 'Sem nome', cpf: g.cpf, telefone: g.telefone,
+        sem_cpf: !g.cpf, sem_vinculo: !g.membro_id, n_matriculas: g.n,
+        primeira_em: g.primeira, dias,
+        fez_aula1, fez_aula2, a1_presenca: g.a1p, a2_presenca: g.a2p, a1_manual: a1m, a2_manual: a2m,
+        override: !!man, concluiu, nao_concluiu_90d,
+        status_curso: concluiu ? 'formado' : nao_concluiu_90d ? 'nao_concluiu' : 'em_andamento',
+      });
+    }
+    itens.sort((a, b) => String(b.primeira_em || '').localeCompare(String(a.primeira_em || '')));
+    const resumo = {
+      total: itens.length,
+      formados: itens.filter(i => i.concluiu).length,
+      em_andamento: itens.filter(i => i.status_curso === 'em_andamento').length,
+      nao_concluiu: itens.filter(i => i.nao_concluiu_90d).length,
+      sem_cpf: itens.filter(i => i.sem_cpf).length,
+      sem_vinculo: itens.filter(i => i.sem_vinculo).length,
+    };
+    res.json({ itens, resumo });
+  } catch (e) {
+    console.error('[next/curso]', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+
+
+
+router.put('/pessoa/:membroId/aulas', async (req, res) => {
+  const membroId = req.params.membroId;
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(membroId)) {
+    return res.status(400).json({ error: 'membro_id inválido' });
+  }
+  const b = req.body || {};
+  const { data: cur } = await supabase.from('next_pessoa_aula_manual').select('*').eq('membro_id', membroId).maybeSingle();
+  const row = {
+    membro_id: membroId,
+    fez_aula1: 'fez_aula1' in b ? !!b.fez_aula1 : !!(cur && cur.fez_aula1),
+    fez_aula2: 'fez_aula2' in b ? !!b.fez_aula2 : !!(cur && cur.fez_aula2),
+    observacao: 'observacao' in b ? (b.observacao || null) : (cur ? cur.observacao : null),
+    marcado_por: req.user?.id ?? null,
+    updated_at: new Date().toISOString(),
+  };
+  const { data, error } = await supabase.from('next_pessoa_aula_manual')
+    .upsert(row, { onConflict: 'membro_id' }).select().single();
+  if (error) return res.status(500).json({ error: error.message });
+  recalcularKpisNext();
+  res.json(data);
+});
+
+module.exports = router;

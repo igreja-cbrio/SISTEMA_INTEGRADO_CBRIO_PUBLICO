@@ -1,0 +1,102 @@
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+const TOM_CORES = {
+  positivo: { cor: '#10B981', bg: '#10B98118', borda: null, textoTitulo: null, textoMensagem: null },
+  neutro:   { cor: '#9CA3AF', bg: '#9CA3AF18', borda: null, textoTitulo: null, textoMensagem: null },
+  alerta:   { cor: '#F59E0B', bg: '#F59E0B18', borda: null, textoTitulo: null, textoMensagem: null },
+  erro:     { cor: '#E24B4A', bg: '#FCEBEB',   borda: '#F09595', textoTitulo: '#501313', textoMensagem: '#791F1F' },
+};
+
+export default function EmptyState({
+  tom = 'neutro',
+  icone: Icone,
+  titulo,
+  mensagem,
+  cta,
+  compacto = false,
+}) {
+  const { cor, bg, borda, textoTitulo, textoMensagem } = TOM_CORES[tom] || TOM_CORES.neutro;
+
+  return (
+    <div style={{
+      padding: compacto ? '20px 16px' : '32px 20px',
+      textAlign: 'center',
+      borderRadius: 8,
+      background: tom === 'erro' ? bg : 'var(--surface)',
+      border: `1px dashed ${borda || 'var(--hairline)'}`,
+    }}>
+      {Icone && (
+        <div style={{
+          width: compacto ? 36 : 48,
+          height: compacto ? 36 : 48,
+          borderRadius: '50%',
+          background: bg,
+          margin: '0 auto 12px',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+        }}>
+          <Icone size={compacto ? 18 : 22} style={{ color: cor }} />
+        </div>
+      )}
+      {titulo && (
+        <div style={{
+          fontSize: compacto ? 13 : 14,
+          fontWeight: 700,
+          color: textoTitulo || 'var(--cbrio-text)',
+          marginBottom: 4,
+        }}>
+          {titulo}
+        </div>
+      )}
+      {mensagem && (
+        <div style={{
+          fontSize: compacto ? 11 : 12,
+          color: textoMensagem || 'var(--cbrio-text3)',
+          lineHeight: 1.5,
+          maxWidth: 360,
+          margin: '0 auto',
+        }}>
+          {mensagem}
+        </div>
+      )}
+      {cta && (
+        <button
+          onClick={cta.onClick}
+          style={{
+            marginTop: 14,
+            padding: '8px 16px',
+            borderRadius: 6,
+            fontSize: 12,
+            fontWeight: 600,
+            background: tom === 'erro' ? '#E24B4A' : '#00B39D',
+            color: '#fff',
+            border: 'none',
+            cursor: 'pointer',
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: 6,
+          }}
+        >
+          {cta.label}
+        </button>
+      )}
+    </div>
+  );
+}

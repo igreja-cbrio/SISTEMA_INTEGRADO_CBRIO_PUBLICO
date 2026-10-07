@@ -1,0 +1,9 @@
+{
+  "descricao": "Um novo passo na sua trajetória na CBRio.",
+  "campos": [
+    {"id":"motivacao","tipo":"paragrafo","titulo":"Por que você se interessa por esta vaga e quais experiências suas, dentro ou fora da CBRio, se relacionam com ela?","obrigatorio":true,"ajuda":"","opcoes":[]},
+    {"id":"experiencia","tipo":"paragrafo","titulo":"Conte uma situação concreta em que você já fez algo parecido com o que esta função pede. O que você fez e qual foi o resultado?","obrigatorio":true,"ajuda":"","opcoes":[]},
+    {"id":"restricao","tipo":"curta","titulo":"Você tem alguma restrição de horário ou de unidade? Se sim, qual?","obrigatorio":false,"ajuda":"Não é necessário informar motivos pessoais ou de saúde.","opcoes":[]},
+    {"id":"anexo","tipo":"anexo","titulo":"Currículo ou portfólio","obrigatorio":false,"ajuda":"PDF, DOCX, TXT, JPG ou PNG, até 3 MB, ou um link.","opcoes":[]}
+  ]
+}

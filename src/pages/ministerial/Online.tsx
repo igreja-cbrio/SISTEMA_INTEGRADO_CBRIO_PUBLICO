@@ -1,0 +1,1507 @@
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { online } from '@/api';
+import { Card, CardContent } from '@/components/ui/card';
+import { Button } from '@/components/ui/button';
+import { Badge } from '@/components/ui/badge';
+import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@/components/ui/dialog';
+import {
+  Users, Eye, ThumbsUp, MessageSquare, TrendingUp, TrendingDown, ExternalLink,
+  Youtube, Loader2, RefreshCw, PlayCircle, Info, Cross, HeartHandshake,
+  Clock, HandHelping, Sparkles, AlertCircle, Target, ChevronDown, Zap, Link2, Unlink, CheckCircle2, Wallet,
+} from 'lucide-react';
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
+import { toast } from 'sonner';
+import { useAuth } from '@/contexts/AuthContext';
+import { CultoYouTubePanel } from '@/components/online/CultoYouTubePanel';
+import { OnlineDebugPanel } from '@/components/online/OnlineDebugPanel';
+import JornadaConvertidos from '@/components/JornadaConvertidos';
+import QrCultosApelo from '@/components/online/QrCultosApelo';
+import CadastroMembresiaOnline from '@/components/online/CadastroMembresiaOnline';
+import CanalSerieCard from '@/components/online/CanalSerieCard';
+import ArrecadacaoOnlineCard from '@/components/online/ArrecadacaoOnlineCard';
+import FichaKpi from '@/components/online/FichaKpi';
+
+const VALOR_META: Record<string, { label: string; cor: string; corClara: string; icon: any }> = {
+  seguir:        { label: 'Seguir a Jesus',          cor: '#8B5CF6', corClara: 'from-violet-500/15 to-violet-500/5', icon: Cross },
+  conectar:      { label: 'Conectar com Pessoas',    cor: '#EC4899', corClara: 'from-pink-500/15 to-pink-500/5',     icon: HeartHandshake },
+  investir:      { label: 'Investir Tempo com Deus', cor: '#3B82F6', corClara: 'from-blue-500/15 to-blue-500/5',     icon: Clock },
+  servir:        { label: 'Servir em Comunidade',    cor: '#10B981', corClara: 'from-emerald-500/15 to-emerald-500/5', icon: HandHelping },
+  generosidade:  { label: 'Viver Generosamente',     cor: '#F59E0B', corClara: 'from-amber-500/15 to-amber-500/5',   icon: Sparkles },
+};
+
+const STATUS_INFO: Record<string, { label: string; cor: string; corBg: string }> = {
+  no_alvo:  { label: 'No alvo',   cor: 'text-emerald-700 dark:text-emerald-400',  corBg: 'bg-emerald-500' },
+  atras:    { label: 'Atrasado',  cor: 'text-amber-700 dark:text-amber-400',      corBg: 'bg-amber-500'   },
+  critico:  { label: 'Crítico',   cor: 'text-red-700 dark:text-red-400',          corBg: 'bg-red-500'     },
+  sem_meta: { label: 'Sem meta',  cor: 'text-muted-foreground',                   corBg: 'bg-gray-400'    },
+  sem_dado: { label: 'Sem dado',  cor: 'text-muted-foreground',                   corBg: 'bg-gray-400'    },
+};
+
+
+
+function formatNumber(n: number | null | undefined) {
+  if (n === null || n === undefined) return '—';
+  return Number(n).toLocaleString('pt-BR');
+}
+
+function formatDelta(n: number | null | undefined) {
+  if (n === null || n === undefined) return '';
+  const sign = n > 0 ? '+' : '';
+  return `${sign}${formatNumber(n)}`;
+}
+
+interface Video {
+  id: string;
+  video_id: string;
+  titulo: string;
+  thumbnail_url: string | null;
+  view_count: number;
+  like_count: number;
+  comment_count: number;
+  taxa_engajamento: number | null;
+  publicado_em: string;
+  serie?: { id: string; titulo: string } | null;
+}
+
+interface Serie {
+  id: string;
+  titulo: string;
+  descricao: string | null;
+  thumbnail_url: string | null;
+  total_videos: number;
+  videos_publicados: number;
+  total_views: number;
+  total_likes: number;
+  taxa_engajamento_media: number | null;
+  ultimo_video_em: string | null;
+}
+
+interface MatrizCell {
+  kpi_id: string;
+  indicador: string;
+  status_trajetoria?: string;
+  ultimo_valor?: number | null;
+  percentual_meta?: number | null;
+  checkpoint_meta?: number | null;
+}
+
+interface DashboardData {
+  canal: {
+    channel_id: string;
+    channel_title: string;
+    channel_thumbnail: string | null;
+    subscriber_count: number;
+    view_count: number;
+    video_count: number;
+  } | null;
+  delta: { subscriber: number; view: number; video: number } | null;
+  top_views_mes: Video[];
+  top_engajamento_mes: Video[];
+  top_all_time: Video[];
+  series: Serie[];
+  matriz_online: Record<string, MatrizCell[]>;
+
+
+  semana?: SemanaViews | null;
+}
+
+interface DiaViews { data: string; views: number; watch_minutos?: number | null }
+interface CultoSemana {
+  id: string; data: string; hora: string | null; nome: string;
+  ds: number | null; ddus: number | null; pico: number | null; sem_video: boolean;
+}
+
+
+interface SemanaViews {
+  dias_detalhe?: DiaViews[];
+
+  cultos?: CultoSemana[] | null;
+  erro?: string;
+  detalhe?: string;
+  rotulo?: string;
+  inicio?: string;
+  fim?: string;
+  fonte?: string;
+  consolidando?: boolean;
+
+  views?: number | null;
+  watch_minutos?: number | null;
+  dias_com_dado?: number;
+  anterior?: { rotulo: string; views: number; dias_com_dado: number } | null;
+
+  comparacao?: {
+    pode: boolean; motivo?: string; absoluto?: number;
+    percentual?: number; dias_com_dado?: number;
+  } | null;
+}
+
+
+
+
+
+function StatCard({ icon: Icon, label, value, delta, accentClass }: {
+  icon: any; label: string; value: string; delta?: number; accentClass: string;
+}) {
+  const positive = delta !== undefined && delta > 0;
+  return (
+    <Card className="overflow-hidden relative group hover:shadow-lg transition-shadow">
+      <div className={`absolute inset-0 opacity-50 bg-gradient-to-br ${accentClass}`} />
+      <CardContent className="p-5 relative">
+        <div className="flex items-start justify-between mb-3">
+          <div className={`rounded-xl p-2.5 bg-white/80 dark:bg-black/30 backdrop-blur shadow-sm`}>
+            <Icon className="h-5 w-5" style={{ color: 'var(--cbrio-primary, #00B39D)' }} />
+          </div>
+          {delta !== undefined && delta !== 0 && (
+            <div className={`flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold ${
+              positive ? 'bg-emerald-500/20 text-emerald-700 dark:text-emerald-400' : 'bg-gray-500/15 text-muted-foreground'
+            }`}>
+              {positive ? <TrendingUp className="h-3 w-3" /> : <TrendingDown className="h-3 w-3" />}
+              {formatDelta(delta)}
+            </div>
+          )}
+        </div>
+        <div className="text-3xl font-bold leading-tight">{value}</div>
+        <div className="text-sm text-muted-foreground mt-1">{label}</div>
+        {delta !== undefined && (
+          <div className="text-[10px] text-muted-foreground/70 mt-2 uppercase tracking-wide">vs 30 dias atrás</div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+function DetalheSemana({ semana, aberto, onClose }: {
+  semana: SemanaViews; aberto: boolean; onClose: () => void;
+}) {
+  const dias = semana.dias_detalhe || [];
+  const cultos = semana.cultos;
+  const faltam = 7 - (semana.dias_com_dado || 0);
+  const cmp = semana.comparacao;
+
+  const nomeDia = (iso: string) => {
+
+
+    const [a, m, d] = iso.split('-').map(Number);
+    const semanas = ['dom', 'seg', 'ter', 'qua', 'qui', 'sex', 'sáb'];
+    const dow = new Date(Date.UTC(a, m - 1, d)).getUTCDay();
+    return `${semanas[dow]} ${String(d).padStart(2, '0')}/${String(m).padStart(2, '0')}`;
+  };
+
+  return (
+    <Dialog open={aberto} onOpenChange={(o) => !o && onClose()}>
+      {
+                                                          }
+      <DialogContent className="max-w-2xl max-h-[90vh] flex flex-col">
+        <DialogHeader>
+          <DialogTitle>Views da semana · {semana.rotulo}</DialogTitle>
+          <DialogDescription>
+            {semana.fonte || 'YouTube Analytics'} · segunda a domingo
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="flex-1 overflow-y-auto min-h-0 space-y-5">
+          {                                   }
+          <div>
+            <div className="flex items-baseline justify-between mb-2">
+              <h4 className="text-sm font-semibold">Views do canal, por dia</h4>
+              <span className="text-2xl font-bold">
+                {semana.views != null ? formatNumber(semana.views) : '—'}
+              </span>
+            </div>
+
+            {                                       }
+            {semana.anterior && (
+              <div className="mb-2 text-sm">
+                <span className="text-muted-foreground">
+                  Semana anterior ({semana.anterior.rotulo}): {formatNumber(semana.anterior.views)}
+                </span>
+                {cmp?.pode && cmp.percentual != null ? (
+                  <span className={`ml-2 font-semibold ${
+                    cmp.percentual > 0 ? 'text-emerald-700 dark:text-emerald-400' : 'text-rose-700 dark:text-rose-400'
+                  }`}>
+                    {cmp.percentual > 0 ? '+' : ''}{cmp.percentual}%
+                    {cmp.absoluto != null && (
+                      <span className="font-normal text-muted-foreground ml-1">
+                        ({cmp.absoluto > 0 ? '+' : ''}{formatNumber(cmp.absoluto)} views)
+                      </span>
+                    )}
+                  </span>
+                ) : (
+
+
+
+                  <span className="ml-2 text-amber-700 dark:text-amber-400">
+                    {cmp?.motivo === 'base_zero'
+                      ? 'sem base para percentual (semana anterior zerada)'
+                      : 'variação só com as duas semanas completas'}
+                  </span>
+                )}
+              </div>
+            )}
+
+            {faltam > 0 && (
+
+
+
+
+              <div className="mb-2 text-xs text-amber-700 dark:text-amber-400 bg-amber-500/10 rounded-md px-2.5 py-2">
+                ⚠ {semana.dias_com_dado} de 7 dias coletados — faltam {faltam}.
+                O YouTube fecha os dados de um dia alguns dias depois, então os
+                últimos dias da semana (inclusive o domingo) entram atrasados.
+                O total acima vai <strong>subir</strong>.
+              </div>
+            )}
+
+            {dias.length === 0 ? (
+              <p className="text-sm text-muted-foreground">
+                Nenhum dia coletado. Use o botão <strong>“Views por dia (130d)”</strong> no
+                cartão do YouTube, acima.
+              </p>
+            ) : (
+              <div className="rounded-lg border divide-y">
+                {dias.map((d) => (
+                  <div key={d.data} className="flex items-center justify-between px-3 py-2 text-sm">
+                    <span className="text-muted-foreground">{nomeDia(d.data)}</span>
+                    <span className="font-semibold tabular-nums">{formatNumber(d.views)}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {                            }
+          <div>
+            <h4 className="text-sm font-semibold mb-1">Cultos da semana</h4>
+            {                                                 }
+            <p className="text-xs text-muted-foreground mb-2">
+              Views de cada <strong>transmissão de culto</strong>. Não é a divisão do número
+              acima: o total do canal inclui vídeos antigos, cortes e shorts, então a soma
+              dos cultos é sempre <strong>menor</strong>.
+            </p>
+
+            {cultos === null ? (
+
+              <p className="text-sm text-amber-700 dark:text-amber-400">
+                Não foi possível carregar os cultos desta semana.
+              </p>
+            ) : (cultos || []).length === 0 ? (
+              <p className="text-sm text-muted-foreground">Nenhum culto nesta semana.</p>
+            ) : (
+              <div className="rounded-lg border overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead className="bg-muted/50 text-xs text-muted-foreground">
+                    <tr>
+                      <th className="text-left font-medium px-3 py-2">Culto</th>
+                      <th className="text-right font-medium px-3 py-2" title="Views no dia seguinte ao culto">D+1</th>
+                      <th className="text-right font-medium px-3 py-2" title="Views acumuladas na semana seguinte">D+7</th>
+                      <th className="text-right font-medium px-3 py-2" title="Pico de pessoas assistindo ao mesmo tempo">Pico</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y">
+                    {(cultos || []).map((c) => (
+                      <tr key={c.id}>
+                        <td className="px-3 py-2">
+                          <div className="font-medium">{c.nome}</div>
+                          <div className="text-xs text-muted-foreground">
+                            {nomeDia(c.data)}{c.hora ? ` · ${c.hora}` : ''}
+                            {
+
+                                                                     }
+                            {c.sem_video && (
+                              <span className="ml-1.5 text-amber-700 dark:text-amber-400">
+                                · sem transmissão vinculada
+                              </span>
+                            )}
+                          </div>
+                        </td>
+                        {
+
+                                                }
+                        <td className="px-3 py-2 text-right tabular-nums">
+                          {c.ds != null ? formatNumber(c.ds) : <span className="text-muted-foreground">—</span>}
+                        </td>
+                        <td className="px-3 py-2 text-right tabular-nums">
+                          {c.ddus != null ? formatNumber(c.ddus) : <span className="text-muted-foreground">—</span>}
+                        </td>
+                        <td className="px-3 py-2 text-right tabular-nums">
+                          {c.pico != null ? formatNumber(c.pico) : <span className="text-muted-foreground">—</span>}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+            <p className="text-[11px] text-muted-foreground mt-1.5">
+              D+7 aparece uma semana depois do culto — por isso os cultos recentes mostram “—”.
+            </p>
+          </div>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function CardSemanaViews({ semana }: { semana?: SemanaViews | null }) {
+  const [detalhe, setDetalhe] = useState(false);
+
+
+  if (!semana) return null;
+
+
+  if (semana.erro) {
+    return (
+      <Card className="border-amber-500/40 bg-amber-500/5">
+        <CardContent className="p-5">
+          <div className="flex items-start gap-3">
+            <AlertCircle className="h-5 w-5 text-amber-600 shrink-0 mt-0.5" />
+            <div>
+              <div className="font-semibold text-amber-800 dark:text-amber-300">Views da semana indisponíveis</div>
+              <div className="text-sm text-muted-foreground mt-1">{semana.erro}</div>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+    );
+  }
+
+  const semDado = semana.views === null || semana.views === undefined;
+  const parcial = !semDado && (semana.dias_com_dado ?? 0) > 0 && (semana.dias_com_dado ?? 0) < 7;
+
+
+
+  const cmp = semana.comparacao;
+  const diffAnterior = cmp?.pode ? (cmp.absoluto ?? null) : null;
+
+
+
+  const temDetalhe = !semDado || (semana.cultos || []).length > 0;
+
+  return (
+    <>
+    <Card
+      className={`overflow-hidden relative ${temDetalhe ? 'cursor-pointer hover:shadow-lg transition-shadow' : ''}`}
+      onClick={temDetalhe ? () => setDetalhe(true) : undefined}
+      role={temDetalhe ? 'button' : undefined}
+      tabIndex={temDetalhe ? 0 : undefined}
+      onKeyDown={temDetalhe ? (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setDetalhe(true); } } : undefined}
+    >
+      <div className="absolute inset-0 opacity-50 bg-gradient-to-br from-violet-500/15 to-indigo-500/5" />
+      <CardContent className="p-5 relative">
+        <div className="flex items-start justify-between mb-3">
+          <div className="rounded-xl p-2.5 bg-white/80 dark:bg-black/30 backdrop-blur shadow-sm">
+            <Eye className="h-5 w-5" style={{ color: 'var(--cbrio-primary, #00B39D)' }} />
+          </div>
+          {diffAnterior !== null && diffAnterior !== 0 && (
+            <div className={`flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold ${
+              diffAnterior > 0
+                ? 'bg-emerald-500/20 text-emerald-700 dark:text-emerald-400'
+                : 'bg-gray-500/15 text-muted-foreground'
+            }`}>
+              {diffAnterior > 0 ? <TrendingUp className="h-3 w-3" /> : <TrendingDown className="h-3 w-3" />}
+              {cmp?.percentual != null
+                ? `${cmp.percentual > 0 ? '+' : ''}${cmp.percentual}%`
+                : formatDelta(diffAnterior)}
+            </div>
+          )}
+        </div>
+
+        {semDado ? (
+
+
+          <>
+            <div className="text-2xl font-bold leading-tight text-muted-foreground">Sem dado</div>
+            <div className="text-sm text-muted-foreground mt-1">
+              Views da semana · {semana.rotulo}
+            </div>
+            <div className="text-xs text-amber-700 dark:text-amber-400 mt-2">
+              Nenhum dia desta semana foi coletado ainda.
+            </div>
+          </>
+        ) : (
+          <>
+            <div className="text-3xl font-bold leading-tight">{formatNumber(semana.views)}</div>
+            <div className="text-sm text-muted-foreground mt-1">
+              Views da semana · {semana.rotulo}
+            </div>
+          </>
+        )}
+
+        <div className="text-[10px] text-muted-foreground/70 mt-2 uppercase tracking-wide">
+          {semana.fonte || 'YouTube Analytics'} · segunda a domingo
+        </div>
+
+        {                                                         }
+        {parcial && (
+          <div className="text-xs text-amber-700 dark:text-amber-400 mt-2">
+            ⚠ {semana.dias_com_dado} de 7 dias coletados — o total está incompleto.
+          </div>
+        )}
+        {!semDado && semana.consolidando && (
+          <div className="text-xs text-muted-foreground mt-2">
+            Ainda consolidando: o YouTube revisa os últimos dias, então este número ainda pode subir.
+          </div>
+        )}
+        {!semDado && semana.anterior && (
+          <div className="text-xs text-muted-foreground mt-2">
+            Semana anterior ({semana.anterior.rotulo}): {formatNumber(semana.anterior.views)} views
+            {cmp?.pode && cmp.absoluto != null && (
+              <> · {cmp.absoluto > 0 ? '+' : ''}{formatNumber(cmp.absoluto)}</>
+            )}
+            {
+                                                                                 }
+            {cmp && !cmp.pode && cmp.motivo !== 'base_zero' && (
+              <div className="text-amber-700 dark:text-amber-400 mt-1">
+                Comparação só quando as duas semanas estiverem completas.
+              </div>
+            )}
+          </div>
+        )}
+
+        {
+
+                                  }
+        {temDetalhe && (
+          <div className="text-xs font-medium mt-2" style={{ color: 'var(--cbrio-primary, #00B39D)' }}>
+            Ver detalhamento →
+          </div>
+        )}
+      </CardContent>
+    </Card>
+    {temDetalhe && (
+      <DetalheSemana semana={semana} aberto={detalhe} onClose={() => setDetalhe(false)} />
+    )}
+    </>
+  );
+}
+
+function VideoCard({ v, rank }: { v: Video; rank: number }) {
+  return (
+    <a
+      href={`https://www.youtube.com/watch?v=${v.video_id}`}
+      target="_blank" rel="noreferrer"
+      className="group block rounded-xl border border-border overflow-hidden bg-card hover:shadow-xl hover:-translate-y-0.5 transition-all duration-200"
+    >
+      <div className="relative aspect-video bg-muted overflow-hidden">
+        {v.thumbnail_url ? (
+          <img src={v.thumbnail_url} alt="" className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300" />
+        ) : (
+          <div className="w-full h-full flex items-center justify-center bg-gradient-to-br from-red-500/10 to-red-700/20">
+            <PlayCircle className="h-12 w-12 text-red-500/60" />
+          </div>
+        )}
+        <div className="absolute top-2 left-2 flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-black/80 text-white text-xs font-bold backdrop-blur">
+          #{rank}
+        </div>
+        <div className="absolute inset-0 bg-gradient-to-t from-black/60 via-transparent to-transparent opacity-0 group-hover:opacity-100 transition-opacity flex items-end p-2">
+          <PlayCircle className="h-8 w-8 text-white" />
+        </div>
+      </div>
+      <div className="p-3 space-y-2">
+        <div className="line-clamp-2 text-sm font-medium leading-tight min-h-[2.5rem]">{v.titulo}</div>
+        {v.serie && (
+          <div className="flex items-center gap-1 text-xs text-muted-foreground line-clamp-1">
+            <PlayCircle className="h-3 w-3 shrink-0" />
+            <span className="truncate">{v.serie.titulo}</span>
+          </div>
+        )}
+        <div className="flex items-center justify-between text-xs pt-1 border-t border-border">
+          <div className="flex items-center gap-2.5 text-muted-foreground">
+            <span className="flex items-center gap-1"><Eye className="h-3 w-3" />{formatNumber(v.view_count)}</span>
+            <span className="flex items-center gap-1"><ThumbsUp className="h-3 w-3" />{formatNumber(v.like_count)}</span>
+          </div>
+          {v.taxa_engajamento !== null && v.taxa_engajamento !== undefined && (
+            <span className="font-bold text-emerald-600 dark:text-emerald-400">
+              {v.taxa_engajamento.toFixed(2)}%
+            </span>
+          )}
+        </div>
+      </div>
+    </a>
+  );
+}
+
+function SerieCard({ s }: { s: Serie }) {
+  return (
+    <Card className="group overflow-hidden hover:shadow-lg hover:-translate-y-0.5 transition-all duration-200">
+      <div className="aspect-video bg-muted relative overflow-hidden">
+        {s.thumbnail_url ? (
+          <img src={s.thumbnail_url} alt="" className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300" />
+        ) : (
+          <div className="w-full h-full flex items-center justify-center bg-gradient-to-br from-red-500/10 to-red-700/20">
+            <PlayCircle className="h-14 w-14 text-red-500/60" />
+          </div>
+        )}
+        <div className="absolute inset-0 bg-gradient-to-t from-black/70 via-transparent to-transparent" />
+        <div className="absolute bottom-2 left-3 right-3">
+          <div className="text-white text-sm font-semibold line-clamp-2 drop-shadow-lg">{s.titulo}</div>
+        </div>
+      </div>
+      <CardContent className="p-3">
+        <div className="grid grid-cols-3 gap-2 text-center">
+          <div>
+            <div className="font-bold text-lg leading-none">{s.videos_publicados}</div>
+            <div className="text-[10px] text-muted-foreground uppercase tracking-wide mt-1">vídeos</div>
+          </div>
+          <div className="border-x border-border">
+            <div className="font-bold text-lg leading-none">{formatNumber(s.total_views)}</div>
+            <div className="text-[10px] text-muted-foreground uppercase tracking-wide mt-1">views</div>
+          </div>
+          <div>
+            <div className="font-bold text-lg leading-none text-emerald-600 dark:text-emerald-400">
+              {s.taxa_engajamento_media !== null ? `${s.taxa_engajamento_media}%` : '—'}
+            </div>
+            <div className="text-[10px] text-muted-foreground uppercase tracking-wide mt-1">engaj.</div>
+          </div>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+
+
+
+
+function KpiCard({ kpi }: { kpi: MatrizCell }) {
+  const status = kpi.status_trajetoria || 'sem_dado';
+  const info = STATUS_INFO[status] || STATUS_INFO.sem_dado;
+  const pct = kpi.percentual_meta;
+  const pctClamped = pct !== null && pct !== undefined ? Math.max(0, Math.min(100, pct)) : null;
+  const [ficha, setFicha] = useState(false);
+
+  return (
+    <>
+    {ficha && <FichaKpi kpiId={kpi.kpi_id} onClose={() => setFicha(false)} />}
+    <button
+      type="button"
+      onClick={() => setFicha(true)}
+      title="Ver de onde sai este número"
+      className="w-full text-left rounded-lg bg-card border border-border p-3 hover:border-primary/30 transition-colors">
+      <div className="flex items-start justify-between gap-2 mb-2">
+        <div className="min-w-0 flex-1">
+          <div className="text-[10px] font-mono text-muted-foreground uppercase tracking-wider">{kpi.kpi_id}</div>
+          <div className="text-xs font-medium leading-tight mt-0.5 line-clamp-2" title={kpi.indicador}>
+            {kpi.indicador}
+          </div>
+        </div>
+        <div className={`flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-semibold whitespace-nowrap ${info.cor}`}>
+          <span className={`w-1.5 h-1.5 rounded-full ${info.corBg}`} />
+          {info.label}
+        </div>
+      </div>
+      <div className="space-y-1">
+        <div className="flex items-baseline justify-between text-xs">
+          <span className="text-muted-foreground">
+            {kpi.ultimo_valor !== null && kpi.ultimo_valor !== undefined
+              ? <><span className="font-bold text-foreground text-sm">{kpi.ultimo_valor}</span><span className="text-muted-foreground"> atual</span></>
+              : <span className="italic">aguardando dado</span>}
+          </span>
+          {kpi.checkpoint_meta !== null && kpi.checkpoint_meta !== undefined && (
+            <span className="text-muted-foreground flex items-center gap-1">
+              <Target className="h-2.5 w-2.5" />
+              meta {kpi.checkpoint_meta}
+            </span>
+          )}
+        </div>
+        {pctClamped !== null && (
+          <div className="h-1.5 bg-muted rounded-full overflow-hidden">
+            <div
+              className={`h-full rounded-full transition-all ${info.corBg} cbrio-bar`}
+              style={{ width: `${pctClamped}%` }}
+            />
+          </div>
+        )}
+      </div>
+    </button>
+    </>
+  );
+}
+
+function ValorGroupCard({ valor, kpis, open, onOpenChange }: {
+  valor: string;
+  kpis: MatrizCell[];
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+}) {
+  const meta = VALOR_META[valor];
+  if (!meta) return null;
+  const Icon = meta.icon;
+
+
+  const counts = { no_alvo: 0, atras: 0, critico: 0, outro: 0 };
+  kpis.forEach(k => {
+    const s = k.status_trajetoria;
+    if (s === 'no_alvo') counts.no_alvo++;
+    else if (s === 'atras') counts.atras++;
+    else if (s === 'critico') counts.critico++;
+    else counts.outro++;
+  });
+
+  return (
+    <Collapsible
+      open={open}
+      onOpenChange={onOpenChange}
+      className={`rounded-2xl border border-border overflow-hidden bg-gradient-to-br ${meta.corClara} h-fit`}
+    >
+      <CollapsibleTrigger asChild>
+        <button
+          type="button"
+          className={`w-full p-4 flex items-center gap-3 text-left hover:bg-black/5 dark:hover:bg-white/5 transition-colors ${open ? 'border-b border-border/40' : ''}`}
+        >
+          <div
+            className="rounded-xl p-2.5 shadow-sm shrink-0"
+            style={{ background: meta.cor + '20', color: meta.cor }}
+          >
+            <Icon className="h-6 w-6" />
+          </div>
+          <div className="flex-1 min-w-0">
+            <h3 className="text-sm font-bold leading-tight">{meta.label}</h3>
+            <div className="flex flex-wrap gap-1.5 mt-1.5 text-[10px]">
+              <span className="text-muted-foreground">{kpis.length} indicador{kpis.length > 1 ? 'es' : ''}</span>
+              {counts.no_alvo > 0 && (
+                <Badge variant="outline" className="text-[10px] py-0 h-4 bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border-emerald-500/30">
+                  {counts.no_alvo} ok
+                </Badge>
+              )}
+              {counts.atras > 0 && (
+                <Badge variant="outline" className="text-[10px] py-0 h-4 bg-amber-500/10 text-amber-700 dark:text-amber-400 border-amber-500/30">
+                  {counts.atras} atrasado{counts.atras > 1 ? 's' : ''}
+                </Badge>
+              )}
+              {counts.critico > 0 && (
+                <Badge variant="outline" className="text-[10px] py-0 h-4 bg-red-500/10 text-red-700 dark:text-red-400 border-red-500/30">
+                  {counts.critico} crítico{counts.critico > 1 ? 's' : ''}
+                </Badge>
+              )}
+            </div>
+          </div>
+          <ChevronDown
+            className={`h-5 w-5 text-muted-foreground shrink-0 transition-transform duration-200 ${open ? 'rotate-180' : ''}`}
+          />
+        </button>
+      </CollapsibleTrigger>
+      <CollapsibleContent className="data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0">
+        <div className="p-3 space-y-2">
+          {kpis.map((k) => <KpiCard key={k.kpi_id} kpi={k} />)}
+        </div>
+      </CollapsibleContent>
+    </Collapsible>
+  );
+}
+
+
+
+
+
+function OAuthStatusCard() {
+  const { getAccessLevel, isAdmin } = useAuth();
+  const podeEditarOnline = isAdmin || (getAccessLevel?.(['online']) ?? 0) >= 3;
+
+
+  if (!podeEditarOnline) return null;
+  return <OAuthStatusCardInner />;
+}
+
+function OAuthStatusCardInner() {
+  const { data: status, refetch } = useQuery<any>({
+    queryKey: ['online', 'oauth-status'],
+    queryFn: () => online.oauth.status(),
+    refetchInterval: 30_000,
+  });
+
+
+  useEffect(() => {
+    const url = new URL(window.location.href);
+    if (url.searchParams.get('oauth_ok')) {
+      toast.success(`Canal conectado · ${url.searchParams.get('canal') || ''}`);
+      url.searchParams.delete('oauth_ok');
+      url.searchParams.delete('canal');
+      window.history.replaceState({}, '', url.pathname + url.search);
+      refetch();
+    } else if (url.searchParams.get('oauth_error')) {
+      toast.error(`Falha na conexão: ${url.searchParams.get('oauth_error')}`);
+      url.searchParams.delete('oauth_error');
+      window.history.replaceState({}, '', url.pathname + url.search);
+    }
+  }, [refetch]);
+
+  const conectar = useMutation({
+    mutationFn: () => online.oauth.authorize(),
+    onSuccess: (r: any) => { if (r?.url) window.location.href = r.url; },
+    onError: (e: any) => toast.error(e?.message || 'Erro ao iniciar conexão'),
+  });
+
+  const desconectar = useMutation({
+    mutationFn: () => online.oauth.disconnect(),
+    onSuccess: () => { toast.success('Canal desconectado.'); refetch(); },
+  });
+
+  const queryClient = useQueryClient();
+  const coletarLive = useMutation({
+    mutationFn: () => online.coletar.live(),
+    onSuccess: (r: any) => toast.success(r?.atualizou ? `Pico atualizado: ${r.viewers}` : (r?.reason || 'Coleta executada')),
+    onError: (e: any) => toast.error(e?.message || 'Erro na coleta'),
+  });
+  const coletarDs = useMutation({
+    mutationFn: () => online.coletar.ds(),
+    onSuccess: (r: any) => {
+      const linkados = r?.backfill?.linkados || 0;
+      const sufixo = linkados ? ` (+${linkados} vídeo vinculado)` : '';
+      if (r?.coletados > 0) {
+        toast.success(`DS atualizado · ${r.coletados} culto(s)${sufixo}`);
+      } else if (r?.motivo === 'sem_cultos_com_video_vinculado') {
+        toast.message('Nenhum culto recente com vídeo vinculado. Clique "Sincronizar agora" ou "Recoletar tudo" primeiro.');
+      } else {
+        toast.message(`DS · nada novo para coletar${sufixo}.`);
+      }
+      queryClient.invalidateQueries({ queryKey: ['online', 'cultos-metricas'] });
+    },
+    onError: (e: any) => toast.error(e?.message || 'Erro na coleta'),
+  });
+  const coletarDdus = useMutation({
+    mutationFn: () => online.coletar.ddus(),
+    onSuccess: (r: any) => {
+      const linkados = r?.backfill?.linkados || 0;
+      const sufixo = linkados ? ` (+${linkados} vídeo vinculado)` : '';
+      if (r?.coletados > 0) {
+        toast.success(`DDUS · ${r.coletados} culto(s)${sufixo}`);
+      } else if (r?.motivo === 'sem_cultos_d7_com_video') {
+        toast.message('Nenhum culto de ~7 dias atrás com vídeo vinculado.');
+      } else {
+        toast.message(`DDUS · nada novo para coletar${sufixo}.`);
+      }
+      queryClient.invalidateQueries({ queryKey: ['online', 'cultos-metricas'] });
+    },
+    onError: (e: any) => toast.error(e?.message || 'Erro na coleta'),
+  });
+
+
+  const coletarEngajamento = useMutation({
+    mutationFn: () => online.coletar.engajamento(),
+    onSuccess: (r: any) => {
+      const linhas = (r?.resultados || []).filter((x: any) => !x.error);
+      const ult = linhas[linhas.length - 1];
+      if (ult) {
+        const ret = ult.retencao != null ? `${ult.retencao}%` : '—';
+        const comp = ult.compartilhamento != null ? `${ult.compartilhamento}%` : '—';
+
+
+        toast.success(`Engajamento ${String(ult.mes).slice(0, 7)} · retenção ${ret} · compart. ${comp}`);
+      } else {
+        const err = (r?.resultados || []).find((x: any) => x.error);
+        toast.message(err ? `Sem dados: ${err.error}` : `Coleta executada (${r?.coletados || 0} meses).`);
+      }
+      queryClient.invalidateQueries({ queryKey: ['online', 'engajamento'] });
+    },
+    onError: (e: any) => toast.error(e?.message || 'Erro na coleta de engajamento'),
+  });
+
+
+
+
+
+  const coletarViewsDia = useMutation({
+    mutationFn: () => online.coletar.viewsDia(130),
+    onSuccess: (r: any) => {
+
+
+      if (r?.ok === false) {
+        toast.error(`Não coletou: ${r?.erro || 'motivo não informado'}`);
+        return;
+      }
+      if (!r?.coletados) {
+        toast.message(r?.aviso || 'A Analytics não devolveu nenhum dia.');
+        return;
+      }
+      toast.success(`${r.coletados} dias coletados · ${r.janela}`);
+      queryClient.invalidateQueries({ queryKey: ['online', 'dashboard'] });
+    },
+    onError: (e: any) => toast.error(e?.message || 'Erro na coleta de views por dia'),
+  });
+
+  const conectado = status?.conectado;
+
+  return (
+    <Card className={`overflow-hidden border-2 ${conectado ? 'border-emerald-500/30' : 'border-amber-500/30'}`}>
+      <div className={`p-4 md:p-5 flex flex-col md:flex-row md:items-center gap-3 ${
+        conectado ? 'bg-gradient-to-r from-emerald-500/10 to-transparent' : 'bg-gradient-to-r from-amber-500/10 to-transparent'
+      }`}>
+        <div className={`rounded-xl p-2.5 ${conectado ? 'bg-emerald-500/15' : 'bg-amber-500/15'}`}>
+          {conectado ? (
+            <CheckCircle2 className="h-6 w-6 text-emerald-600 dark:text-emerald-400" />
+          ) : (
+            <Zap className="h-6 w-6 text-amber-600 dark:text-amber-400" />
+          )}
+        </div>
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2 flex-wrap">
+            <h2 className="font-bold text-base">Coleta automática YouTube</h2>
+            {conectado ? (
+              <Badge variant="outline" className="bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border-emerald-500/40">
+                Conectado · {status?.channel_title || status?.channel_id}
+              </Badge>
+            ) : (
+              <Badge variant="outline" className="bg-amber-500/10 text-amber-700 dark:text-amber-400 border-amber-500/40">
+                Não conectado
+              </Badge>
+            )}
+          </div>
+          <p className="text-sm text-muted-foreground mt-1 leading-relaxed">
+            {conectado ? (
+              <>Coleta automática de <strong>pico online</strong> (5/5min · janela do culto),
+                <strong> DS</strong> (todo dia 10h) e <strong>DDUS</strong> (10h30) ativa.</>
+            ) : (
+              <>Conecte o canal CBRio com OAuth pra automatizar pico online, DS e DDUS via YouTube Analytics API.</>
+            )}
+          </p>
+          {conectado && (status?.last_check_at || status?.last_error) && (
+            <div className="mt-1.5 text-[11px] leading-snug">
+              {status?.last_check_at && (
+                <span className="text-muted-foreground">
+                  Última verificação: {new Date(status.last_check_at).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}
+                </span>
+              )}
+              {status?.last_error && (
+                <span className="ml-2 text-amber-700 dark:text-amber-400">
+                  · {status.last_error}
+                </span>
+              )}
+            </div>
+          )}
+        </div>
+        <div className="flex flex-wrap gap-2">
+          {conectado ? (
+            <>
+              <Button size="sm" variant="outline" onClick={() => coletarLive.mutate()} disabled={coletarLive.isPending}>
+                {coletarLive.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin mr-1.5" /> : <Eye className="h-3.5 w-3.5 mr-1.5" />}
+                Coletar pico agora
+              </Button>
+              <Button size="sm" variant="outline" onClick={() => coletarDs.mutate()} disabled={coletarDs.isPending}>
+                {coletarDs.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin mr-1.5" /> : null}
+                DS (D+1)
+              </Button>
+              <Button size="sm" variant="outline" onClick={() => coletarDdus.mutate()} disabled={coletarDdus.isPending}>
+                {coletarDdus.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin mr-1.5" /> : null}
+                DDUS (D+7)
+              </Button>
+              <Button size="sm" variant="outline" onClick={() => coletarEngajamento.mutate()} disabled={coletarEngajamento.isPending}>
+                {coletarEngajamento.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin mr-1.5" /> : null}
+                Engajamento (ano)
+              </Button>
+              <Button size="sm" variant="outline" onClick={() => coletarViewsDia.mutate()} disabled={coletarViewsDia.isPending}>
+                {coletarViewsDia.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin mr-1.5" /> : null}
+                Views por dia (130d)
+              </Button>
+              <Button size="sm" variant="ghost" onClick={() => desconectar.mutate()} disabled={desconectar.isPending}>
+                <Unlink className="h-3.5 w-3.5 mr-1.5" />
+                Desconectar
+              </Button>
+            </>
+          ) : (
+            <Button onClick={() => conectar.mutate()} disabled={conectar.isPending} className="bg-red-600 hover:bg-red-700 text-white">
+              {conectar.isPending ? <Loader2 className="h-4 w-4 animate-spin mr-1.5" /> : <Link2 className="h-4 w-4 mr-1.5" />}
+              Conectar canal YouTube
+            </Button>
+          )}
+        </div>
+      </div>
+    </Card>
+  );
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+function ComunidadeOnlineCard() {
+
+
+
+
+
+  const { getAccessLevel, isAdmin } = useAuth();
+  const podeSalvar = isAdmin || (getAccessLevel?.(['online']) ?? 0) >= 3;
+  const [mes, setMes] = useState(() => new Date().toISOString().slice(0, 7));
+  const [valor, setValor] = useState('');
+  const [salvando, setSalvando] = useState(false);
+  const [salvo, setSalvo] = useState<string | null>(null);
+
+  if (!podeSalvar) return null;
+
+  const salvar = async () => {
+
+    const limpo = valor.trim();
+    if (limpo !== '' && !/^\d{1,7}$/.test(limpo)) {
+      toast.error('Informe só números (ou deixe vazio para limpar).');
+      return;
+    }
+    setSalvando(true);
+    try {
+
+
+
+
+
+
+
+      await online.comunidadeMensal(mes, limpo === '' ? null : Number(limpo));
+      setSalvo(new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' }));
+      toast.success(limpo === '' ? 'Valor limpo.' : 'Comunidade registrada.');
+    } catch (e: any) {
+      toast.error(e?.message || 'Não foi possível salvar.');
+    } finally {
+      setSalvando(false);
+    }
+  };
+
+  return (
+    <Card className="mb-6">
+      <CardContent className="p-4 sm:p-5">
+        <div className="flex flex-wrap items-end gap-3">
+          <div className="flex-1 min-w-[200px]">
+            <h3 className="text-sm font-semibold text-foreground">Comunidade do Online no WhatsApp</h3>
+            <p className="text-xs text-muted-foreground mt-0.5">
+              Total de pessoas na comunidade neste mês. Aparece na pétala <strong>Investir</strong> da
+              mandala <strong>ao lado</strong> do devocional — os dois não são somados, porque medem
+              coisas diferentes (a comunidade é acumulada, o devocional é do mês).
+            </p>
+          </div>
+          <div>
+            <label className="block text-[11px] text-muted-foreground mb-1">Mês</label>
+            <input
+              type="month" value={mes} onChange={(e) => setMes(e.target.value)}
+              className="h-9 rounded-md border bg-background px-2 text-sm"
+            />
+          </div>
+          <div>
+            <label className="block text-[11px] text-muted-foreground mb-1">Pessoas</label>
+            <input
+              type="text" inputMode="numeric" value={valor} placeholder="ex.: 800"
+              onChange={(e) => setValor(e.target.value)}
+              className="h-9 w-28 rounded-md border bg-background px-2 text-sm"
+            />
+          </div>
+          <Button onClick={salvar} disabled={salvando} size="sm">
+            {salvando ? 'Salvando…' : 'Salvar'}
+          </Button>
+        </div>
+        {salvo && (
+          <p className="text-[11px] text-muted-foreground mt-2">Salvo em {salvo}.</p>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+
+
+
+const ABAS_ONLINE = ['pessoas', 'canal', 'conteudo', 'financeiro', 'indicadores'] as const;
+
+export default function Online() {
+  const { getAccessLevel, isAdmin, modulePerms, modulosBloqueados } = useAuth();
+  const podeEditarOnline = isAdmin || (getAccessLevel?.(['online']) ?? 0) >= 3;
+
+
+
+
+
+
+  const podeVerArrecadacao = useMemo(() => {
+    if ((modulosBloqueados || []).includes('online')) return false;
+    const nivel = modulePerms?.online?.leitura;
+    return typeof nivel === 'number' && nivel >= 4;
+  }, [modulePerms, modulosBloqueados]);
+
+
+
+  const [abaAtiva, setAbaAtiva] = useState<string>(() => {
+    const t = new URL(window.location.href).searchParams.get('tab');
+    return ABAS_ONLINE.includes(t as any) ? (t as string) : 'pessoas';
+  });
+  const trocarAba = useCallback((v: string) => {
+    setAbaAtiva(v);
+    const url = new URL(window.location.href);
+    url.searchParams.set('tab', v);
+    window.history.replaceState({}, '', url.toString());
+  }, []);
+
+
+
+
+  useEffect(() => {
+    if (abaAtiva === 'financeiro' && !podeVerArrecadacao) setAbaAtiva('pessoas');
+  }, [abaAtiva, podeVerArrecadacao]);
+
+
+
+
+
+
+
+
+  const queryClient = useQueryClient();
+
+  const { data, isLoading, refetch } = useQuery<DashboardData>({
+    queryKey: ['online', 'dashboard'],
+    queryFn: () => online.dashboard(),
+  });
+
+
+  const { data: eng } = useQuery<any>({
+    queryKey: ['online', 'engajamento'],
+    queryFn: () => online.engajamento(),
+  });
+
+  const syncMutation = useMutation({
+    mutationFn: () => online.sync(),
+    onSuccess: () => {
+      toast.success('Sincronização com YouTube concluída.');
+      refetch();
+    },
+    onError: (err: any) => toast.error(err?.message || 'Erro ao sincronizar'),
+  });
+
+
+
+
+  const recoletarMutation = useMutation({
+    mutationFn: async () => {
+
+      const syncRes: any = await online.sync();
+      const linkados = syncRes?.log?.etapas?.backfill_cultos?.linkados ?? 0;
+
+
+
+      const acc = { processados: 0, pico: 0, ds: 0, ddus: 0, subs: 0, trafico: 0, retencao_curva: 0, sub_status: 0 };
+      let batches = 0;
+      while (batches < 30) {
+        const r: any = await online.coletar.catchUp(5);
+        acc.processados   += r?.processados   ?? 0;
+        acc.pico          += r?.pico          ?? 0;
+        acc.ds            += r?.ds            ?? 0;
+        acc.ddus          += r?.ddus          ?? 0;
+        acc.subs          += r?.subs          ?? 0;
+        acc.trafico       += r?.trafico       ?? 0;
+        acc.retencao_curva += r?.retencao_curva ?? 0;
+        acc.sub_status    += r?.sub_status    ?? 0;
+        batches++;
+        if ((r?.remaining ?? 0) === 0) break;
+
+        queryClient.invalidateQueries({ queryKey: ['online', 'cultos-metricas'] });
+      }
+      return { linkados, batches, ...acc };
+    },
+    onSuccess: (r) => {
+      const metricasTotais = r.pico + r.ds + r.ddus + r.subs + r.trafico + r.retencao_curva + r.sub_status;
+      toast.success(
+        `Recoleta completa · ${r.linkados} cultos linkados · ${metricasTotais} métricas em ${r.processados} cultos (${r.batches} lotes)`,
+        { duration: 6000 }
+      );
+      refetch();
+      queryClient.invalidateQueries({ queryKey: ['online', 'cultos-metricas'] });
+    },
+    onError: (err: any) => toast.error(err?.message || 'Erro ao recoletar'),
+  });
+
+  const [topTab, setTopTab] = useState<'views' | 'engajamento'>('views');
+  const [matrizOpenMap, setMatrizOpenMap] = useState<Record<string, boolean>>({});
+
+  if (isLoading) {
+    return (
+      <div className="flex items-center justify-center min-h-[50vh]">
+        <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+      </div>
+    );
+  }
+
+  const canal = data?.canal;
+  const semDados = !canal;
+  const matrizKeys = data?.matriz_online ? Object.keys(data.matriz_online) : [];
+  const matrizAllOpen = matrizKeys.length > 0 && matrizKeys.every(k => matrizOpenMap[k]);
+  const toggleAllMatriz = () => {
+    const next = !matrizAllOpen;
+    setMatrizOpenMap(Object.fromEntries(matrizKeys.map(k => [k, next])));
+  };
+
+  return (
+    <div className="glass-dash p-4 md:p-6 space-y-6 max-w-[1400px] mx-auto">
+      {                 }
+      <div className="relative overflow-hidden rounded-3xl bg-gradient-to-br from-red-500 via-red-600 to-rose-700 text-white shadow-xl">
+        <div className="absolute inset-0 opacity-20" style={{
+          backgroundImage: 'radial-gradient(circle at 20% 30%, rgba(255,255,255,0.4) 0%, transparent 50%), radial-gradient(circle at 80% 70%, rgba(255,255,255,0.3) 0%, transparent 50%)'
+        }} />
+        <div className="relative p-6 md:p-8 flex flex-col md:flex-row md:items-center gap-4">
+          <div className="flex items-center gap-4 flex-1">
+            {canal?.channel_thumbnail ? (
+              <img src={canal.channel_thumbnail} alt="" className="w-16 h-16 rounded-full ring-4 ring-white/30 shadow-lg" />
+            ) : (
+              <div className="w-16 h-16 rounded-full bg-white/20 backdrop-blur ring-4 ring-white/30 flex items-center justify-center">
+                <Youtube className="h-8 w-8" />
+              </div>
+            )}
+            <div>
+              <div className="flex items-center gap-2 text-xs uppercase tracking-widest text-white/80 mb-1">
+                <Youtube className="h-3.5 w-3.5" />
+                Canal YouTube
+              </div>
+              <h1 className="text-2xl md:text-3xl font-bold leading-tight">
+                {canal?.channel_title || 'CBRio Online'}
+              </h1>
+              <p className="text-sm text-white/80 mt-1 max-w-md">
+                Desempenho do canal e análise por séries de pregação
+              </p>
+            </div>
+          </div>
+          {podeEditarOnline && (
+            <div className="flex flex-col sm:flex-row gap-2">
+              <Button
+                onClick={() => syncMutation.mutate()}
+                disabled={syncMutation.isPending || recoletarMutation.isPending}
+                variant="secondary"
+                size="lg"
+                className="gap-2 bg-white text-red-600 hover:bg-white/90 shadow-lg"
+              >
+                {syncMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
+                Sincronizar agora
+              </Button>
+              <Button
+                onClick={() => recoletarMutation.mutate()}
+                disabled={syncMutation.isPending || recoletarMutation.isPending}
+                variant="secondary"
+                size="lg"
+                className="gap-2 bg-red-700 text-white hover:bg-red-800 shadow-lg border border-white/20"
+                title="Linka cultos do passado por proximidade temporal com vídeos do canal + puxa todas as 7 métricas (pico ao vivo, DS, DDUS, watch time, retenção, subs, tráfego, sub-status) onde estiver faltando dado. Pico recuperado via peakConcurrentViewers do Analytics (delay de 1-2 dias). Pode demorar 1-3min."
+              >
+                {recoletarMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
+                Recoletar tudo
+              </Button>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {
+
+
+
+
+                                                             }
+      <Tabs value={abaAtiva} onValueChange={trocarAba}>
+        <TabsList className="flex flex-wrap h-auto">
+          <TabsTrigger value="pessoas" className="gap-1.5"><HeartHandshake className="h-3.5 w-3.5" />Pessoas</TabsTrigger>
+          <TabsTrigger value="canal" className="gap-1.5"><Youtube className="h-3.5 w-3.5" />Canal</TabsTrigger>
+          <TabsTrigger value="conteudo" className="gap-1.5"><PlayCircle className="h-3.5 w-3.5" />Conteúdo</TabsTrigger>
+          {
+
+                                                                                 }
+          {podeVerArrecadacao && (
+            <TabsTrigger value="financeiro" className="gap-1.5"><Wallet className="h-3.5 w-3.5" />Financeiro</TabsTrigger>
+          )}
+          <TabsTrigger value="indicadores" className="gap-1.5"><Target className="h-3.5 w-3.5" />Indicadores</TabsTrigger>
+        </TabsList>
+
+        <TabsContent value="pessoas" className="mt-0 space-y-6">
+      {
+
+
+                                                                               }
+      <QrCultosApelo />
+
+      {
+                                                                                 }
+      <CadastroMembresiaOnline />
+
+      {                                                                             }
+      <Card>
+        <CardContent className="p-4 md:p-5 space-y-3">
+          <div className="flex items-center gap-3">
+            <div className="rounded-xl bg-primary/10 p-2"><HeartHandshake className="h-5 w-5 text-primary" /></div>
+            <div>
+              <h2 className="text-base font-bold leading-tight">Novos convertidos · primeiros 90 dias</h2>
+              <p className="text-xs text-muted-foreground mt-0.5">Quem decidiu no Online: contato pastoral (3 dias), batismo e Next (90 dias). Atrasados em vermelho.</p>
+            </div>
+          </div>
+          <JornadaConvertidos area="online" />
+        </CardContent>
+      </Card>
+        </TabsContent>
+
+        <TabsContent value="canal" className="mt-0 space-y-6">
+      <OAuthStatusCard />
+
+      {                                          }
+      {semDados && (
+        <Card className="border-dashed border-2 border-amber-500/30 bg-amber-500/5">
+          <CardContent className="p-5 flex flex-col md:flex-row items-start md:items-center gap-4">
+            <div className="rounded-2xl bg-amber-500/15 p-4">
+              <AlertCircle className="h-6 w-6 text-amber-600 dark:text-amber-400" />
+            </div>
+            <div className="flex-1 min-w-0">
+              <h2 className="font-semibold mb-1">Sem dados do YouTube ainda</h2>
+              <p className="text-sm text-muted-foreground">
+                O cron sincroniza automaticamente as <strong>6h da manhã</strong> todo dia.
+                Para popular agora, clique em <strong>"Sincronizar agora"</strong>.
+              </p>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {
+
+                                                    }
+      {canal && (
+        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3">
+          <StatCard icon={Users}       label="Inscritos"            value={formatNumber(canal.subscriber_count)} delta={data?.delta?.subscriber} accentClass="from-red-500/15 to-rose-500/5" />
+          <StatCard icon={Eye}         label="Views totais"         value={formatNumber(canal.view_count)}        delta={data?.delta?.view}        accentClass="from-blue-500/15 to-cyan-500/5" />
+          <StatCard icon={PlayCircle}  label="Vídeos publicados"    value={formatNumber(canal.video_count)}       delta={data?.delta?.video}       accentClass="from-emerald-500/15 to-teal-500/5" />
+          <CardSemanaViews semana={data?.semana} />
+        </div>
+      )}
+
+      {
+
+
+                                                               }
+      <CanalSerieCard />
+
+      {
+                                                                                       }
+      <Card className="overflow-hidden">
+        <div className="p-4 md:p-5 flex items-center gap-3 border-b border-border bg-gradient-to-r from-primary/5 to-transparent">
+          <div className="rounded-xl bg-primary/10 p-2"><Youtube className="h-5 w-5 text-primary" /></div>
+          <div className="flex-1 min-w-0">
+            <h2 className="text-base font-bold leading-tight">Engajamento de conteúdo</h2>
+            <p className="text-xs text-muted-foreground mt-0.5">
+              Retenção, compartilhamento e cliques do canal no YouTube.{' '}
+              {eng?.mes_label
+                ? `Referência ${eng.mes_label}.`
+                : 'Aguardando integração com a API do YouTube — exibindo 0 até a primeira coleta.'}
+            </p>
+          </div>
+        </div>
+        {
+
+
+
+
+
+
+
+
+
+                                                                                   }
+        <CardContent className="p-4 md:p-5 grid grid-cols-1 md:grid-cols-2 gap-3">
+          <StatCard icon={Eye}          label="Retenção média em vídeos (alvo ≥40%)"        value={`${eng?.retencao ?? 0}%`}          accentClass="from-blue-500/15 to-cyan-500/5" />
+          <StatCard icon={ExternalLink} label="Taxa de compartilhamento (alvo ≥5%)"          value={`${eng?.compartilhamento ?? 0}%`}  accentClass="from-pink-500/15 to-rose-500/5" />
+        </CardContent>
+      </Card>
+        </TabsContent>
+
+        <TabsContent value="conteudo" className="mt-0 space-y-6">
+      {                }
+      {((data?.top_views_mes?.length || 0) > 0 || (data?.top_engajamento_mes?.length || 0) > 0) && (
+        <Card className="overflow-hidden">
+          <div className="p-4 md:p-5 flex flex-col md:flex-row md:items-center md:justify-between gap-3 border-b border-border bg-gradient-to-r from-primary/5 to-transparent">
+            <div className="flex items-center gap-3">
+              <div className="rounded-xl bg-primary/10 p-2">
+                <TrendingUp className="h-5 w-5 text-primary" />
+              </div>
+              <div>
+                <h2 className="text-base font-bold leading-tight">Top vídeos do mês</h2>
+                <p className="text-xs text-muted-foreground mt-0.5">Melhores performances de {new Date().toLocaleDateString('pt-BR', { month: 'long' })}</p>
+              </div>
+            </div>
+            <Tabs value={topTab} onValueChange={(v) => setTopTab(v as any)}>
+              <TabsList>
+                <TabsTrigger value="views" className="gap-1.5"><Eye className="h-3.5 w-3.5" />Por views</TabsTrigger>
+                <TabsTrigger value="engajamento" className="gap-1.5"><ThumbsUp className="h-3.5 w-3.5" />Por engajamento</TabsTrigger>
+              </TabsList>
+            </Tabs>
+          </div>
+          <CardContent className="p-4 md:p-5">
+            <Tabs value={topTab}>
+              <TabsContent value="views" className="mt-0">
+                <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-3">
+                  {(data?.top_views_mes || []).map((v, i) => (
+                    <VideoCard key={v.id} v={v} rank={i + 1} />
+                  ))}
+                  {data?.top_views_mes?.length === 0 && (
+                    <div className="col-span-full text-center text-muted-foreground py-8 text-sm">
+                      Sem vídeos publicados neste mês ainda.
+                    </div>
+                  )}
+                </div>
+              </TabsContent>
+              <TabsContent value="engajamento" className="mt-0">
+                <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-3">
+                  {(data?.top_engajamento_mes || []).map((v, i) => (
+                    <VideoCard key={v.id} v={v} rank={i + 1} />
+                  ))}
+                </div>
+              </TabsContent>
+            </Tabs>
+          </CardContent>
+        </Card>
+      )}
+
+      {                  }
+      {(data?.top_all_time?.length || 0) > 0 && (
+        <Card className="overflow-hidden">
+          <div className="p-4 md:p-5 flex items-center gap-3 border-b border-border bg-gradient-to-r from-amber-500/10 to-transparent">
+            <div className="rounded-xl bg-amber-500/15 p-2">
+              <Sparkles className="h-5 w-5 text-amber-600 dark:text-amber-400" />
+            </div>
+            <div>
+              <h2 className="text-base font-bold leading-tight">Maiores hits do canal</h2>
+              <p className="text-xs text-muted-foreground mt-0.5">Top 5 por views de todos os tempos</p>
+            </div>
+          </div>
+          <CardContent className="p-4 md:p-5">
+            <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-3">
+              {(data?.top_all_time || []).map((v, i) => (
+                <VideoCard key={v.id} v={v} rank={i + 1} />
+              ))}
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {            }
+      {(data?.series?.length || 0) > 0 && (
+        <Card className="overflow-hidden">
+          <div className="p-4 md:p-5 flex items-center justify-between gap-3 border-b border-border bg-gradient-to-r from-purple-500/10 to-transparent">
+            <div className="flex items-center gap-3">
+              <div className="rounded-xl bg-purple-500/15 p-2">
+                <PlayCircle className="h-5 w-5 text-purple-600 dark:text-purple-400" />
+              </div>
+              <div>
+                <h2 className="text-base font-bold leading-tight">Séries de pregação</h2>
+                <p className="text-xs text-muted-foreground mt-0.5">
+                  {data?.series?.length || 0} série(s) ativa(s) · ordenadas por views
+                </p>
+              </div>
+            </div>
+          </div>
+          <CardContent className="p-4 md:p-5">
+            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3">
+              {(data?.series || []).map(s => <SerieCard key={s.id} s={s} />)}
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {                                                                                  }
+      <CultoYouTubePanel />
+        </TabsContent>
+
+        <TabsContent value="financeiro" className="mt-0 space-y-6">
+      {
+
+
+
+                                                                         }
+      <ArrecadacaoOnlineCard />
+        </TabsContent>
+
+        <TabsContent value="indicadores" className="mt-0 space-y-6">
+      {                                    }
+      {matrizKeys.length > 0 && (
+        <Card className="overflow-hidden">
+          <div className="p-4 md:p-5 flex items-center gap-3 border-b border-border bg-gradient-to-r from-primary/10 to-transparent">
+            <div className="rounded-xl bg-primary/15 p-2">
+              <Target className="h-5 w-5 text-primary" />
+            </div>
+            <div className="flex-1">
+              <h2 className="text-base font-bold leading-tight">Indicadores estratégicos do Online</h2>
+              <p className="text-xs text-muted-foreground mt-0.5">
+                KPIs da matriz Valor × Área = Online (do <code className="px-1 py-0.5 rounded bg-muted text-[10px]">/painel</code>)
+              </p>
+            </div>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={toggleAllMatriz}
+              className="gap-1.5"
+            >
+              <ChevronDown className={`h-3.5 w-3.5 transition-transform ${matrizAllOpen ? 'rotate-180' : ''}`} />
+              {matrizAllOpen ? 'Recolher todos' : 'Expandir todos'}
+            </Button>
+          </div>
+          <CardContent className="p-4 md:p-5">
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 items-start">
+              {matrizKeys.map(valor => (
+                <ValorGroupCard
+                  key={valor}
+                  valor={valor}
+                  kpis={(data?.matriz_online?.[valor] || []) as MatrizCell[]}
+                  open={!!matrizOpenMap[valor]}
+                  onOpenChange={(v) => setMatrizOpenMap(m => ({ ...m, [valor]: v }))}
+                />
+              ))}
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {                                                                }
+      <ComunidadeOnlineCard />
+      {isAdmin && <OnlineDebugPanel />}
+        </TabsContent>
+
+      </Tabs>
+
+      {                 }
+      <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-2 text-xs text-muted-foreground pt-2 border-t border-border">
+        <div>Dados sincronizados diariamente às 6h via API do YouTube.</div>
+        {canal && (
+          <a
+            href={`https://www.youtube.com/channel/${canal.channel_id}`}
+            target="_blank" rel="noreferrer"
+            className="inline-flex items-center gap-1 hover:text-foreground transition-colors"
+          >
+            Ver canal no YouTube <ExternalLink className="h-3 w-3" />
+          </a>
+        )}
+      </div>
+    </div>
+  );
+}

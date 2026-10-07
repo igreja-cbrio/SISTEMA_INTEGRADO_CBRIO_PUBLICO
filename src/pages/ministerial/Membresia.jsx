@@ -1,0 +1,3637 @@
+import { useState, useEffect, useCallback, useMemo, useRef, lazy, Suspense } from 'react';
+import { resolveApiBaseUrl } from '@/lib/api-base';
+import { ModuleHeader } from '../../components/layout/ModuleHeader';
+import { useNavigate } from 'react-router-dom';
+import { AnimatePresence, motion } from 'framer-motion';
+import { StatisticsCard } from '../../components/ui/statistics-card';
+import { MultistepFormShell } from '../../components/ui/multistep-form';
+import { useAuth } from '../../contexts/AuthContext';
+import { membresia, voluntariado, devocionais } from '../../api';
+import { supabase } from '../../supabaseClient';
+import {
+  Users, Search, Plus, ChevronRight, X,
+  Phone, Mail, MapPin, Heart, Calendar, Star,
+  CheckCircle2, Circle, UserPlus, Home, Pencil,
+  UserMinus,
+  AlertCircle, LogOut, MapPin as MapPinIcon, Clock, Trash2,
+  DollarSign, HandCoins, Sparkles, Activity, Inbox,
+  Copy, Share2, Download, QrCode, Camera, ScanLine,
+  TrendingUp, ArrowRightLeft, GitMerge, ShieldCheck, Loader2, BookOpen, Flame,
+  ClipboardList, CreditCard, Ticket, PieChart,
+} from 'lucide-react';
+import { toast } from 'sonner';
+import { mascaraCep, cepCompleto, buscarCep } from '../../lib/cepAutopreenche';
+import SeletorBairro from '../../components/ui/seletor-bairro';
+
+
+
+const AbaPerfil = lazy(() => import('../../components/membresia/AbaPerfil'));
+import { Button } from '../../components/ui/button';
+import Paginacao, { usePaginacaoLocal } from '../../components/Paginacao';
+import { Input } from '../../components/ui/input';
+import { BirthDatePicker } from '../../components/ui/birth-date-picker';
+import { DatePicker } from '@/components/ui/date-picker';
+import { Label } from '../../components/ui/label';
+import { Textarea } from '../../components/ui/textarea';
+import { faltandoParaSalvar, frasePendencias, pendenciasInformativas, ROTULO_CAMPO, CAMPOS_CRIACAO, CAMPOS_EDICAO } from '../../lib/camposObrigatoriosMembro';
+import {
+  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
+} from '../../components/ui/select';
+import {
+  Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
+} from '../../components/ui/dialog';
+import {
+  Tabs, TabsList, TabsTrigger, TabsContent,
+} from '../../components/ui/tabs';
+import TabCadastros from './TabCadastros';
+import MembersJornadaPanel from '../../components/MembersJornadaPanel';
+import CensoRespostasDialog from '../../components/membresia/CensoRespostasDialog';
+import MarcadoresJornada from '../../components/MarcadoresJornada';
+
+const C = {
+  bg: 'var(--cbrio-bg)', card: 'var(--cbrio-card)', primary: '#00B39D', primaryBg: '#00B39D18',
+  text: 'var(--cbrio-text)', text2: 'var(--cbrio-text2)', text3: 'var(--cbrio-text3)',
+  border: 'var(--cbrio-border)', green: '#10b981', greenBg: '#10b98118',
+  red: '#ef4444', redBg: '#ef444418', amber: '#f59e0b', amberBg: '#f59e0b18',
+  blue: '#3b82f6', blueBg: '#3b82f618',
+};
+
+
+const TIMELINE_COR = {
+  trilha: '#8b5cf6', grupo: '#3b82f6', grupo_saida: '#94a3b8',
+  contribuicao: '#ec4899', devocional: '#10b981',
+  next: '#f59e0b', next_checkin: '#f59e0b',
+  batismo: '#06b6d4', batismo_realizado: '#06b6d4',
+  jornada: '#00B39D', conversao: '#8b5cf6', aconselhamento: '#00B39D',
+  encaminhamento: '#00B39D', decisao: '#8b5cf6',
+  voluntariado: '#f59e0b', nota: '#94a3b8',
+  inscricao: '#0ea5e9',
+};
+
+const STATUS_MAP = {
+  visitante: { c: C.text3, bg: '#52525218', label: 'Visitante' },
+  frequentador: { c: C.blue, bg: C.blueBg, label: 'Frequentador' },
+  membro: { c: C.green, bg: C.greenBg, label: 'Membro' },
+  membro_ativo: { c: C.primary, bg: C.primaryBg, label: 'Membro Ativo' },
+  inativo: { c: C.red, bg: C.redBg, label: 'Inativo' },
+  transferido: { c: C.amber, bg: C.amberBg, label: 'Transferido' },
+};
+
+const FAIXA_LABEL = { crianca: 'Crianças', adolescente: 'Adolescentes', jovem: 'Jovens', adulto: 'Adultos' };
+const PAPEL_LABEL = {
+  voluntario: 'Voluntários', visitante: 'Visitantes', grupo_ativo: 'Em grupo ativo',
+  contribuinte: 'Contribuintes', com_familia: 'Com família', inscrito_next: 'Inscritos no NEXT', sem_papel: 'Sem papel ativo',
+};
+
+const TRILHA_ETAPAS = [
+  { key: 'primeiro_contato', label: 'Chegou na Igreja', icon: Star },
+  { key: 'conversao', label: 'Conversao', icon: Heart },
+  { key: 'conversa_lider', label: 'Conversa com Pastor/Lider', icon: Users },
+  { key: 'next', label: 'Next (Visão e Cultura CBRio)', icon: Calendar },
+  { key: 'voluntariado', label: 'Voluntariado (comecou a servir)', icon: UserPlus },
+  { key: 'engajamento', label: 'Engajamento ativo', icon: Activity },
+  { key: 'grupo_vida', label: 'Inscrição em Grupo', icon: Home },
+  { key: 'generosidade', label: 'Generosidade (contribuicao)', icon: HandCoins },
+];
+
+const ESTADO_CIVIL_OPTIONS = [
+  { value: 'solteiro', label: 'Solteiro(a)' },
+  { value: 'casado', label: 'Casado(a)' },
+  { value: 'divorciado', label: 'Divorciado(a)' },
+  { value: 'viuvo', label: 'Viúvo(a)' },
+  { value: 'uniao_estavel', label: 'União estável' },
+];
+
+const PARENTESCO_OPTIONS = {
+  responsavel: { label: 'Responsável', cor: '#00B39D', bg: '#00B39D18' },
+  conjuge: { label: 'Cônjuge', cor: '#8b5cf6', bg: '#8b5cf618' },
+  filho: { label: 'Filho(a)', cor: '#3b82f6', bg: '#3b82f618' },
+  outro: { label: 'Outro', cor: '#737373', bg: '#73737318' },
+};
+
+const DIAS_SEMANA = ['Domingo', 'Segunda', 'Terça', 'Quarta', 'Quinta', 'Sexta', 'Sábado'];
+
+const TIPOS_CONTRIBUICAO = {
+  dizimo: { label: 'Dízimo', cor: '#10b981', bg: '#10b98118' },
+  oferta: { label: 'Oferta', cor: '#3b82f6', bg: '#3b82f618' },
+  campanha: { label: 'Campanha', cor: '#f59e0b', bg: '#f59e0b18' },
+};
+
+const FORMAS_PAGAMENTO = ['PIX', 'Dinheiro', 'Cartão', 'Transferência', 'Boleto'];
+
+const NIVEIS_GENEROSIDADE = {
+  ativo: { label: 'Ativo', cor: '#10b981', bg: '#10b98118', desc: 'Contribuiu nos últimos 30 dias' },
+  irregular: { label: 'Irregular', cor: '#f59e0b', bg: '#f59e0b18', desc: 'Contribuiu nos últimos 5 meses' },
+  inativo: { label: 'Inativo', cor: '#ef4444', bg: '#ef444418', desc: 'Sem contribuições há mais de 5 meses' },
+  nunca_contribuiu: { label: 'Nunca contribuiu', cor: '#737373', bg: '#73737318', desc: 'Nenhum registro de contribuição' },
+};
+
+const NIVEIS_SERVICO = {
+  ativo: { label: 'Servindo', cor: '#10b981', bg: '#10b98118', desc: 'Fez check-in nos últimos 60 dias' },
+  ausente: { label: 'Ausente', cor: '#f59e0b', bg: '#f59e0b18', desc: 'Sem check-in há mais de 60 dias' },
+  nunca_serviu: { label: 'Nunca serviu', cor: '#737373', bg: '#73737318', desc: 'Nenhum check-in registrado' },
+};
+
+function diasSemGrupo(dataSaida) {
+  if (!dataSaida) return null;
+  const diff = Date.now() - new Date(dataSaida).getTime();
+  return Math.max(0, Math.floor(diff / (1000 * 60 * 60 * 24)));
+}
+
+function fmtMoeda(v) {
+  return (Number(v) || 0).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
+}
+
+
+
+
+
+
+const EMPTY_FORM = {
+  nome: '', sobrenome: '', apelido: '', cpf: '', email: '', telefone: '', data_nascimento: '', estado_civil: '',
+  endereco: '', bairro: '', cidade: '', cep: '', profissao: '',
+  ministerio: '', grupo: '', status: 'membro_ativo',
+  familia_id: '', familia_nome_novo: '', parentesco: '', observacoes: '',
+};
+
+const Badge = ({ status }) => {
+  const s = STATUS_MAP[status] || STATUS_MAP.visitante;
+  return (
+    <span style={{ display: 'inline-flex', alignItems: 'center', padding: '3px 10px', borderRadius: 20, fontSize: 11, fontWeight: 600, color: s.c, background: s.bg }}>
+      {s.label}
+    </span>
+  );
+};
+
+
+function FamiliaAutocomplete({ familias, value, onChange, placeholder = 'Buscar ou criar família...', autoFocus = false }) {
+  const [query, setQuery] = useState('');
+  const [open, setOpen] = useState(false);
+
+  useEffect(() => {
+    if (value) {
+      const f = familias.find(x => x.id === value);
+      setQuery(f?.nome || '');
+    } else {
+      setQuery('');
+    }
+  }, [value, familias]);
+
+  const q = query.trim().toLowerCase();
+  const filtradas = q
+    ? familias.filter(f => f.nome.toLowerCase().includes(q))
+    : familias.slice(0, 10);
+  const exatoExiste = q && familias.some(f => f.nome.toLowerCase() === q);
+  const podeCriar = q.length >= 2 && !exatoExiste;
+
+  const selecionar = (id, nome) => {
+    onChange({ familia_id: id, familia_nome_novo: '' });
+    setQuery(nome);
+    setOpen(false);
+  };
+  const criar = () => {
+    onChange({ familia_id: '', familia_nome_novo: query.trim() });
+    setOpen(false);
+  };
+  const limpar = () => {
+    onChange({ familia_id: '', familia_nome_novo: '' });
+    setQuery('');
+    setOpen(false);
+  };
+
+  return (
+    <div style={{ position: 'relative' }}>
+      <div style={{ position: 'relative' }}>
+        <Search style={{ position: 'absolute', left: 10, top: '50%', transform: 'translateY(-50%)', width: 14, height: 14, color: '#737373', zIndex: 1, pointerEvents: 'none' }} />
+        <Input
+          value={query}
+          autoFocus={autoFocus}
+          onChange={e => { setQuery(e.target.value); setOpen(true); if (!e.target.value) onChange({ familia_id: '', familia_nome_novo: '' }); }}
+          onFocus={() => setOpen(true)}
+          onBlur={() => setTimeout(() => setOpen(false), 150)}
+          placeholder={placeholder}
+          style={{ paddingLeft: 32, paddingRight: query ? 32 : 12 }}
+        />
+        {query && (
+          <button
+            type="button"
+            onMouseDown={e => { e.preventDefault(); limpar(); }}
+            style={{ position: 'absolute', right: 8, top: '50%', transform: 'translateY(-50%)', background: 'transparent', border: 'none', color: '#737373', cursor: 'pointer', padding: 2, display: 'flex', alignItems: 'center' }}
+            title="Limpar"
+          >
+            <X style={{ width: 14, height: 14 }} />
+          </button>
+        )}
+      </div>
+      {open && (filtradas.length > 0 || podeCriar) && (
+        <div style={{ position: 'absolute', top: 'calc(100% + 4px)', left: 0, right: 0, zIndex: 1100, background: 'var(--cbrio-modal-bg, var(--cbrio-card))', border: '1px solid var(--hairline)', borderRadius: 10, maxHeight: 240, overflow: 'auto', boxShadow: 'var(--shadow)' }}>
+          {filtradas.map(f => (
+            <button
+              key={f.id}
+              type="button"
+              onMouseDown={e => { e.preventDefault(); selecionar(f.id, f.nome); }}
+              style={{ display: 'flex', width: '100%', alignItems: 'center', gap: 10, padding: '10px 12px', background: 'transparent', border: 'none', textAlign: 'left', cursor: 'pointer', color: 'var(--cbrio-text)', fontSize: 13, borderBottom: '1px solid var(--cbrio-border)' }}
+              onMouseEnter={e => e.currentTarget.style.background = 'var(--cbrio-input-bg)'}
+              onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
+            >
+              <Home style={{ width: 14, height: 14, color: '#00B39D', flexShrink: 0 }} />
+              <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{f.nome}</span>
+              {f.membros?.length > 0 && (
+                <span style={{ fontSize: 11, color: 'var(--cbrio-text3)', flexShrink: 0 }}>
+                  {f.membros.length} {f.membros.length === 1 ? 'membro' : 'membros'}
+                </span>
+              )}
+            </button>
+          ))}
+          {podeCriar && (
+            <button
+              type="button"
+              onMouseDown={e => { e.preventDefault(); criar(); }}
+              style={{ display: 'flex', width: '100%', alignItems: 'center', gap: 10, padding: '10px 12px', background: 'transparent', border: 'none', textAlign: 'left', cursor: 'pointer', color: '#00B39D', fontSize: 13, fontWeight: 600 }}
+              onMouseEnter={e => e.currentTarget.style.background = 'var(--cbrio-input-bg)'}
+              onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
+            >
+              <Plus style={{ width: 14, height: 14, flexShrink: 0 }} />
+              <span>Criar família "<strong>{query.trim()}</strong>"</span>
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+const MODAL_STEPS = [
+  { id: 'pessoal', title: 'Dados Pessoais' },
+  { id: 'endereco', title: 'Endereço / Profissão' },
+  { id: 'vinculo', title: 'Vínculo / Status' },
+];
+
+
+function MembroFormModal({ open, onOpenChange, editData, familias, onSaved }) {
+  const [form, setForm] = useState(EMPTY_FORM);
+  const [saving, setSaving] = useState(false);
+  const [fotoPreview, setFotoPreview] = useState(null);
+  const [fotoFile, setFotoFile] = useState(null);
+  const fotoInputRef = useState(() => ({ current: null }))[0];
+  const [currentStep, setCurrentStep] = useState(0);
+
+  const isEdit = !!editData;
+
+  useEffect(() => {
+    if (editData) {
+      const partes = (editData.nome || '').trim().split(/\s+/);
+      const primeiro = partes[0] || '';
+      const restante = partes.slice(1).join(' ');
+      setForm({
+        nome: primeiro,
+        sobrenome: restante,
+        apelido: editData.apelido || '',
+        cpf: editData.cpf || '',
+        email: editData.email || '',
+        telefone: editData.telefone || '',
+        data_nascimento: editData.data_nascimento || '',
+        estado_civil: editData.estado_civil || '',
+        endereco: editData.endereco || '',
+        bairro: editData.bairro || '',
+        cidade: editData.cidade || '',
+        cep: editData.cep || '',
+        profissao: editData.profissao || '',
+        ministerio: editData.ministerio || '',
+        grupo: editData.grupo || '',
+        status: editData.status || 'membro_ativo',
+        familia_id: editData.familia_id || '',
+        familia_nome_novo: '',
+        parentesco: editData.parentesco || '',
+        observacoes: editData.observacoes || '',
+      });
+      setFotoPreview(editData.foto_url || null);
+    } else {
+      setForm(EMPTY_FORM);
+      setFotoPreview(null);
+    }
+    setFotoFile(null);
+    setCurrentStep(0);
+  }, [editData, open]);
+
+  const set = (k, v) => setForm(prev => ({ ...prev, [k]: v }));
+
+  const [cepBuscando, setCepBuscando] = useState(false);
+  const [bairroDoCep, setBairroDoCep] = useState(false);
+  const handleCepChange = async (value) => {
+    const masked = mascaraCep(value);
+    setForm(prev => ({ ...prev, cep: masked }));
+    if (!cepCompleto(masked)) return;
+    setCepBuscando(true);
+    const result = await buscarCep(masked);
+    setCepBuscando(false);
+    if (!result) return;
+
+
+    setBairroDoCep(!!result.bairro);
+    setForm(prev => ({
+      ...prev,
+      endereco: result.endereco && !prev.endereco ? result.endereco : prev.endereco,
+      bairro: result.bairro || prev.bairro,
+      cidade: result.cidade || prev.cidade,
+    }));
+  };
+
+  const handleFotoSelect = (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    processarFoto(file);
+  };
+
+  const processarFoto = (file) => {
+    if (!file.type.startsWith('image/')) { toast.error('Selecione uma imagem (JPG, PNG ou WebP).'); return; }
+    if (file.size > 5 * 1024 * 1024) { toast.error('A imagem deve ter no máximo 5 MB.'); return; }
+    setFotoFile(file);
+    const reader = new FileReader();
+    reader.onload = (ev) => setFotoPreview(ev.target.result);
+    reader.readAsDataURL(file);
+  };
+
+  const [fotoDragOver, setFotoDragOver] = useState(false);
+  const handleFotoDrop = (e) => {
+    e.preventDefault();
+    setFotoDragOver(false);
+    const file = e.dataTransfer?.files?.[0];
+    if (file) processarFoto(file);
+  };
+
+
+
+
+
+
+
+  const faltando = faltandoParaSalvar(form, { edicao: isEdit });
+  const pendentesInfo = isEdit ? pendenciasInformativas(form) : [];
+
+
+
+
+
+  const obrig = (campo) => ((isEdit ? CAMPOS_EDICAO : CAMPOS_CRIACAO).includes(campo) ? ' *' : '');
+
+  const isStepValid = () => {
+    switch (currentStep) {
+      case 0:
+
+
+        return faltando.length === 0;
+      default:
+        return true;
+    }
+  };
+
+  const handleSave = async () => {
+    if (faltando.length) { toast.error(frasePendencias(faltando)); return; }
+    setSaving(true);
+    try {
+      const payload = { ...form };
+      payload.nome = `${form.nome.trim()} ${form.sobrenome.trim()}`.trim();
+      delete payload.sobrenome;
+      const novoNome = payload.familia_nome_novo?.trim();
+      delete payload.familia_nome_novo;
+
+      delete payload.ministerio;
+      delete payload.grupo;
+
+      if (!payload.familia_id && novoNome) {
+        const novaFam = await membresia.familias.create({ nome: novoNome });
+        payload.familia_id = novaFam.id;
+      }
+
+      if (!payload.familia_id) {
+        delete payload.familia_id;
+        payload.parentesco = null;
+      }
+      if (!payload.parentesco) delete payload.parentesco;
+
+      for (const k of Object.keys(payload)) {
+        if (payload[k] === '') delete payload[k];
+      }
+
+
+
+
+
+      const apelidoLimpo = (form.apelido || '').trim();
+      if (apelidoLimpo) payload.apelido = apelidoLimpo;
+      else if (isEdit && editData?.apelido) payload.apelido = null;
+
+      let membroId;
+      if (isEdit) {
+        await membresia.membros.update(editData.id, payload);
+        membroId = editData.id;
+        toast.success('Membro atualizado com sucesso!');
+      } else {
+        const novo = await membresia.membros.create(payload);
+        membroId = novo?.id;
+        toast.success(`${payload.nome} cadastrado(a) com sucesso!`);
+      }
+
+      if (fotoFile && membroId) {
+        try {
+          const fd = new FormData();
+          fd.append('foto', fotoFile);
+          await membresia.membros.uploadFoto(membroId, fd);
+        } catch (fotoErr) {
+          console.error('Foto upload failed:', fotoErr);
+          toast.error('Membro salvo, mas houve erro ao enviar a foto.');
+        }
+      }
+
+      onSaved();
+      onOpenChange(false);
+    } catch (e) {
+      console.error(e);
+      toast.error(e.message || 'Erro ao salvar membro');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const nextStep = () => { if (currentStep < MODAL_STEPS.length - 1) setCurrentStep(s => s + 1); };
+  const prevStep = () => { if (currentStep > 0) setCurrentStep(s => s - 1); };
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-2xl max-h-[90vh] flex flex-col z-[1000]">
+        <DialogHeader>
+          <DialogTitle>{isEdit ? 'Editar Membro' : 'Novo Membro'}</DialogTitle>
+        </DialogHeader>
+
+        <div className="flex-1 overflow-y-auto min-h-0">
+        <MultistepFormShell
+          steps={MODAL_STEPS}
+          currentStep={currentStep}
+          onNext={nextStep}
+          onPrev={prevStep}
+          onSubmit={handleSave}
+          isSubmitting={saving}
+          isStepValid={isStepValid()}
+          submitLabel={isEdit ? 'Salvar' : 'Criar'}
+        >
+          {                            }
+          {currentStep === 0 && (
+            <div>
+              {
+
+                                                                              }
+              {pendentesInfo.length > 0 && (
+                <div style={{ marginBottom: 12, padding: '10px 12px', borderRadius: 10, border: '1px dashed rgba(245,158,11,0.5)', background: 'rgba(245,158,11,0.07)' }}>
+                  <div style={{ fontSize: 12, color: C.text, fontWeight: 600 }}>
+                    Falta no cadastro: {pendentesInfo.map(k => ROTULO_CAMPO[k] || k).join(' · ')}
+                  </div>
+                  <div style={{ fontSize: 11, color: C.text2, marginTop: 3, lineHeight: 1.5 }}>
+                    Dá para salvar assim mesmo — preencha quando tiver o dado. Não invente CPF nem
+                    data: chute vira chave de identidade e liga esta pessoa ao cadastro de outra.
+                  </div>
+                </div>
+              )}
+              {                 }
+              <div className="flex flex-col items-center gap-2 py-4">
+                <div
+                  onClick={() => fotoInputRef.current?.click()}
+                  onDragOver={(e) => { e.preventDefault(); setFotoDragOver(true); }}
+                  onDragLeave={() => setFotoDragOver(false)}
+                  onDrop={handleFotoDrop}
+                  className="relative cursor-pointer group"
+                  style={{ width: 80, height: 80, borderRadius: '50%', overflow: 'hidden', border: `2px dashed ${fotoDragOver ? C.primary : C.border}`, background: fotoPreview ? 'transparent' : fotoDragOver ? '#00B39D25' : C.primaryBg, display: 'flex', alignItems: 'center', justifyContent: 'center', transition: 'border-color 0.2s, background 0.2s' }}
+                >
+                  {fotoPreview ? (
+                    <img src={fotoPreview} alt="Foto" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                  ) : (
+                    <Camera style={{ width: 24, height: 24, color: C.primary }} />
+                  )}
+                  <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
+                    <Camera style={{ width: 20, height: 20, color: '#fff' }} />
+                  </div>
+                </div>
+                <input ref={el => fotoInputRef.current = el} type="file" accept="image/jpeg,image/png,image/webp" className="hidden" onChange={handleFotoSelect} />
+                {fotoPreview && (
+                  <button type="button" onClick={() => { setFotoFile(null); setFotoPreview(null); if (fotoInputRef.current) fotoInputRef.current.value = ''; }}
+                    className="text-xs text-red-500 hover:underline">
+                    Remover foto
+                  </button>
+                )}
+                {!fotoPreview && <span className="text-xs text-muted-foreground">Clique ou arraste uma foto</span>}
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div className="space-y-1.5">
+                  <Label>Nome{obrig('nome')}</Label>
+                  <Input value={form.nome} onChange={e => set('nome', e.target.value)} placeholder="Nome" />
+                </div>
+                <div className="space-y-1.5">
+                  <Label>Sobrenome{obrig('sobrenome')}</Label>
+                  <Input value={form.sobrenome} onChange={e => set('sobrenome', e.target.value)} placeholder="Sobrenome" />
+                </div>
+                <div className="space-y-1.5 sm:col-span-2">
+                  <Label>Apelido (como é conhecido)</Label>
+                  <Input value={form.apelido} onChange={e => set('apelido', e.target.value)} placeholder='Ex: "Tuninho"' maxLength={60} />
+                  <p className="text-xs text-muted-foreground">
+                    Entra na busca pública de grupos por líder — quem só conhece o apelido acha o grupo.
+                  </p>
+                </div>
+                <div className="space-y-1.5">
+                  <Label>CPF{obrig('cpf')}</Label>
+                  <Input value={form.cpf} onChange={e => set('cpf', e.target.value)} placeholder="000.000.000-00" inputMode="numeric" maxLength={14} />
+                </div>
+                <div className="space-y-1.5">
+                  <Label>Data de Nascimento{obrig('data_nascimento')}</Label>
+                  <BirthDatePicker value={form.data_nascimento} onChange={v => set('data_nascimento', v)} />
+                </div>
+                <div className="space-y-1.5">
+                  <Label>Email</Label>
+                  <Input type="email" value={form.email} onChange={e => set('email', e.target.value)} placeholder="email@exemplo.com" />
+                </div>
+                <div className="space-y-1.5">
+                  <Label>Telefone</Label>
+                  <Input value={form.telefone} onChange={e => set('telefone', e.target.value)} placeholder="(00) 00000-0000" />
+                </div>
+                <div className="space-y-1.5">
+                  <Label>Estado Civil</Label>
+                  <Select value={form.estado_civil || '__none__'} onValueChange={v => set('estado_civil', v === '__none__' ? '' : v)}>
+                    <SelectTrigger><SelectValue placeholder="Selecionar" /></SelectTrigger>
+                    <SelectContent className="z-[1001]">
+                      <SelectItem value="__none__">Não informado</SelectItem>
+                      {ESTADO_CIVIL_OPTIONS.map(ec => <SelectItem key={ec.value} value={ec.value}>{ec.label}</SelectItem>)}
+                    </SelectContent>
+                  </Select>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {                                  }
+          {currentStep === 1 && (
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div className="space-y-1.5">
+                <Label>CEP {cepBuscando && <span className="text-xs text-muted-foreground">(buscando...)</span>}</Label>
+                <Input
+                  value={form.cep}
+                  onChange={e => handleCepChange(e.target.value)}
+                  placeholder="00000-000"
+                  inputMode="numeric"
+                  maxLength={9}
+                  autoComplete="postal-code"
+                />
+              </div>
+              <div className="sm:col-span-2 space-y-1.5">
+                <Label>Endereço</Label>
+                <Input value={form.endereco} onChange={e => set('endereco', e.target.value)} placeholder="Rua, número" />
+              </div>
+              <div className="space-y-1.5">
+                <Label>Bairro</Label>
+                {
+                                                                              }
+                <SeletorBairro
+                  value={form.bairro}
+                  onChange={(v) => { set('bairro', v); setBairroDoCep(false); }}
+                  doCep={bairroDoCep}
+                  placeholder="Digite ou escolha"
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label>Cidade</Label>
+                <Input value={form.cidade} onChange={e => set('cidade', e.target.value)} />
+              </div>
+              <div className="space-y-1.5">
+                <Label>Profissão</Label>
+                <Input value={form.profissao} onChange={e => set('profissao', e.target.value)} />
+              </div>
+              <div className="space-y-1.5">
+                <Label>Ministério</Label>
+                <Input value={form.ministerio} onChange={e => set('ministerio', e.target.value)} placeholder="Ex: Louvor, Infantil" />
+              </div>
+              <div className="space-y-1.5">
+                <Label>Grupo</Label>
+                <Input value={form.grupo} onChange={e => set('grupo', e.target.value)} placeholder="Ex: Grupo Vida Centro" />
+              </div>
+            </div>
+          )}
+
+          {                              }
+          {currentStep === 2 && (
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div className="space-y-1.5">
+                <Label>Status</Label>
+                <Select value={form.status} onValueChange={v => set('status', v)}>
+                  <SelectTrigger><SelectValue /></SelectTrigger>
+                  <SelectContent className="z-[1001]">
+                    {Object.entries(STATUS_MAP).map(([k, v]) => (
+                      <SelectItem key={k} value={k}>{v.label}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="space-y-1.5">
+                <Label>Família</Label>
+                <FamiliaAutocomplete
+                  familias={familias}
+                  value={form.familia_id}
+                  onChange={({ familia_id, familia_nome_novo }) => setForm(prev => ({
+                    ...prev,
+                    familia_id,
+                    familia_nome_novo,
+                    parentesco: (familia_id || familia_nome_novo) ? prev.parentesco : '',
+                  }))}
+                />
+                {form.familia_nome_novo && (
+                  <div style={{ fontSize: 11, color: '#00B39D', marginTop: 4, display: 'flex', alignItems: 'center', gap: 4 }}>
+                    <Plus style={{ width: 12, height: 12 }} /> Nova família: <strong>{form.familia_nome_novo}</strong>
+                  </div>
+                )}
+              </div>
+              <div className="space-y-1.5">
+                <Label>Parentesco</Label>
+                <Select
+                  value={form.parentesco || '__none__'}
+                  onValueChange={v => set('parentesco', v === '__none__' ? '' : v)}
+                  disabled={!form.familia_id && !form.familia_nome_novo}
+                >
+                  <SelectTrigger><SelectValue placeholder={(form.familia_id || form.familia_nome_novo) ? 'Selecionar' : 'Vincule uma família primeiro'} /></SelectTrigger>
+                  <SelectContent className="z-[1001]">
+                    <SelectItem value="__none__">Não informado</SelectItem>
+                    {Object.entries(PARENTESCO_OPTIONS).map(([k, v]) => (
+                      <SelectItem key={k} value={k}>{v.label}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="sm:col-span-2 space-y-1.5">
+                <Label>Observações</Label>
+                <Textarea value={form.observacoes} onChange={e => set('observacoes', e.target.value)} rows={3} />
+              </div>
+            </div>
+          )}
+        </MultistepFormShell>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+const VINC_TIPOS = {
+  filho: 'Filho(a) de', pai_mae: 'Pai/Mãe de', irmao: 'Irmão(ã) de', conjuge: 'Cônjuge de',
+  avo: 'Avô/Avó de', neto: 'Neto(a) de', tio: 'Tio(a) de', sobrinho: 'Sobrinho(a) de',
+  primo: 'Primo(a) de', responsavel: 'Responsável por', dependente: 'Dependente de', outro: 'Parente de',
+};
+
+
+function VinculosFamiliares({ membroId, onAbrirPessoa, onFamiliaMudou }) {
+  const [lista, setLista] = useState([]);
+  const [aberto, setAberto] = useState(false);
+  const [tipo, setTipo] = useState('filho');
+  const [q, setQ] = useState('');
+  const [resultados, setResultados] = useState([]);
+  const [sel, setSel] = useState(null);
+  const [salvando, setSalvando] = useState(false);
+
+  function carregar() {
+    membresia.vinculos.list(membroId).then(r => setLista(Array.isArray(r) ? r : [])).catch(() => {});
+  }
+  useEffect(() => { carregar(); /* eslint-disable-next-line */ }, [membroId]);
+
+  useEffect(() => {
+    if (!aberto || sel || q.trim().length < 2) { setResultados([]); return; }
+    let cancel = false;
+    const t = setTimeout(async () => {
+      try { const r = await membresia.membros.list({ busca: q.trim() }); if (!cancel) setResultados((r || []).filter(m => m.id !== membroId).slice(0, 8)); }
+      catch { if (!cancel) setResultados([]); }
+    }, 300);
+    return () => { cancel = true; clearTimeout(t); };
+  }, [q, aberto, sel, membroId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  async function salvar() {
+    if (!sel) return;
+    setSalvando(true);
+    try {
+      const r = await membresia.vinculos.create(membroId, { relacionado_id: sel.id, tipo });
+      const CLOSE = new Set(['pai_mae', 'filho', 'conjuge', 'irmao']);
+      if (r?.familia_unificada) toast.success('Vínculo criado — as duas pessoas agora estão na mesma família');
+      else if (CLOSE.has(tipo)) toast.success('Vínculo criado');
+      else toast.success('Vínculo criado (parentesco distante não junta a família)');
+      setAberto(false); setSel(null); setQ(''); setTipo('filho'); carregar();
+      if (r?.familia_unificada) onFamiliaMudou?.();
+    } catch (e) { toast.error(e?.message || 'Erro ao criar vínculo'); } finally { setSalvando(false); }
+  }
+  async function remover(id) {
+    if (!window.confirm('Remover este vínculo?')) return;
+    try { await membresia.vinculos.remove(id); carregar(); } catch (e) { toast.error(e?.message || 'Erro'); }
+  }
+
+  return (
+    <div style={{ marginTop: 18 }}>
+      <h3 style={{ fontSize: 13, fontWeight: 600, color: C.text2, marginBottom: 10, textTransform: 'uppercase', letterSpacing: 0.5 }}>Vínculos familiares</h3>
+      {lista.length > 0 ? (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 10 }}>
+          {lista.map(v => (
+            <div key={v.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 12px', background: 'var(--cbrio-input-bg)', borderRadius: 8 }}>
+              <button onClick={() => v.relacionado?.id && onAbrirPessoa?.(v.relacionado.id)} style={{ flex: 1, minWidth: 0, textAlign: 'left', background: 'none', border: 'none', cursor: 'pointer' }}>
+                <span style={{ fontSize: 11, color: C.text3 }}>{VINC_TIPOS[v.tipo] || 'Parente de'} </span>
+                <span style={{ fontSize: 14, fontWeight: 600, color: C.text }}>{v.relacionado?.nome || '—'}</span>
+              </button>
+              <button onClick={() => remover(v.id)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: C.text3 }} title="Remover"><X style={{ width: 14, height: 14 }} /></button>
+            </div>
+          ))}
+        </div>
+      ) : <div style={{ fontSize: 12, color: C.text3, marginBottom: 8 }}>Nenhum vínculo familiar registrado.</div>}
+      {!aberto ? (
+        <Button variant="outline" size="sm" onClick={() => setAberto(true)}><Plus style={{ width: 14, height: 14 }} /> Adicionar vínculo</Button>
+      ) : (
+        <div style={{ padding: 14, background: 'var(--cbrio-input-bg)', borderRadius: 12, display: 'flex', flexDirection: 'column', gap: 10 }}>
+          <Label style={{ fontSize: 11 }}>Esta pessoa é...</Label>
+          <Select value={tipo} onValueChange={setTipo}>
+            <SelectTrigger><SelectValue /></SelectTrigger>
+            <SelectContent>{Object.entries(VINC_TIPOS).map(([k, l]) => <SelectItem key={k} value={k}>{l}</SelectItem>)}</SelectContent>
+          </Select>
+          <div style={{ fontSize: 11, color: C.text3, lineHeight: 1.4 }}>
+            Pai/mãe, filho(a), cônjuge ou irmão(ã) também colocam as duas pessoas na <b>mesma família</b> automaticamente.
+          </div>
+          {sel ? (
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, padding: '8px 12px', background: 'var(--cbrio-card)', borderRadius: 8 }}>
+              <span style={{ fontSize: 14, fontWeight: 600, color: C.text }}>{sel.nome}</span>
+              <button onClick={() => { setSel(null); setQ(''); }} style={{ background: 'none', border: 'none', cursor: 'pointer', color: C.text3 }}><X style={{ width: 14, height: 14 }} /></button>
+            </div>
+          ) : (
+            <div>
+              <Input autoFocus placeholder="Buscar pessoa por nome..." value={q} onChange={e => setQ(e.target.value)} />
+              {resultados.length > 0 && (
+                <div style={{ marginTop: 6, display: 'flex', flexDirection: 'column', gap: 4, maxHeight: 180, overflowY: 'auto' }}>
+                  {resultados.map(m => (
+                    <button key={m.id} onClick={() => setSel(m)} style={{ textAlign: 'left', padding: '8px 12px', background: 'var(--cbrio-card)', border: 'none', borderRadius: 8, cursor: 'pointer', fontSize: 14, color: C.text }}>{m.nome}</button>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+          <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+            <Button variant="outline" size="sm" onClick={() => { setAberto(false); setSel(null); setQ(''); }}>Cancelar</Button>
+            <Button size="sm" onClick={salvar} disabled={!sel || salvando}>Salvar vínculo</Button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+
+
+function MesmaFamiliaInline({ membroId, excluirIds = [], onDone }) {
+  const [aberto, setAberto] = useState(false);
+  const [q, setQ] = useState('');
+  const [resultados, setResultados] = useState([]);
+  const [buscando, setBuscando] = useState(false);
+  const [sel, setSel] = useState(null);
+  const [parentesco, setParentesco] = useState('');
+  const [salvando, setSalvando] = useState(false);
+
+  useEffect(() => {
+    if (!aberto || sel || q.trim().length < 2) { setResultados([]); return; }
+    let cancel = false;
+    setBuscando(true);
+    const t = setTimeout(async () => {
+      try {
+        const r = await membresia.membros.list({ busca: q.trim() });
+        if (!cancel) setResultados((r || []).filter(m => m.id !== membroId && !excluirIds.includes(m.id)).slice(0, 8));
+      } catch { if (!cancel) setResultados([]); }
+      finally { if (!cancel) setBuscando(false); }
+    }, 300);
+    return () => { cancel = true; clearTimeout(t); };
+  }, [q, aberto, sel, membroId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  function fechar() { setAberto(false); setSel(null); setQ(''); setParentesco(''); setResultados([]); }
+
+  async function salvar() {
+    if (!sel) return;
+    setSalvando(true);
+    try {
+      await membresia.familias.mesmaFamilia(membroId, { outro_membro_id: sel.id, parentesco: parentesco || undefined });
+      toast.success(`Vinculado à mesma família de ${sel.nome}`);
+      fechar();
+      onDone?.();
+    } catch (e) { toast.error(e?.message || 'Erro ao vincular'); }
+    setSalvando(false);
+  }
+
+  if (!aberto) {
+    return (
+      <Button variant="outline" size="sm" onClick={() => setAberto(true)}>
+        <Users style={{ width: 14, height: 14 }} /> Mesma família que...
+      </Button>
+    );
+  }
+  return (
+    <div style={{ padding: 14, background: 'var(--cbrio-input-bg)', borderRadius: 12, display: 'flex', flexDirection: 'column', gap: 10 }}>
+      <Label style={{ fontSize: 11 }}>Essa pessoa é da mesma família que...</Label>
+      {sel ? (
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, padding: '8px 12px', background: 'var(--cbrio-card)', borderRadius: 8 }}>
+          <span style={{ fontSize: 14, fontWeight: 600, color: C.text }}>{sel.nome}</span>
+          <button onClick={() => { setSel(null); setQ(''); }} style={{ background: 'none', border: 'none', cursor: 'pointer', color: C.text3 }}><X style={{ width: 14, height: 14 }} /></button>
+        </div>
+      ) : (
+        <div style={{ position: 'relative' }}>
+          <Input autoFocus placeholder="Buscar pessoa por nome..." value={q} onChange={e => setQ(e.target.value)} />
+          {q.trim().length >= 2 && (
+            <div style={{ position: 'absolute', top: '100%', left: 0, right: 0, zIndex: 20, marginTop: 4, background: 'var(--cbrio-card)', border: '1px solid var(--hairline)', borderRadius: 10, boxShadow: 'var(--shadow)', maxHeight: 220, overflowY: 'auto' }}>
+              {buscando ? <div style={{ padding: 10, fontSize: 12, color: C.text3 }}>Buscando...</div>
+                : resultados.length === 0 ? <div style={{ padding: 10, fontSize: 12, color: C.text3 }}>Nenhuma pessoa encontrada</div>
+                  : resultados.map(m => (
+                    <button key={m.id} onClick={() => { setSel({ id: m.id, nome: m.nome }); setResultados([]); }}
+                      style={{ display: 'flex', alignItems: 'center', gap: 8, width: '100%', textAlign: 'left', padding: '8px 12px', background: 'none', border: 'none', cursor: 'pointer', fontSize: 13, color: C.text }}
+                      onMouseEnter={e => e.currentTarget.style.background = C.primaryBg} onMouseLeave={e => e.currentTarget.style.background = 'none'}>
+                      <span style={{ fontWeight: 500 }}>{m.nome}</span>
+                      {m.telefone && <span style={{ fontSize: 11, color: C.text3 }}>{m.telefone}</span>}
+                    </button>
+                  ))}
+            </div>
+          )}
+        </div>
+      )}
+      <div>
+        <Label style={{ fontSize: 11 }}>Parentesco (opcional)</Label>
+        <Select value={parentesco || '__none__'} onValueChange={v => setParentesco(v === '__none__' ? '' : v)}>
+          <SelectTrigger><SelectValue placeholder="Selecionar" /></SelectTrigger>
+          <SelectContent className="z-[1001]">
+            <SelectItem value="__none__">Não informado</SelectItem>
+            {Object.entries(PARENTESCO_OPTIONS).map(([k, v]) => <SelectItem key={k} value={k}>{v.label}</SelectItem>)}
+          </SelectContent>
+        </Select>
+      </div>
+      <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+        <Button variant="outline" onClick={fechar}>Cancelar</Button>
+        <Button onClick={salvar} disabled={!sel || salvando}>{salvando ? 'Salvando...' : 'Vincular'}</Button>
+      </div>
+    </div>
+  );
+}
+
+
+export default function Membresia() {
+  const navigate = useNavigate();
+
+
+
+  const { isAdmin } = useAuth();
+  const isDiretor = isAdmin;
+  const [membros, setMembros] = useState([]);
+  const { pageItems: membrosPag, paginacaoProps: membrosPagProps } = usePaginacaoLocal(membros, 25);
+  const [kpis, setKpis] = useState({ total: 0, byStatus: {}, familias: 0 });
+  const [familias, setFamilias] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [searching, setSearching] = useState(false);
+  const [error, setError] = useState('');
+
+
+  const [busca, setBusca] = useState(
+    () => new URLSearchParams(window.location.search).get('q') || '',
+  );
+  const [filterStatus, setFilterStatus] = useState('');
+  const [filterPapel, setFilterPapel] = useState('');
+  const [filterFaixa, setFilterFaixa] = useState('');
+
+
+
+  const [filtroCpf, setFiltroCpf] = useState('');
+  const [selectedMembro, setSelectedMembro] = useState(null);
+  const [showForm, setShowForm] = useState(false);
+  const [editMembro, setEditMembro] = useState(null);
+  const [activeTab, setActiveTab] = useState('info');
+  const [novoHist, setNovoHist] = useState('');
+  const [salvandoHist, setSalvandoHist] = useState(false);
+  const [togglingEtapa, setTogglingEtapa] = useState(null);
+  const [grupos, setGrupos] = useState([]);
+  const [grupoSelecionado, setGrupoSelecionado] = useState('');
+  const [salvandoGrupo, setSalvandoGrupo] = useState(false);
+
+
+
+
+
+  const [pageTab, setPageTab] = useState(() => {
+    const t = new URLSearchParams(window.location.search).get('tab');
+    return ['membros', 'perfil', 'jornada', 'duplicados', 'cadastros'].includes(t) ? t : 'membros';
+  });
+  const [showShareLink, setShowShareLink] = useState(false);
+  const [showContribForm, setShowContribForm] = useState(false);
+  const [contribForm, setContribForm] = useState({ tipo: 'dizimo', valor: '', data: new Date().toISOString().slice(0, 10), forma_pagamento: '', campanha: '', observacoes: '' });
+  const [salvandoContrib, setSalvandoContrib] = useState(false);
+  const [ministeriosList, setMinisteriosList] = useState([]);
+  const [showVolForm, setShowVolForm] = useState(false);
+  const [volForm, setVolForm] = useState({ ministerio_id: '', papel: '' });
+  const [salvandoVol, setSalvandoVol] = useState(false);
+  const [showCheckinForm, setShowCheckinForm] = useState(false);
+  const [checkinForm, setCheckinForm] = useState({ ministerio_id: '', data: new Date().toISOString().slice(0, 10), culto: '' });
+  const [salvandoCheckin, setSalvandoCheckin] = useState(false);
+  const [showFamiliaEdit, setShowFamiliaEdit] = useState(false);
+  const [familiaLinkForm, setFamiliaLinkForm] = useState({ familia_id: '', familia_nome_novo: '', parentesco: '' });
+  const [salvandoFamilia, setSalvandoFamilia] = useState(false);
+  const [volStatus, setVolStatus] = useState(null);
+  const [loadingVolStatus, setLoadingVolStatus] = useState(false);
+  const [indicandoServir, setIndicandoServir] = useState(false);
+  const [devocionalHist, setDevocionalHist] = useState(null);
+
+
+
+
+  const [devocionalErro, setDevocionalErro] = useState(null);
+  const [loadingDevocional, setLoadingDevocional] = useState(false);
+  const [inscHist, setInscHist] = useState(null);
+  const [loadingInsc, setLoadingInsc] = useState(false);
+  const [wifiHist, setWifiHist] = useState(null);
+  const [loadingWifi, setLoadingWifi] = useState(false);
+  const [faceHist, setFaceHist] = useState(null);
+  const [loadingFace, setLoadingFace] = useState(false);
+  const [censoAberto, setCensoAberto] = useState(null);
+  const [timeline, setTimeline] = useState(null);
+  const [loadingTimeline, setLoadingTimeline] = useState(false);
+  const [possiveisDup, setPossiveisDup] = useState([]);
+  const [possiveisDupErro, setPossiveisDupErro] = useState(false);
+  const [fundindo, setFundindo] = useState(false);
+
+
+  useEffect(() => {
+    if (!selectedMembro?.id) { setPossiveisDup([]); setPossiveisDupErro(false); return; }
+    let cancelado = false;
+    setPossiveisDupErro(false);
+    membresia.duplicados.doMembro(selectedMembro.id)
+      .then(r => { if (!cancelado) setPossiveisDup(Array.isArray(r) ? r : []); })
+      .catch(() => { if (!cancelado) { setPossiveisDup([]); setPossiveisDupErro(true); } });
+    return () => { cancelado = true; };
+  }, [selectedMembro?.id]);
+
+  async function fundirDuplicado(d) {
+    if (!selectedMembro?.id) return;
+    if (!window.confirm(`Fundir "${d.nome}" nesta pessoa? Os dados do duplicado migram pra cá e o duplicado é removido.`)) return;
+    setFundindo(true);
+    try {
+      await membresia.duplicados.merge({ keep_id: selectedMembro.id, merge_ids: [d.id], observacao: 'Fundido pelo detalhe da pessoa' });
+      setPossiveisDup(prev => prev.filter(x => x.id !== d.id));
+      openDetail(selectedMembro.id);
+    } catch (e) {
+      window.alert(e?.message || 'Erro ao fundir');
+    } finally {
+      setFundindo(false);
+    }
+  }
+
+
+  useEffect(() => {
+    if (!selectedMembro?.id || activeTab !== 'devocional') return;
+    let cancelado = false;
+    setLoadingDevocional(true);
+    setDevocionalErro(null);
+    devocionais.byMembro(selectedMembro.id)
+      .then(r => { if (!cancelado) { setDevocionalHist(r); setDevocionalErro(null); } })
+
+
+      .catch(e => {
+        if (cancelado) return;
+        setDevocionalHist(null);
+        setDevocionalErro(e?.message || 'Não foi possível carregar os check-ins de devocional.');
+      })
+      .finally(() => { if (!cancelado) setLoadingDevocional(false); });
+    return () => { cancelado = true; };
+  }, [selectedMembro?.id, activeTab]);
+
+
+  useEffect(() => {
+    if (!selectedMembro?.id || activeTab !== 'inscricoes') return;
+    let cancelado = false;
+    setLoadingInsc(true);
+    membresia.membros.inscricoes(selectedMembro.id)
+      .then(r => { if (!cancelado) setInscHist(r); })
+      .catch(() => { if (!cancelado) setInscHist({ itens: [], total: 0, por_porta: {} }); })
+      .finally(() => { if (!cancelado) setLoadingInsc(false); });
+    return () => { cancelado = true; };
+  }, [selectedMembro?.id, activeTab]);
+
+
+  useEffect(() => {
+    if (!selectedMembro?.id || activeTab !== 'wifi') return;
+    let cancelado = false;
+    setLoadingWifi(true);
+    membresia.membros.wifi(selectedMembro.id)
+      .then(r => { if (!cancelado) setWifiHist(r); })
+      .catch(() => { if (!cancelado) setWifiHist({ tem_wifi: false, conexoes: [] }); })
+      .finally(() => { if (!cancelado) setLoadingWifi(false); });
+    return () => { cancelado = true; };
+  }, [selectedMembro?.id, activeTab]);
+
+
+  useEffect(() => {
+    if (!selectedMembro?.id || activeTab !== 'reconhecimento') return;
+    let cancelado = false;
+    setLoadingFace(true);
+    membresia.membros.reconhecimentoFacial(selectedMembro.id)
+      .then(r => { if (!cancelado) setFaceHist(r); })
+      .catch(() => { if (!cancelado) setFaceHist({ total: 0, itens: [] }); })
+      .finally(() => { if (!cancelado) setLoadingFace(false); });
+    return () => { cancelado = true; };
+  }, [selectedMembro?.id, activeTab]);
+
+
+  useEffect(() => {
+    if (!selectedMembro?.id || activeTab !== 'timeline') return;
+    let cancelado = false;
+    setLoadingTimeline(true);
+    membresia.membros.timeline(selectedMembro.id)
+      .then(r => { if (!cancelado) setTimeline(r); })
+      .catch(() => { if (!cancelado) setTimeline({ eventos: [], total: 0 }); })
+      .finally(() => { if (!cancelado) setLoadingTimeline(false); });
+    return () => { cancelado = true; };
+  }, [selectedMembro?.id, activeTab]);
+
+
+
+  const fetchMembros = useCallback(async () => {
+    try {
+      setError('');
+      setSearching(true);
+      const params = {};
+      if (busca) params.busca = busca;
+      if (filterStatus) params.status = filterStatus;
+      if (filterPapel) params.papel = filterPapel;
+      if (filterFaixa) params.faixa = filterFaixa;
+      if (filtroCpf === 'sem') params.sem_cpf = '1';
+      if (filtroCpf === 'com') params.com_cpf = '1';
+      const m = await membresia.membros.list(Object.keys(params).length ? params : null);
+      setMembros(m);
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setLoading(false);
+      setSearching(false);
+    }
+  }, [busca, filterStatus, filterPapel, filterFaixa, filtroCpf]);
+
+
+  const filtroResumo = useMemo(() => {
+    const partes = [];
+    if (filterFaixa) partes.push(FAIXA_LABEL[filterFaixa] || filterFaixa);
+    if (filterStatus) partes.push(STATUS_MAP[filterStatus]?.label || filterStatus);
+    if (filterPapel) partes.push(PAPEL_LABEL[filterPapel] || filterPapel);
+    if (filtroCpf === 'sem') partes.push('Sem CPF');
+    if (filtroCpf === 'com') partes.push('Com CPF');
+    if (busca) partes.push(`"${busca.trim()}"`);
+    return { ativo: partes.length > 0, titulo: partes.join(' · ') };
+  }, [filterFaixa, filterStatus, filterPapel, filtroCpf, busca]);
+
+
+
+  const filtrarPorCard = useCallback((cfg) => {
+    setBusca('');
+    setFilterFaixa('');
+    setFilterStatus(cfg?.status || '');
+    setFilterPapel(cfg?.papel || '');
+    setFiltroCpf(cfg?.sem_cpf ? 'sem' : (cfg?.com_cpf ? 'com' : ''));
+    requestAnimationFrame(() => {
+      document.querySelector('[data-membros-lista]')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
+  }, []);
+
+
+  const fetchAux = useCallback(async () => {
+    try {
+      const [k, f, g, mi] = await Promise.all([
+        membresia.kpis(),
+        membresia.familias.list(),
+        membresia.grupos.list({ ativo: 'true' }).catch(() => []),
+        membresia.ministerios.list({ ativo: 'true' }).catch(() => []),
+      ]);
+      setKpis(k);
+      setFamilias(f);
+      setGrupos(g);
+      setMinisteriosList(mi);
+    } catch (e) {
+      setError(e.message);
+    }
+  }, []);
+
+
+  const fetchData = useCallback(async () => {
+    await Promise.all([fetchMembros(), fetchAux()]);
+  }, [fetchMembros, fetchAux]);
+
+
+  useEffect(() => { fetchAux(); }, [fetchAux]);
+
+
+  useEffect(() => {
+    const id = new URLSearchParams(window.location.search).get('membro');
+    if (id) openDetail(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+
+  const primeiraBusca = useRef(true);
+  useEffect(() => {
+    if (primeiraBusca.current) {
+      primeiraBusca.current = false;
+      fetchMembros();
+      return;
+    }
+    const t = setTimeout(() => { fetchMembros(); }, 300);
+    return () => clearTimeout(t);
+  }, [fetchMembros]);
+
+  const loadVolStatus = async (membroId) => {
+    setLoadingVolStatus(true);
+    try {
+      const data = await voluntariado.volByMembro(membroId);
+      setVolStatus(data);
+    } catch {
+      setVolStatus(null);
+    } finally {
+      setLoadingVolStatus(false);
+    }
+  };
+
+
+  const exportarLgpd = async (membro) => {
+    if (!membro?.id) return;
+    const motivo = window.prompt(
+      `Motivo da exportação LGPD de "${membro.nome}":\n\n` +
+      `(Ex: "Solicitação presencial · CPF verificado", "Pedido por telefone · dados confirmados")\n\n` +
+      `Esta ação fica auditada no sistema. Cancelar pra desistir.`
+    );
+    if (!motivo || !motivo.trim()) return;
+    try {
+      toast.info('Gerando relatório LGPD...');
+
+
+
+      const apiBase = resolveApiBaseUrl(import.meta.env.VITE_API_URL);
+      const url = `${apiBase}/lgpd/membro/${membro.id}/exportar?motivo=${encodeURIComponent(motivo.trim())}`;
+      const { data: { session } } = await supabase.auth.getSession();
+      const r = await fetch(url, {
+        headers: { Authorization: `Bearer ${session?.access_token || ''}` },
+      });
+      if (!r.ok) {
+        const err = await r.json().catch(() => ({}));
+        throw new Error(err.error || 'Erro ao gerar relatório');
+      }
+      const json = await r.json();
+      const blob = new Blob([JSON.stringify(json, null, 2)], { type: 'application/json' });
+      const dl = document.createElement('a');
+      dl.href = URL.createObjectURL(blob);
+      dl.download = `lgpd-${membro.nome.replace(/\s+/g, '-').toLowerCase()}-${new Date().toISOString().split('T')[0]}.json`;
+      dl.click();
+      URL.revokeObjectURL(dl.href);
+      toast.success('Relatório LGPD gerado e baixado. Auditado.');
+    } catch (e) {
+      toast.error(`Erro: ${e.message}`);
+    }
+  };
+
+  const indicarParaServir = async () => {
+    if (!selectedMembro || indicandoServir) return;
+    setIndicandoServir(true);
+    try {
+      await voluntariado.queroServir(selectedMembro.id);
+      toast.success(`${selectedMembro.nome} foi adicionado(a) à fila de alocação`);
+      await loadVolStatus(selectedMembro.id);
+    } catch (e) {
+      toast.error(e.message || 'Erro ao indicar para servir');
+    } finally {
+      setIndicandoServir(false);
+    }
+  };
+
+  const openDetail = async (mOrId) => {
+
+
+
+    const id = typeof mOrId === 'string' ? mOrId : mOrId?.id;
+
+
+    setActiveTab('info');
+    setNovoHist('');
+    setShowFamiliaEdit(false);
+    setShowVolForm(false);
+    setShowCheckinForm(false);
+    setShowContribForm(false);
+    setVolStatus(null);
+    setDevocionalHist(null);
+    setDevocionalErro(null);
+    setInscHist(null);
+    setWifiHist(null);
+    setTimeline(null);
+    setFaceHist(null);
+
+    if (typeof mOrId === 'object' && mOrId) {
+      setSelectedMembro({ ...mOrId, _optimistic: true });
+    }
+
+    try {
+      const data = await membresia.membros.get(id);
+      setSelectedMembro(data);
+      loadVolStatus(id);
+    } catch (e) {
+      setError(e.message);
+    }
+  };
+
+  const reloadDetail = async () => {
+    if (!selectedMembro?.id) return;
+    try {
+      const data = await membresia.membros.get(selectedMembro.id);
+      setSelectedMembro(data);
+    } catch (e) {
+      setError(e.message);
+    }
+  };
+
+
+
+
+  const [desativarAberto, setDesativarAberto] = useState(false);
+  const [desativarMotivo, setDesativarMotivo] = useState('');
+  const [desativando, setDesativando] = useState(false);
+
+  const confirmarDesativacao = async () => {
+    if (!selectedMembro?.id || desativando) return;
+    setDesativando(true);
+    try {
+      const r = await membresia.membros.desativar(selectedMembro.id, desativarMotivo);
+      setDesativarAberto(false);
+      setDesativarMotivo('');
+
+
+      if (r?.aviso) setError(r.aviso);
+      await reloadDetail();
+      await fetchMembros();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setDesativando(false);
+    }
+  };
+
+  const reativarMembro = async () => {
+    if (!selectedMembro?.id || desativando) return;
+    setDesativando(true);
+    try {
+      await membresia.membros.reativar(selectedMembro.id);
+      await reloadDetail();
+      await fetchMembros();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setDesativando(false);
+    }
+  };
+
+  const toggleEtapa = async (etapaKey) => {
+    if (!isDiretor || !selectedMembro) return;
+    const registro = selectedMembro.trilha?.find(t => t.etapa === etapaKey);
+    setTogglingEtapa(etapaKey);
+    try {
+      if (registro) {
+        const novaConclusao = !registro.concluida;
+        await membresia.trilha.update(registro.id, {
+          concluida: novaConclusao,
+          data_conclusao: novaConclusao ? new Date().toISOString().slice(0, 10) : null,
+        });
+      } else {
+        await membresia.trilha.create({
+          membro_id: selectedMembro.id,
+          etapa: etapaKey,
+          concluida: true,
+          data_conclusao: new Date().toISOString().slice(0, 10),
+        });
+      }
+      await reloadDetail();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setTogglingEtapa(null);
+    }
+  };
+
+  const adicionarAGrupo = async () => {
+    if (!grupoSelecionado || !selectedMembro) return;
+    setSalvandoGrupo(true);
+    try {
+      await membresia.grupos.adicionarMembro(grupoSelecionado, { membro_id: selectedMembro.id });
+      setGrupoSelecionado('');
+      await reloadDetail();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setSalvandoGrupo(false);
+    }
+  };
+
+  const sairDoGrupo = async () => {
+    if (!selectedMembro?.grupo_atual?.id) return;
+    if (!confirm('Remover este membro do grupo atual?')) return;
+    setSalvandoGrupo(true);
+    try {
+      await membresia.grupos.sairMembro(selectedMembro.grupo_atual.id, {});
+      await reloadDetail();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setSalvandoGrupo(false);
+    }
+  };
+
+  const adicionarContribuicao = async () => {
+    if (!selectedMembro) return;
+    const valor = Number(contribForm.valor);
+    if (!valor || valor <= 0) return;
+    setSalvandoContrib(true);
+    try {
+      const payload = {
+        membro_id: selectedMembro.id,
+        tipo: contribForm.tipo,
+        valor,
+        data: contribForm.data,
+      };
+      if (contribForm.forma_pagamento) payload.forma_pagamento = contribForm.forma_pagamento;
+      if (contribForm.campanha) payload.campanha = contribForm.campanha;
+      if (contribForm.observacoes) payload.observacoes = contribForm.observacoes;
+      await membresia.contribuicoes.create(payload);
+      setContribForm({ tipo: 'dizimo', valor: '', data: new Date().toISOString().slice(0, 10), forma_pagamento: '', campanha: '', observacoes: '' });
+      setShowContribForm(false);
+      await reloadDetail();
+      fetchData();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setSalvandoContrib(false);
+    }
+  };
+
+  const removerContribuicao = async (id) => {
+    if (!confirm('Remover esta contribuição?')) return;
+    try {
+      await membresia.contribuicoes.remove(id);
+      await reloadDetail();
+      fetchData();
+    } catch (e) {
+      setError(e.message);
+    }
+  };
+
+  const adicionarVoluntario = async () => {
+    if (!selectedMembro || !volForm.ministerio_id) return;
+    setSalvandoVol(true);
+    try {
+      const payload = {
+        membro_id: selectedMembro.id,
+        ministerio_id: volForm.ministerio_id,
+      };
+      if (volForm.papel) payload.papel = volForm.papel;
+      await membresia.voluntarios.create(payload);
+      setVolForm({ ministerio_id: '', papel: '' });
+      setShowVolForm(false);
+      await reloadDetail();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setSalvandoVol(false);
+    }
+  };
+
+  const sairVoluntario = async (voluntarioId) => {
+    const motivo = prompt('Motivo da saída (opcional):') ?? null;
+    if (motivo === null && !confirm('Registrar saída do ministério?')) return;
+    try {
+      await membresia.voluntarios.sair(voluntarioId, motivo);
+      await reloadDetail();
+    } catch (e) {
+      setError(e.message);
+    }
+  };
+
+  const registrarCheckin = async () => {
+    if (!selectedMembro) return;
+    setSalvandoCheckin(true);
+    try {
+      const payload = {
+        membro_id: selectedMembro.id,
+        data: checkinForm.data,
+      };
+      if (checkinForm.ministerio_id) payload.ministerio_id = checkinForm.ministerio_id;
+      if (checkinForm.culto) payload.culto = checkinForm.culto;
+      await membresia.checkins.create(payload);
+      setCheckinForm({ ministerio_id: '', data: new Date().toISOString().slice(0, 10), culto: '' });
+      setShowCheckinForm(false);
+      await reloadDetail();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setSalvandoCheckin(false);
+    }
+  };
+
+  const removerCheckin = async (id) => {
+    if (!confirm('Remover este check-in?')) return;
+    try {
+      await membresia.checkins.remove(id);
+      await reloadDetail();
+    } catch (e) {
+      setError(e.message);
+    }
+  };
+
+  const abrirEdicaoFamilia = () => {
+    setFamiliaLinkForm({
+      familia_id: selectedMembro?.familia_id || '',
+      familia_nome_novo: '',
+      parentesco: selectedMembro?.parentesco || '',
+    });
+    setShowFamiliaEdit(true);
+  };
+
+  const salvarVinculoFamilia = async () => {
+    if (!selectedMembro) return;
+    setSalvandoFamilia(true);
+    try {
+      let familia_id = familiaLinkForm.familia_id;
+      const novoNome = familiaLinkForm.familia_nome_novo?.trim();
+      if (!familia_id && novoNome) {
+        const nova = await membresia.familias.create({ nome: novoNome });
+        familia_id = nova.id;
+      }
+      await membresia.familias.vincular(selectedMembro.id, {
+        familia_id: familia_id || null,
+        parentesco: familia_id ? (familiaLinkForm.parentesco || null) : null,
+      });
+      setShowFamiliaEdit(false);
+      setFamiliaLinkForm({ familia_id: '', familia_nome_novo: '', parentesco: '' });
+      await reloadDetail();
+      fetchData();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setSalvandoFamilia(false);
+    }
+  };
+
+  const desvincularFamilia = async () => {
+    if (!selectedMembro || !confirm('Desvincular da família?')) return;
+    try {
+      await membresia.familias.vincular(selectedMembro.id, { familia_id: null, parentesco: null });
+      await reloadDetail();
+      fetchData();
+    } catch (e) {
+      setError(e.message);
+    }
+  };
+
+  const adicionarHistorico = async () => {
+    if (!novoHist.trim() || !selectedMembro) return;
+    setSalvandoHist(true);
+    try {
+      await membresia.historico.create({
+        membro_id: selectedMembro.id,
+        descricao: novoHist.trim(),
+        data: new Date().toISOString().slice(0, 10),
+      });
+      setNovoHist('');
+      await reloadDetail();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setSalvandoHist(false);
+    }
+  };
+
+  const openEdit = (membro) => {
+    setEditMembro(membro);
+    setSelectedMembro(null);
+    setShowForm(true);
+  };
+
+  const openCreate = () => {
+    setEditMembro(null);
+    setShowForm(true);
+  };
+
+  const handleSaved = () => {
+    setEditMembro(null);
+    fetchData();
+  };
+
+  return (
+    <div style={{ maxWidth: 1600, margin: '0 auto', padding: '0 24px' }}>
+      {            }
+      <ModuleHeader
+        icon={Users}
+        title="Membresia"
+        subtitle="Membros, famílias, generosidade e trilha dos valores"
+        accent={C.primary}
+        actions={<>
+          <Button variant="outline" onClick={() => navigate('/ministerial/membresia/scan')}>
+            <ScanLine style={{ width: 16, height: 16 }} /> Escanear QR
+          </Button>
+          <Button variant="outline" onClick={() => setShowShareLink(true)}>
+            <QrCode style={{ width: 16, height: 16 }} /> Link de cadastro
+          </Button>
+          {isDiretor && (
+            <Button onClick={openCreate}>
+              <UserPlus style={{ width: 16, height: 16 }} /> Novo Membro
+            </Button>
+          )}
+        </>}
+      />
+
+      {error && (
+        <div style={{ background: C.redBg, border: `1px solid ${C.red}30`, color: C.red, borderRadius: 10, padding: '10px 14px', fontSize: 13, marginBottom: 16, display: 'flex', justifyContent: 'space-between' }}>
+          {error}
+          <X style={{ width: 16, height: 16, cursor: 'pointer' }} onClick={() => setError('')} />
+        </div>
+      )}
+
+      {                                              }
+      <Tabs value={pageTab} onValueChange={setPageTab}>
+        <TabsList className="inline-flex flex-wrap h-auto w-auto bg-transparent p-0 gap-1 border-b border-border rounded-none mb-5" data-tour="membresia-tabs">
+          {[
+            { key: 'membros', label: 'Membros', icon: Users },
+            { key: 'perfil', label: 'Perfil', icon: PieChart },
+            { key: 'jornada', label: 'Jornada (5 valores)', icon: TrendingUp },
+            { key: 'duplicados', label: 'Duplicados', icon: GitMerge },
+            { key: 'cadastros', label: 'Cadastros pendentes', icon: Inbox },
+          ].map(t => {
+            const Icon = t.icon;
+            return (
+              <TabsTrigger
+                key={t.key}
+                value={t.key}
+                className="relative rounded-none border-b-2 border-transparent px-4 py-2.5 text-[13px] font-medium text-muted-foreground transition-colors hover:text-foreground data-[state=active]:border-b-primary data-[state=active]:text-primary data-[state=active]:bg-transparent data-[state=active]:shadow-none bg-transparent"
+              >
+                <Icon className="size-3.5 mr-1.5 hidden sm:inline-block" />
+                {t.label}
+              </TabsTrigger>
+            );
+          })}
+        </TabsList>
+
+        <TabsContent value="membros">
+
+      {                                               }
+      <div className="grid grid-cols-2 md:grid-cols-5 gap-4 mb-7">
+        <StatisticsCard title="Total de pessoas" value={kpis.total} icon={Users} iconColor="#00B39D"
+          onClick={() => filtrarPorCard(null)} />
+        <StatisticsCard title="Membros ativos" value={kpis.byStatus?.membro_ativo || 0} icon={Users} iconColor="#10b981"
+          onClick={() => filtrarPorCard({ status: 'membro_ativo' })} />
+        <StatisticsCard title="CPF pendente" value={kpis.membros_sem_cpf || 0} icon={CreditCard} iconColor="#f59e0b"
+          onClick={() => filtrarPorCard({ status: 'membro_ativo', sem_cpf: true })} />
+        <StatisticsCard title="Famílias" value={kpis.familias} icon={Home} iconColor="#f59e0b"
+          onClick={() => filtrarPorCard({ papel: 'com_familia' })} />
+        <StatisticsCard title="Contribuintes ativos" value={kpis.contribuintes_ativos || 0} icon={HandCoins} iconColor="#22c55e"
+          onClick={() => filtrarPorCard({ papel: 'contribuinte' })} />
+      </div>
+
+      {                                                                          }
+      {filtroResumo.ativo && (
+        <div style={{ marginBottom: 28, padding: '16px 20px', borderRadius: 14, background: C.primaryBg, border: `1.5px solid ${C.primary}`, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
+          <div>
+            <div style={{ fontSize: 11, fontWeight: 700, color: C.primary, textTransform: 'uppercase', letterSpacing: 0.6 }}>Filtrando · {filtroResumo.titulo}</div>
+            <div style={{ fontSize: 32, fontWeight: 800, color: C.text, lineHeight: 1.1, marginTop: 2 }}>
+              {searching ? '…' : membros.length}
+              <span style={{ fontSize: 15, fontWeight: 600, color: C.text2, marginLeft: 8 }}>{membros.length === 1 ? 'pessoa' : 'pessoas'}</span>
+            </div>
+          </div>
+          <button
+            onClick={() => { setFilterStatus(''); setFilterPapel(''); setFilterFaixa(''); setFilterSemCpf(false); setBusca(''); }}
+            style={{ fontSize: 13, fontWeight: 600, color: C.primary, background: 'transparent', border: `1px solid ${C.primary}`, borderRadius: 999, padding: '7px 16px', cursor: 'pointer' }}
+          >
+            Limpar filtros
+          </button>
+        </div>
+      )}
+
+      {             }
+      <div data-membros-lista style={{ display: 'flex', gap: 12, marginBottom: 20, flexWrap: 'wrap', scrollMarginTop: 16 }}>
+        <div style={{ position: 'relative', flex: 1, minWidth: 200 }}>
+          <Search style={{ position: 'absolute', left: 12, top: '50%', transform: 'translateY(-50%)', width: 16, height: 16, color: C.text3, zIndex: 1 }} />
+          <Input
+            placeholder="Buscar por nome (ex: pessoa de exemplo)..."
+            value={busca}
+            onChange={e => setBusca(e.target.value)}
+            style={{ paddingLeft: 36, paddingRight: busca ? 60 : 12 }}
+          />
+          {busca && (
+            <div style={{ position: 'absolute', right: 10, top: '50%', transform: 'translateY(-50%)', display: 'flex', alignItems: 'center', gap: 6, zIndex: 1 }}>
+              {searching && <Loader2 className="animate-spin" style={{ width: 15, height: 15, color: C.text3 }} />}
+              <button
+                type="button"
+                onClick={() => setBusca('')}
+                aria-label="Limpar busca"
+                style={{ display: 'flex', background: 'none', border: 'none', cursor: 'pointer', color: C.text3, padding: 0 }}
+              >
+                <X style={{ width: 15, height: 15 }} />
+              </button>
+            </div>
+          )}
+        </div>
+        <div style={{ minWidth: 180 }}>
+          <Select value={filterStatus || '__all__'} onValueChange={v => setFilterStatus(v === '__all__' ? '' : v)}>
+            <SelectTrigger><SelectValue placeholder="Todos os status" /></SelectTrigger>
+            <SelectContent className="z-[1001]">
+              <SelectItem value="__all__">Todos os status</SelectItem>
+              {Object.entries(STATUS_MAP).map(([k, v]) => <SelectItem key={k} value={k}>{v.label}</SelectItem>)}
+            </SelectContent>
+          </Select>
+        </div>
+        <div style={{ minWidth: 180 }}>
+          <Select value={filterPapel || '__all__'} onValueChange={v => setFilterPapel(v === '__all__' ? '' : v)}>
+            <SelectTrigger><SelectValue placeholder="Todos os papéis" /></SelectTrigger>
+            <SelectContent className="z-[1001]">
+              <SelectItem value="__all__">Todos os papéis</SelectItem>
+              <SelectItem value="voluntario">Voluntários</SelectItem>
+              <SelectItem value="visitante">Visitantes</SelectItem>
+              <SelectItem value="grupo_ativo">Em grupo ativo</SelectItem>
+              <SelectItem value="contribuinte">Contribuintes (90d)</SelectItem>
+              <SelectItem value="com_familia">Com família</SelectItem>
+              <SelectItem value="inscrito_next">Inscritos no NEXT</SelectItem>
+              <SelectItem value="sem_papel">Sem papel ativo</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+        <div style={{ minWidth: 180 }}>
+          <Select value={filterFaixa || '__all__'} onValueChange={v => setFilterFaixa(v === '__all__' ? '' : v)}>
+            <SelectTrigger><SelectValue placeholder="Todas as idades" /></SelectTrigger>
+            <SelectContent className="z-[1001]">
+              <SelectItem value="__all__">Todas as idades</SelectItem>
+              <SelectItem value="crianca">Crianças (até 12)</SelectItem>
+              <SelectItem value="adolescente">Adolescentes (13–17)</SelectItem>
+              <SelectItem value="jovem">Jovens (18–25)</SelectItem>
+              <SelectItem value="adulto">Adultos (26+)</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+        {                                                              }
+        <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6, whiteSpace: 'nowrap' }}>
+          <CreditCard style={{ width: 15, height: 15, color: C.text2 }} />
+          {[
+            { v: '', label: 'Todos', cor: C.text2, titulo: 'Sem filtrar por CPF' },
+            { v: 'com', label: 'Com CPF', cor: C.green || '#10b981', titulo: 'Mostrar só quem já tem CPF cadastrado' },
+            { v: 'sem', label: 'Sem CPF', cor: C.amber, titulo: 'Mostrar só quem está sem CPF cadastrado' },
+          ].map(op => {
+            const ativo = filtroCpf === op.v;
+            return (
+              <button
+                key={op.v || 'todos'}
+                type="button"
+                onClick={() => setFiltroCpf(op.v)}
+                title={op.titulo}
+                style={{
+                  padding: '0 14px', height: 38, borderRadius: 8,
+                  fontSize: 13, fontWeight: 600, cursor: 'pointer',
+                  border: `1.5px solid ${ativo ? op.cor : 'var(--cbrio-border)'}`,
+                  background: ativo ? op.cor : 'transparent',
+                  color: ativo ? '#fff' : C.text2,
+                }}
+              >
+                {op.label}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      {           }
+      <div style={{ background: 'var(--cbrio-card)', borderRadius: 16, border: '1px solid var(--hairline)', boxShadow: 'var(--shadow)', overflow: 'auto' }}>
+        <table style={{ width: '100%', borderCollapse: 'separate', borderSpacing: 0 }}>
+          <thead>
+            <tr>
+              {['Nome', 'Família', 'Status', 'Jornada', 'Telefone', 'Ministério', ''].map((h, i) => (
+                <th key={i} style={{ textAlign: 'left', padding: '14px 18px', fontSize: 11, fontWeight: 600, color: C.text3, textTransform: 'uppercase', letterSpacing: 0.5, background: 'var(--cbrio-table-header)', borderBottom: `1px solid ${C.border}` }}>
+                  {h}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {loading ? (
+              <tr><td colSpan={7}><div className="flex items-center justify-center py-6 gap-2"><div className="h-4 w-4 animate-spin rounded-full border-2 border-muted-foreground/25 border-t-primary" /><span className="text-xs text-muted-foreground">Carregando...</span></div></td></tr>
+            ) : membros.length === 0 ? (
+              <tr><td colSpan={7}><div className="flex flex-col items-center py-10 gap-2"><div className="h-10 w-10 rounded-full bg-muted flex items-center justify-center mb-1"><svg className="h-5 w-5 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M20 13V6a2 2 0 00-2-2H6a2 2 0 00-2 2v7m16 0v5a2 2 0 01-2 2H6a2 2 0 01-2-2v-5m16 0h-2.586a1 1 0 00-.707.293l-2.414 2.414a1 1 0 01-.707.293h-3.172a1 1 0 01-.707-.293l-2.414-2.414A1 1 0 006.586 13H4" /></svg></div><span className="text-sm font-medium text-foreground">Nenhum membro encontrado</span></div></td></tr>
+            ) : membrosPag.map((m) => (
+              <tr key={m.id} className="cbrio-row" onClick={() => openDetail(m)}>
+                <td style={{ padding: '14px 18px', borderBottom: `1px solid ${C.border}` }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                    <div style={{ width: 36, height: 36, borderRadius: '50%', background: C.primaryBg, display: 'flex', alignItems: 'center', justifyContent: 'center', color: C.primary, fontWeight: 700, fontSize: 13, flexShrink: 0, overflow: 'hidden' }}>
+                      {m.foto_url ? (
+                        <img data-foto-avatar="" src={m.foto_url} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                      ) : (
+                        m.nome?.split(' ').map(n => n[0]).slice(0, 2).join('').toUpperCase()
+                      )}
+                    </div>
+                    <div>
+                      <div style={{ fontSize: 14, fontWeight: 500, color: C.text }}>{m.nome}</div>
+                      {m.email && <div style={{ fontSize: 12, color: C.text3 }}>{m.email}</div>}
+                    </div>
+                  </div>
+                </td>
+                <td style={{ padding: '14px 18px', borderBottom: `1px solid ${C.border}` }}>
+                  {m.familia ? (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                      <Home style={{ width: 14, height: 14, color: C.text3 }} />
+                      <span style={{ fontSize: 13, color: C.text2 }}>{m.familia.nome}</span>
+                    </div>
+                  ) : (
+                    <span style={{ fontSize: 13, color: C.text3 }}>—</span>
+                  )}
+                </td>
+                <td style={{ padding: '14px 18px', borderBottom: `1px solid ${C.border}` }}>
+                  <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+                    <Badge status={m.status} />
+                    {!m.cpf && <span title="CPF não cadastrado" style={{ display: 'inline-flex', alignItems: 'center', gap: 3, fontSize: 9, padding: '2px 6px', borderRadius: 4, background: '#fef3c7', color: '#92400e', fontWeight: 700 }}><AlertCircle style={{ width: 10, height: 10 }} />SEM CPF</span>}
+                  </div>
+                </td>
+                <td style={{ padding: '14px 18px', borderBottom: `1px solid ${C.border}` }}>
+                  {
+
+
+
+
+
+
+
+
+                                                                            }
+                  <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', maxWidth: 220 }}>
+                    <MarcadoresJornada marcadores={m.marcadores} />
+                    {m.papeis?.is_visitante && <span title="Tem visita registrada" style={{ fontSize: 9, padding: '2px 6px', borderRadius: 4, background: '#fef3c7', color: '#92400e', fontWeight: 700 }}>VIS</span>}
+                  </div>
+                </td>
+                <td style={{ padding: '14px 18px', fontSize: 13, color: C.text2, borderBottom: `1px solid ${C.border}` }}>
+                  {m.telefone || '—'}
+                </td>
+                <td style={{ padding: '14px 18px', fontSize: 13, color: C.text2, borderBottom: `1px solid ${C.border}` }}>
+                  {m.ministerio || '—'}
+                </td>
+                <td style={{ padding: '14px 18px', borderBottom: `1px solid ${C.border}` }}>
+                  <ChevronRight style={{ width: 16, height: 16, color: C.text3 }} />
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <Paginacao {...membrosPagProps} itemLabel="membros" />
+        </TabsContent>
+
+        <TabsContent value="perfil">
+          <Suspense fallback={(
+            <div className="h-64 grid place-items-center text-muted-foreground">
+              <Loader2 className="size-6 animate-spin" />
+            </div>
+          )}>
+            <AbaPerfil />
+          </Suspense>
+        </TabsContent>
+
+        <TabsContent value="jornada">
+          <MembersJornadaPanel />
+        </TabsContent>
+
+        <TabsContent value="duplicados">
+          <div className="rounded-xl border border-dashed bg-muted/20 p-8 text-center max-w-lg mx-auto">
+            <GitMerge className="size-8 mx-auto text-muted-foreground/60 mb-3" />
+            <p className="text-sm font-medium text-foreground">A revisão de duplicados agora vive em Entradas</p>
+            <p className="text-xs text-muted-foreground mt-1 mb-4">
+              Unificamos a resolução de identidade na porta de entrada da igreja. Lá você revisa as
+              duplicatas do funil e da base inteira, e abre a ficha de cada pessoa.
+            </p>
+            <button
+              type="button"
+              onClick={() => navigate('/entradas')}
+              className="inline-flex items-center gap-1.5 rounded-lg bg-primary px-3 py-2 text-sm font-medium text-primary-foreground hover:opacity-90 transition"
+            >
+              <GitMerge className="size-4" /> Abrir Entradas
+            </button>
+          </div>
+        </TabsContent>
+
+        <TabsContent value="cadastros">
+          <TabCadastros onMembrosChange={fetchData} />
+        </TabsContent>
+      </Tabs>
+
+      {                         }
+      {selectedMembro && (
+        <div style={{ position: 'fixed', inset: 0, background: 'var(--cbrio-overlay)', zIndex: 50, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20 }} onClick={() => setSelectedMembro(null)}>
+          <div style={{ background: 'var(--panel)', WebkitBackdropFilter: 'blur(18px) saturate(140%)', backdropFilter: 'blur(18px) saturate(140%)', borderRadius: 16, width: '100%', maxWidth: 700, maxHeight: '90vh', overflow: 'auto', border: '1px solid var(--hairline)', boxShadow: 'var(--shadow-hover), var(--hi)' }} onClick={e => e.stopPropagation()}>
+            {            }
+            <div style={{ padding: '28px 32px 20px', borderBottom: `1px solid ${C.border}`, display: 'flex', justifyContent: 'space-between', alignItems: 'start' }}>
+              <div style={{ display: 'flex', gap: 16, alignItems: 'center' }}>
+                <div style={{ width: 56, height: 56, borderRadius: '50%', background: C.primaryBg, display: 'flex', alignItems: 'center', justifyContent: 'center', color: C.primary, fontWeight: 700, fontSize: 20, overflow: 'hidden' }}>
+                  {selectedMembro.foto_url ? (
+                    <img data-foto-avatar="" src={selectedMembro.foto_url} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                  ) : (
+                    selectedMembro.nome?.split(' ').map(n => n[0]).slice(0, 2).join('').toUpperCase()
+                  )}
+                </div>
+                <div>
+                  <h2 style={{ fontSize: 22, fontWeight: 700, color: C.text, margin: 0 }}>{selectedMembro.nome}</h2>
+                  <div style={{ display: 'flex', gap: 6, marginTop: 4, flexWrap: 'wrap', alignItems: 'center' }}>
+                    <Badge status={selectedMembro.status} />
+                    {!selectedMembro.cpf && <span title="CPF não cadastrado" style={{ display: 'inline-flex', alignItems: 'center', gap: 3, fontSize: 10, padding: '2px 8px', borderRadius: 5, background: '#fef3c7', color: '#92400e', fontWeight: 700 }}><AlertCircle style={{ width: 11, height: 11 }} />CPF pendente</span>}
+                    {(() => {
+                      const dn = selectedMembro.data_nascimento;
+                      if (!dn) return null;
+                      const n = new Date(dn); if (isNaN(n.getTime())) return null;
+                      const h = new Date(); let i = h.getFullYear() - n.getFullYear();
+                      const mo = h.getMonth() - n.getMonth(); if (mo < 0 || (mo === 0 && h.getDate() < n.getDate())) i--;
+                      const fa = i < 13 ? ['Criança', '#fce7f3', '#831843'] : i <= 17 ? ['Adolescente', '#fef3c7', '#92400e'] : i <= 25 ? ['Jovem', '#e0f2fe', '#075985'] : ['Adulto', '#f1f5f9', '#334155'];
+                      return <span title={`${i} anos`} style={{ fontSize: 9, padding: '2px 6px', borderRadius: 4, background: fa[1], color: fa[2], fontWeight: 700 }}>{fa[0].toUpperCase()}</span>;
+                    })()}
+                    {selectedMembro.frequenta_area && <span title="Ministério que declarou frequentar (cadastro do app)" style={{ fontSize: 9, padding: '2px 6px', borderRadius: 4, background: '#cffafe', color: '#155e75', fontWeight: 700 }}>{String(selectedMembro.frequenta_area).toUpperCase()}</span>}
+                    {selectedMembro.papeis?.is_visitante && <span title="Tem visita registrada" style={{ fontSize: 9, padding: '2px 6px', borderRadius: 4, background: '#fef3c7', color: '#92400e', fontWeight: 700 }}>VIS</span>}
+                    {
+
+
+                                                      }
+                    <MarcadoresJornada marcadores={selectedMembro.marcadores} mostrarVazio={false} />
+                  </div>
+                </div>
+              </div>
+              <div style={{ display: 'flex', gap: 4 }}>
+                {isDiretor && (
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    onClick={() => exportarLgpd(selectedMembro)}
+                    title="Exportar dados (LGPD) · gerar relatório completo"
+                  >
+                    <ShieldCheck style={{ width: 16, height: 16 }} />
+                  </Button>
+                )}
+                {isDiretor && selectedMembro.status !== 'inativo' && (
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    onClick={() => { setDesativarMotivo(''); setDesativarAberto(true); }}
+                    title="Desativar membro · sai das contagens, continua na base"
+                  >
+                    <UserMinus style={{ width: 16, height: 16 }} />
+                  </Button>
+                )}
+                {isDiretor && (
+                  <Button variant="ghost" size="icon" onClick={() => openEdit(selectedMembro)} title="Editar">
+                    <Pencil style={{ width: 16, height: 16 }} />
+                  </Button>
+                )}
+                <Button variant="ghost" size="icon" onClick={() => setSelectedMembro(null)}>
+                  <X style={{ width: 20, height: 20 }} />
+                </Button>
+              </div>
+            </div>
+
+            <div style={{ padding: '20px 32px 28px' }}>
+              {selectedMembro.status === 'inativo' && (
+                <div style={{ marginBottom: 16, padding: 12, borderRadius: 12, border: '1px solid rgba(239,68,68,0.35)', background: 'rgba(239,68,68,0.07)' }}>
+                  <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
+                    <div style={{ minWidth: 220, flex: 1 }}>
+                      <div style={{ fontSize: 13, fontWeight: 700, color: C.text }}>Membro desativado</div>
+                      <div style={{ fontSize: 11.5, color: C.text2, marginTop: 4, lineHeight: 1.5 }}>
+                        {selectedMembro.inativado_em
+                          ? `Desde ${new Date(selectedMembro.inativado_em).toLocaleDateString('pt-BR')}`
+                          : 'Sem data registrada'}
+                        {selectedMembro.inativado_status_anterior
+                          ? ` · era ${STATUS_MAP[selectedMembro.inativado_status_anterior]?.label || selectedMembro.inativado_status_anterior}`
+                          : ''}
+                      </div>
+                      {
+                                                                                }
+                      <div style={{ fontSize: 12, color: C.text, marginTop: 6 }}>
+                        <span style={{ color: C.text3 }}>Motivo: </span>
+                        {selectedMembro.inativado_motivo || <span style={{ color: C.text3, fontStyle: 'italic' }}>não informado</span>}
+                      </div>
+                      <div style={{ fontSize: 10.5, color: C.text3, marginTop: 6 }}>
+                        Continua na base e no histórico — sai das contagens, do censo e dos disparos.
+                      </div>
+                    </div>
+                    {isDiretor && (
+                      <Button variant="outline" size="sm" onClick={reativarMembro} disabled={desativando}>
+                        {desativando ? 'Reativando…' : 'Reativar'}
+                      </Button>
+                    )}
+                  </div>
+                </div>
+              )}
+              {possiveisDupErro && (
+                <div style={{ marginBottom: 16, padding: 12, borderRadius: 12, border: '1px dashed #F09595', background: '#FCEBEB' }}>
+                  <div style={{ fontSize: 13, fontWeight: 600, color: '#501313', marginBottom: 4 }}>Não foi possível consultar duplicados</div>
+                  <div style={{ fontSize: 11, color: '#791F1F' }}>Podem existir duplicados desta pessoa — a lista falhou ao carregar. Não é a mesma coisa que "sem duplicados".</div>
+                </div>
+              )}
+              {possiveisDup.length > 0 && (
+                <div style={{ marginBottom: 16, padding: 12, borderRadius: 12, border: '1px solid rgba(245,158,11,0.4)', background: 'rgba(245,158,11,0.08)' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+                    <span style={{ fontSize: 14 }}>⚠️</span>
+                    <span style={{ fontSize: 13, fontWeight: 700, color: C.text }}>{possiveisDup.length} possível(is) duplicado(s) desta pessoa</span>
+                  </div>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                    {possiveisDup.map(d => (
+                      <div key={d.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 10px', background: 'var(--cbrio-card)', borderRadius: 8 }}>
+                        <button type="button" onClick={() => openDetail(d.id)} style={{ flex: 1, minWidth: 0, textAlign: 'left', background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}>
+                          <div style={{ fontSize: 13, fontWeight: 600, color: C.text }}>{d.nome}</div>
+                          <div style={{ fontSize: 11, color: C.text3 }}>{(d.motivos || []).join(' · ')}{d.familia?.nome ? ` · ${d.familia.nome}` : ''}</div>
+                        </button>
+                        {isDiretor && (
+                          <Button variant="outline" size="sm" onClick={() => fundirDuplicado(d)} disabled={fundindo}>Fundir nesta</Button>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+              <Tabs value={activeTab} onValueChange={setActiveTab}>
+                {                                                                     }
+                <TabsList className="flex h-auto w-full flex-wrap justify-start bg-transparent p-0 gap-1 border-b border-border rounded-none mb-4">
+                  {[
+                    { key: 'info', label: 'Informações', icon: Users },
+                    { key: 'timeline', label: 'Linha do tempo', icon: Clock },
+                    { key: 'inscricoes', label: 'Inscrições', icon: ClipboardList },
+                    { key: 'familia', label: 'Família', icon: Home },
+                    { key: 'grupo', label: 'Grupo', icon: Users },
+                    { key: 'generosidade', label: 'Generosidade', icon: HandCoins },
+                    { key: 'servico', label: 'Serviço', icon: Sparkles },
+                    { key: 'next', label: 'NEXT', icon: ArrowRightLeft },
+                    { key: 'devocional', label: 'Devocional', icon: BookOpen },
+                    { key: 'wifi', label: 'Wifi', icon: Activity },
+                    { key: 'reconhecimento', label: 'Reconhecimento', icon: Activity },
+                    { key: 'trilha', label: 'Trilha', icon: Star },
+                    { key: 'historico', label: 'Histórico', icon: Calendar },
+                  ].map(t => {
+                    const Icon = t.icon;
+                    return (
+                      <TabsTrigger
+                        key={t.key}
+                        value={t.key}
+                        className="relative grow-0 rounded-none border-b-2 border-transparent px-3 py-2.5 text-[13px] font-medium text-muted-foreground transition-colors hover:text-foreground data-[state=active]:border-b-primary data-[state=active]:text-primary data-[state=active]:bg-transparent data-[state=active]:shadow-none bg-transparent"
+                      >
+                        <Icon className="size-3.5 mr-1.5 hidden sm:inline-block" />
+                        {t.label}
+                      </TabsTrigger>
+                    );
+                  })}
+                </TabsList>
+
+                {                      }
+                <TabsContent value="info" className="mt-4">
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+                    {[
+                      { icon: Mail, label: 'Email', value: selectedMembro.email },
+                      { icon: Phone, label: 'Telefone', value: selectedMembro.telefone },
+                      { icon: MapPin, label: 'Endereço', value: [selectedMembro.endereco, selectedMembro.bairro, selectedMembro.cidade].filter(Boolean).join(', ') },
+                      { icon: Calendar, label: 'Nascimento', value: selectedMembro.data_nascimento ? new Date(selectedMembro.data_nascimento).toLocaleDateString('pt-BR') : null },
+                      { icon: Heart, label: 'Estado Civil', value: ESTADO_CIVIL_OPTIONS.find(e => e.value === selectedMembro.estado_civil)?.label || selectedMembro.estado_civil },
+                      { icon: Home, label: 'Família', value: selectedMembro.familia?.nome },
+                      { icon: Users, label: 'Ministério', value: selectedMembro.ministerio },
+
+
+
+
+
+
+
+                      { icon: Star, label: 'Grupo', value: selectedMembro.grupo_atual?.grupo?.nome || selectedMembro.grupo },
+                    ].map((item, i) => (
+                      <div key={i} style={{ display: 'flex', gap: 10, alignItems: 'start' }}>
+                        <item.icon style={{ width: 16, height: 16, color: C.text3, marginTop: 2, flexShrink: 0 }} />
+                        <div>
+                          <div style={{ fontSize: 11, color: C.text3, textTransform: 'uppercase', letterSpacing: 0.5 }}>{item.label}</div>
+                          <div style={{ fontSize: 14, color: item.value ? C.text : C.text3, marginTop: 2 }}>{item.value || '—'}</div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                  {selectedMembro.observacoes && (
+                    <div style={{ marginTop: 24, padding: '12px 14px', background: 'var(--cbrio-input-bg)', borderRadius: 10 }}>
+                      <div style={{ fontSize: 11, color: C.text3, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 4 }}>Observações</div>
+                      <div style={{ fontSize: 13, color: C.text, whiteSpace: 'pre-wrap' }}>{selectedMembro.observacoes}</div>
+                    </div>
+                  )}
+                </TabsContent>
+
+                {                  }
+                <TabsContent value="familia" className="mt-4">
+                  {                                           }
+                  {selectedMembro.familia?.nome ? (
+                    <div style={{ padding: 14, borderRadius: 12, background: C.primaryBg, border: `1px solid ${C.primary}30`, marginBottom: 16, display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12 }}>
+                      <div style={{ flex: 1, minWidth: 0, display: 'flex', alignItems: 'center', gap: 10 }}>
+                        <Home style={{ width: 18, height: 18, color: C.primary, flexShrink: 0 }} />
+                        <div style={{ minWidth: 0 }}>
+                          <div style={{ fontSize: 11, color: C.primary, textTransform: 'uppercase', letterSpacing: 0.5, fontWeight: 700 }}>Família</div>
+                          <div style={{ fontSize: 15, fontWeight: 600, color: C.text, marginTop: 2 }}>{selectedMembro.familia.nome}</div>
+                          {selectedMembro.parentesco && (
+                            <div style={{ marginTop: 4 }}>
+                              <span style={{ fontSize: 11, padding: '2px 8px', borderRadius: 10, color: PARENTESCO_OPTIONS[selectedMembro.parentesco]?.cor || C.text3, background: PARENTESCO_OPTIONS[selectedMembro.parentesco]?.bg || '#73737318', fontWeight: 600 }}>
+                                {PARENTESCO_OPTIONS[selectedMembro.parentesco]?.label || selectedMembro.parentesco}
+                              </span>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                      {isDiretor && !showFamiliaEdit && (
+                        <div style={{ display: 'flex', gap: 4, flexShrink: 0 }}>
+                          <Button variant="ghost" size="icon" onClick={abrirEdicaoFamilia} title="Editar vínculo">
+                            <Pencil style={{ width: 14, height: 14 }} />
+                          </Button>
+                          <Button variant="ghost" size="icon" onClick={desvincularFamilia} title="Desvincular">
+                            <X style={{ width: 16, height: 16, color: C.red }} />
+                          </Button>
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    <div style={{ padding: 14, borderRadius: 12, background: 'var(--cbrio-input-bg)', marginBottom: 16, display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 10, color: C.text3, fontSize: 13 }}>
+                        <Home style={{ width: 16, height: 16 }} />
+                        Nenhuma família vinculada
+                      </div>
+                      {isDiretor && !showFamiliaEdit && (
+                        <Button variant="outline" size="sm" onClick={abrirEdicaoFamilia}>
+                          <Plus style={{ width: 14, height: 14 }} /> Vincular
+                        </Button>
+                      )}
+                    </div>
+                  )}
+
+                  {                                  }
+                  {isDiretor && showFamiliaEdit && (
+                    <div style={{ padding: 14, background: 'var(--cbrio-input-bg)', borderRadius: 12, marginBottom: 16, display: 'flex', flexDirection: 'column', gap: 10 }}>
+                      <div>
+                        <Label style={{ fontSize: 11 }}>Família</Label>
+                        <FamiliaAutocomplete
+                          familias={familias}
+                          value={familiaLinkForm.familia_id}
+                          onChange={({ familia_id, familia_nome_novo }) => setFamiliaLinkForm(prev => ({
+                            ...prev,
+                            familia_id,
+                            familia_nome_novo,
+                            parentesco: (familia_id || familia_nome_novo) ? prev.parentesco : '',
+                          }))}
+                        />
+                        {familiaLinkForm.familia_nome_novo && (
+                          <div style={{ fontSize: 11, color: C.primary, marginTop: 4, display: 'flex', alignItems: 'center', gap: 4 }}>
+                            <Plus style={{ width: 12, height: 12 }} /> Nova família: <strong>{familiaLinkForm.familia_nome_novo}</strong>
+                          </div>
+                        )}
+                      </div>
+                      <div>
+                        <Label style={{ fontSize: 11 }}>Parentesco</Label>
+                        <Select
+                          value={familiaLinkForm.parentesco || '__none__'}
+                          onValueChange={v => setFamiliaLinkForm(f => ({ ...f, parentesco: v === '__none__' ? '' : v }))}
+                          disabled={!familiaLinkForm.familia_id && !familiaLinkForm.familia_nome_novo}
+                        >
+                          <SelectTrigger><SelectValue placeholder="Selecionar" /></SelectTrigger>
+                          <SelectContent className="z-[1001]">
+                            <SelectItem value="__none__">Não informado</SelectItem>
+                            {Object.entries(PARENTESCO_OPTIONS).map(([k, v]) => (
+                              <SelectItem key={k} value={k}>{v.label}</SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      </div>
+                      <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 4 }}>
+                        <Button variant="outline" onClick={() => setShowFamiliaEdit(false)}>Cancelar</Button>
+                        <Button onClick={salvarVinculoFamilia} disabled={salvandoFamilia || (!familiaLinkForm.familia_id && !familiaLinkForm.familia_nome_novo?.trim())}>
+                          {salvandoFamilia ? 'Salvando...' : 'Salvar'}
+                        </Button>
+                      </div>
+                    </div>
+                  )}
+
+                  {                         }
+                  {selectedMembro.familia?.nome && (
+                    <h3 style={{ fontSize: 13, fontWeight: 600, color: C.text2, marginBottom: 10, textTransform: 'uppercase', letterSpacing: 0.5 }}>
+                      Familiares ({selectedMembro.familiares?.length || 0})
+                    </h3>
+                  )}
+                  {selectedMembro.familiares?.length > 0 ? (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                      {selectedMembro.familiares.map(f => {
+                        const pOpt = PARENTESCO_OPTIONS[f.parentesco];
+                        return (
+                          <div
+                            key={f.id}
+                            style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '2px 4px 2px 0', background: 'var(--cbrio-input-bg)', borderRadius: 10, transition: 'background 0.15s' }}
+                            onMouseEnter={e => e.currentTarget.style.background = C.primaryBg}
+                            onMouseLeave={e => e.currentTarget.style.background = 'var(--cbrio-input-bg)'}
+                          >
+                            <button
+                              type="button"
+                              onClick={() => openDetail(f.id)}
+                              style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '10px 4px 10px 14px', background: 'none', border: 'none', cursor: 'pointer', textAlign: 'left', flex: 1, minWidth: 0 }}
+                            >
+                              <div style={{ width: 36, height: 36, borderRadius: '50%', background: C.primaryBg, color: C.primary, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 12, fontWeight: 700, flexShrink: 0, overflow: 'hidden' }}>
+                                {f.foto_url ? (
+                                  <img data-foto-avatar="" src={f.foto_url} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                                ) : (
+                                  f.nome?.split(' ').map(n => n[0]).slice(0, 2).join('').toUpperCase()
+                                )}
+                              </div>
+                              <div style={{ flex: 1, minWidth: 0 }}>
+                                <div style={{ fontSize: 14, fontWeight: 500, color: C.text }}>{f.nome}</div>
+                                {pOpt && (
+                                  <div style={{ marginTop: 2 }}>
+                                    <span style={{ fontSize: 10, padding: '1px 6px', borderRadius: 8, color: pOpt.cor, background: pOpt.bg, fontWeight: 600 }}>
+                                      {pOpt.label}
+                                    </span>
+                                  </div>
+                                )}
+                              </div>
+                              {f.status && <Badge status={f.status} />}
+                            </button>
+                            {isDiretor && (
+                              <button
+                                type="button"
+                                title="Remover desta família"
+                                onClick={async () => {
+                                  if (!window.confirm(`Remover ${f.nome} desta família?\n\nA pessoa continua no sistema — só deixa de aparecer como familiar.`)) return;
+                                  try {
+                                    await membresia.familias.vincular(f.id, { familia_id: null });
+                                    toast.success(`${f.nome} removido(a) da família`);
+                                    openDetail(selectedMembro.id);
+                                  } catch (e) { toast.error(e?.message || 'Erro ao remover da família'); }
+                                }}
+                                style={{ flexShrink: 0, width: 30, height: 30, borderRadius: 8, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'none', border: 'none', cursor: 'pointer', color: C.text3 }}
+                              >
+                                <X style={{ width: 15, height: 15 }} />
+                              </button>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  ) : selectedMembro.familia?.nome ? (
+                    <div style={{ padding: '24px 0', textAlign: 'center', color: C.text3, fontSize: 13 }}>
+                      Nenhum outro familiar cadastrado nesta família
+                    </div>
+                  ) : null}
+
+                  {                                                                   }
+                  {isDiretor && (
+                    <div style={{ marginTop: 16 }}>
+                      <MesmaFamiliaInline
+                        membroId={selectedMembro.id}
+                        excluirIds={(selectedMembro.familiares || []).map(f => f.id)}
+                        onDone={() => openDetail(selectedMembro.id)}
+                      />
+                    </div>
+                  )}
+                  {isDiretor && (
+                    <VinculosFamiliares membroId={selectedMembro.id} onAbrirPessoa={openDetail} onFamiliaMudou={() => openDetail(selectedMembro.id)} />
+                  )}
+                </TabsContent>
+
+                {                           }
+                <TabsContent value="grupo" className="mt-4">
+                  {selectedMembro.grupo_atual?.grupo?.id && (
+                    <Button
+                      variant="ghost"
+                      onClick={() => navigate(`/grupos?id=${selectedMembro.grupo_atual.grupo.id}`)}
+                      style={{ width: '100%', marginBottom: 12, justifyContent: 'space-between' }}
+                    >
+                      <span>Abrir grupo no módulo Grupos</span>
+                      <ChevronRight style={{ width: 16, height: 16 }} />
+                    </Button>
+                  )}
+                  {selectedMembro.grupo_atual ? (
+                    <div style={{ marginBottom: 20 }}>
+                      <div style={{ padding: 16, background: C.primaryBg, borderRadius: 12, border: `1px solid ${C.primary}30` }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'start', gap: 12 }}>
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <div style={{ fontSize: 11, color: C.primary, textTransform: 'uppercase', letterSpacing: 0.5, fontWeight: 600, marginBottom: 4 }}>
+                              Grupo atual
+                            </div>
+                            <div style={{ fontSize: 16, fontWeight: 600, color: C.text }}>
+                              {selectedMembro.grupo_atual.grupo?.nome}
+                            </div>
+                            {selectedMembro.grupo_atual.grupo?.categoria && (
+                              <div style={{ fontSize: 12, color: C.text3, marginTop: 2 }}>{selectedMembro.grupo_atual.grupo.categoria}</div>
+                            )}
+                          </div>
+                          {isDiretor && (
+                            <Button variant="ghost" size="sm" onClick={sairDoGrupo} disabled={salvandoGrupo} title="Remover do grupo">
+                              <LogOut style={{ width: 14, height: 14 }} />
+                            </Button>
+                          )}
+                        </div>
+                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginTop: 12 }}>
+                          {selectedMembro.grupo_atual.grupo?.lider?.nome && (
+                            <div style={{ display: 'flex', gap: 8, alignItems: 'center', fontSize: 12, color: C.text2 }}>
+                              <Users style={{ width: 14, height: 14, color: C.text3 }} />
+                              Líder: <span style={{ color: C.text, fontWeight: 500 }}>{selectedMembro.grupo_atual.grupo.lider.nome}</span>
+                            </div>
+                          )}
+                          {selectedMembro.grupo_atual.grupo?.dia_semana != null && (
+                            <div style={{ display: 'flex', gap: 8, alignItems: 'center', fontSize: 12, color: C.text2 }}>
+                              <Calendar style={{ width: 14, height: 14, color: C.text3 }} />
+                              {DIAS_SEMANA[selectedMembro.grupo_atual.grupo.dia_semana]}
+                              {selectedMembro.grupo_atual.grupo.horario && ` · ${selectedMembro.grupo_atual.grupo.horario.slice(0, 5)}`}
+                            </div>
+                          )}
+                          {selectedMembro.grupo_atual.grupo?.local && (
+                            <div style={{ display: 'flex', gap: 8, alignItems: 'center', fontSize: 12, color: C.text2, gridColumn: '1 / -1' }}>
+                              <MapPinIcon style={{ width: 14, height: 14, color: C.text3 }} />
+                              {selectedMembro.grupo_atual.grupo.local}
+                            </div>
+                          )}
+                        </div>
+                        {selectedMembro.grupo_atual.entrou_em && (
+                          <div style={{ fontSize: 11, color: C.text3, marginTop: 12, paddingTop: 12, borderTop: `1px solid ${C.border}` }}>
+                            Desde {new Date(selectedMembro.grupo_atual.entrou_em).toLocaleDateString('pt-BR')}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  ) : (
+                    <div style={{ marginBottom: 20 }}>
+                      <div style={{ padding: 14, background: C.amberBg, borderRadius: 12, border: `1px solid ${C.amber}30`, display: 'flex', alignItems: 'start', gap: 12 }}>
+                        <AlertCircle style={{ width: 18, height: 18, color: C.amber, flexShrink: 0, marginTop: 1 }} />
+                        <div style={{ flex: 1 }}>
+                          <div style={{ fontSize: 13, fontWeight: 600, color: C.text }}>Sem grupo de conexão</div>
+                          {(() => {
+                            const ultimo = selectedMembro.grupo_historico?.[0];
+                            const dias = ultimo ? diasSemGrupo(ultimo.saiu_em) : null;
+                            if (dias != null) {
+                              return (
+                                <div style={{ fontSize: 12, color: C.text2, marginTop: 2 }}>
+                                  Há {dias} {dias === 1 ? 'dia' : 'dias'} sem grupo (saiu do {ultimo.grupo?.nome || '—'} em {new Date(ultimo.saiu_em).toLocaleDateString('pt-BR')})
+                                </div>
+                              );
+                            }
+                            return <div style={{ fontSize: 12, color: C.text2, marginTop: 2 }}>Este membro ainda não participou de nenhum grupo.</div>;
+                          })()}
+                        </div>
+                      </div>
+
+                      {isDiretor && grupos.length > 0 && (
+                        <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+                          <Select value={grupoSelecionado || '__none__'} onValueChange={v => setGrupoSelecionado(v === '__none__' ? '' : v)}>
+                            <SelectTrigger><SelectValue placeholder="Selecionar grupo..." /></SelectTrigger>
+                            <SelectContent className="z-[1001]">
+                              <SelectItem value="__none__">Selecionar grupo...</SelectItem>
+                              {grupos.map(g => (
+                                <SelectItem key={g.id} value={g.id}>
+                                  {g.nome}{g.categoria ? ` · ${g.categoria}` : ''}
+                                </SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                          <Button onClick={adicionarAGrupo} disabled={!grupoSelecionado || salvandoGrupo}>
+                            {salvandoGrupo ? 'Salvando...' : 'Adicionar'}
+                          </Button>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {                         }
+                  {selectedMembro.grupo_historico?.length > 0 && (
+                    <div>
+                      <h3 style={{ fontSize: 13, fontWeight: 600, color: C.text2, marginBottom: 10, textTransform: 'uppercase', letterSpacing: 0.5 }}>
+                        Histórico
+                      </h3>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                        {selectedMembro.grupo_historico.map(p => (
+                          <div key={p.id} style={{ padding: '10px 14px', background: 'var(--cbrio-input-bg)', borderRadius: 10, display: 'flex', justifyContent: 'space-between', alignItems: 'start', gap: 12 }}>
+                            <div style={{ flex: 1, minWidth: 0 }}>
+                              <div style={{ fontSize: 13, color: C.text, fontWeight: 500 }}>{p.grupo?.nome || '—'}</div>
+                              {p.motivo_saida && (
+                                <div style={{ fontSize: 11, color: C.text3, marginTop: 2 }}>{p.motivo_saida}</div>
+                              )}
+                            </div>
+                            <div style={{ fontSize: 11, color: C.text3, flexShrink: 0, textAlign: 'right' }}>
+                              {new Date(p.entrou_em).toLocaleDateString('pt-BR')}<br />
+                              → {new Date(p.saiu_em).toLocaleDateString('pt-BR')}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </TabsContent>
+
+                {                       }
+                <TabsContent value="generosidade" className="mt-4">
+                  <Button
+                    variant="ghost"
+                    onClick={() => navigate('/admin/financeiro')}
+                    style={{ width: '100%', marginBottom: 12, justifyContent: 'space-between' }}
+                  >
+                    <span>Abrir módulo Financeiro</span>
+                    <ChevronRight style={{ width: 16, height: 16 }} />
+                  </Button>
+                  {
+
+                                                                                }
+                  {selectedMembro.financeiro_oculto ? (
+                    <div style={{ padding: 16, borderRadius: 12, background: C.amberBg || '#fef3c7', border: '1px solid #f59e0b40', color: '#92400e', fontSize: 13 }}>
+                      <div style={{ fontWeight: 700, marginBottom: 4 }}>Você não tem acesso a este dado</div>
+                      O histórico de contribuição da pessoa é restrito a quem tem o
+                      módulo Membresia ou Financeiro no nível 2. Isto <strong>não</strong> quer
+                      dizer que a pessoa não contribui.
+                    </div>
+                  ) : (() => {
+                    const nivel = NIVEIS_GENEROSIDADE[selectedMembro.nivel_generosidade] || NIVEIS_GENEROSIDADE.nunca_contribuiu;
+                    const totais = selectedMembro.totais_ano || { dizimo: 0, oferta: 0, campanha: 0, total: 0 };
+                    return (
+                      <>
+                        {                    }
+                        <div style={{ padding: 14, borderRadius: 12, background: nivel.bg, border: `1px solid ${nivel.cor}30`, marginBottom: 16, display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12 }}>
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <div style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: 0.5, color: nivel.cor, fontWeight: 700 }}>Nível de Generosidade</div>
+                            <div style={{ fontSize: 16, fontWeight: 700, color: C.text, marginTop: 2 }}>{nivel.label}</div>
+                            <div style={{ fontSize: 12, color: C.text2, marginTop: 2 }}>{nivel.desc}</div>
+                          </div>
+                          {selectedMembro.ultima_contribuicao && (
+                            <div style={{ textAlign: 'right', flexShrink: 0 }}>
+                              <div style={{ fontSize: 10, color: C.text3, textTransform: 'uppercase', letterSpacing: 0.5 }}>Última</div>
+                              <div style={{ fontSize: 13, color: C.text, fontWeight: 600, marginTop: 2 }}>
+                                {new Date(selectedMembro.ultima_contribuicao).toLocaleDateString('pt-BR')}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+
+                        {                   }
+                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 8, marginBottom: 20 }}>
+                          {[
+                            { label: 'Dízimos', valor: totais.dizimo, cor: TIPOS_CONTRIBUICAO.dizimo.cor, bg: TIPOS_CONTRIBUICAO.dizimo.bg },
+                            { label: 'Ofertas', valor: totais.oferta, cor: TIPOS_CONTRIBUICAO.oferta.cor, bg: TIPOS_CONTRIBUICAO.oferta.bg },
+                            { label: 'Campanhas', valor: totais.campanha, cor: TIPOS_CONTRIBUICAO.campanha.cor, bg: TIPOS_CONTRIBUICAO.campanha.bg },
+                            { label: 'Total ano', valor: totais.total, cor: C.primary, bg: C.primaryBg },
+                          ].map((t, i) => (
+                            <div key={i} style={{ padding: 10, borderRadius: 10, background: t.bg, border: `1px solid ${t.cor}20` }}>
+                              <div style={{ fontSize: 10, color: t.cor, textTransform: 'uppercase', letterSpacing: 0.5, fontWeight: 700 }}>{t.label}</div>
+                              <div style={{ fontSize: 13, color: C.text, fontWeight: 600, marginTop: 4 }}>{fmtMoeda(t.valor)}</div>
+                            </div>
+                          ))}
+                        </div>
+
+                        {                        }
+                        {isDiretor && (
+                          showContribForm ? (
+                            <div style={{ padding: 14, background: 'var(--cbrio-input-bg)', borderRadius: 12, marginBottom: 16, display: 'flex', flexDirection: 'column', gap: 10 }}>
+                              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+                                <div>
+                                  <Label style={{ fontSize: 11 }}>Tipo *</Label>
+                                  <Select value={contribForm.tipo} onValueChange={v => setContribForm(f => ({ ...f, tipo: v }))}>
+                                    <SelectTrigger><SelectValue /></SelectTrigger>
+                                    <SelectContent className="z-[1001]">
+                                      {Object.entries(TIPOS_CONTRIBUICAO).map(([k, v]) => (
+                                        <SelectItem key={k} value={k}>{v.label}</SelectItem>
+                                      ))}
+                                    </SelectContent>
+                                  </Select>
+                                </div>
+                                <div>
+                                  <Label style={{ fontSize: 11 }}>Valor *</Label>
+                                  <Input type="number" step="0.01" min="0" value={contribForm.valor} onChange={e => setContribForm(f => ({ ...f, valor: e.target.value }))} placeholder="0,00" />
+                                </div>
+                                <div>
+                                  <Label style={{ fontSize: 11 }}>Data *</Label>
+                                  <DatePicker value={contribForm.data} onChange={v => setContribForm(f => ({ ...f, data: v }))} />
+                                </div>
+                                <div>
+                                  <Label style={{ fontSize: 11 }}>Forma de pagamento</Label>
+                                  <Select value={contribForm.forma_pagamento || '__none__'} onValueChange={v => setContribForm(f => ({ ...f, forma_pagamento: v === '__none__' ? '' : v }))}>
+                                    <SelectTrigger><SelectValue placeholder="—" /></SelectTrigger>
+                                    <SelectContent className="z-[1001]">
+                                      <SelectItem value="__none__">Não informado</SelectItem>
+                                      {FORMAS_PAGAMENTO.map(fp => <SelectItem key={fp} value={fp}>{fp}</SelectItem>)}
+                                    </SelectContent>
+                                  </Select>
+                                </div>
+                                {contribForm.tipo === 'campanha' && (
+                                  <div style={{ gridColumn: '1 / -1' }}>
+                                    <Label style={{ fontSize: 11 }}>Nome da campanha</Label>
+                                    <Input value={contribForm.campanha} onChange={e => setContribForm(f => ({ ...f, campanha: e.target.value }))} placeholder="Ex: Missões 2026" />
+                                  </div>
+                                )}
+                              </div>
+                              <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 4 }}>
+                                <Button variant="outline" onClick={() => setShowContribForm(false)}>Cancelar</Button>
+                                <Button onClick={adicionarContribuicao} disabled={salvandoContrib || !contribForm.valor}>
+                                  {salvandoContrib ? 'Salvando...' : 'Registrar'}
+                                </Button>
+                              </div>
+                            </div>
+                          ) : (
+                            <Button variant="outline" size="sm" onClick={() => setShowContribForm(true)} style={{ marginBottom: 16 }}>
+                              <Plus style={{ width: 14, height: 14 }} /> Registrar contribuição
+                            </Button>
+                          )
+                        )}
+
+                        {                                     }
+                        <div>
+                          <h3 style={{ fontSize: 13, fontWeight: 600, color: C.text2, marginBottom: 10, textTransform: 'uppercase', letterSpacing: 0.5 }}>
+                            Últimas contribuições
+                          </h3>
+                          {selectedMembro.contribuicoes?.length > 0 ? (
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                              {selectedMembro.contribuicoes.map(c => {
+                                const tipo = TIPOS_CONTRIBUICAO[c.tipo] || { label: c.tipo, cor: C.text3, bg: '#73737318' };
+                                return (
+                                  <div key={c.id} style={{ padding: '10px 14px', background: 'var(--cbrio-input-bg)', borderRadius: 10, display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12 }}>
+                                    <div style={{ flex: 1, minWidth: 0, display: 'flex', gap: 10, alignItems: 'center' }}>
+                                      <span style={{ fontSize: 10, padding: '2px 8px', borderRadius: 10, color: tipo.cor, background: tipo.bg, fontWeight: 600, flexShrink: 0 }}>
+                                        {tipo.label}
+                                      </span>
+                                      <div style={{ flex: 1, minWidth: 0 }}>
+                                        <div style={{ fontSize: 14, color: C.text, fontWeight: 600 }}>{fmtMoeda(c.valor)}</div>
+                                        <div style={{ fontSize: 11, color: C.text3, marginTop: 1 }}>
+                                          {new Date(c.data).toLocaleDateString('pt-BR')}
+                                          {c.forma_pagamento && ` · ${c.forma_pagamento}`}
+                                          {c.campanha && ` · ${c.campanha}`}
+                                          {c.origem && c.origem !== 'manual' && ` · ${c.origem}`}
+                                        </div>
+                                      </div>
+                                    </div>
+                                    {isDiretor && (
+                                      <Button variant="ghost" size="icon" onClick={() => removerContribuicao(c.id)} title="Remover">
+                                        <Trash2 style={{ width: 14, height: 14, color: C.red }} />
+                                      </Button>
+                                    )}
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          ) : (
+                            <div style={{ padding: '24px 0', textAlign: 'center', color: C.text3, fontSize: 13 }}>
+                              Nenhuma contribuição registrada
+                            </div>
+                          )}
+                        </div>
+                      </>
+                    );
+                  })()}
+                </TabsContent>
+
+                {                                                           }
+                <TabsContent value="servico" className="mt-4">
+                  {(() => {
+                    const nivel = NIVEIS_SERVICO[selectedMembro.nivel_servico] || NIVEIS_SERVICO.nunca_serviu;
+                    const ativos = selectedMembro.ministerios_ativos || [];
+                    const historico = selectedMembro.ministerios_historico || [];
+                    const checkins = selectedMembro.checkins || [];
+                    const escalas = selectedMembro.escalas_futuras || [];
+                    const disponiveis = ministeriosList.filter(m => !ativos.some(a => a.ministerio_id === m.id));
+                    return (
+                      <>
+                        {                    }
+                        <div style={{ padding: 14, borderRadius: 12, background: nivel.bg, border: `1px solid ${nivel.cor}30`, marginBottom: 12, display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12 }}>
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <div style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: 0.5, color: nivel.cor, fontWeight: 700 }}>Nível de Serviço</div>
+                            <div style={{ fontSize: 16, fontWeight: 700, color: C.text, marginTop: 2 }}>{nivel.label}</div>
+                            <div style={{ fontSize: 12, color: C.text2, marginTop: 2 }}>{nivel.desc}</div>
+                          </div>
+                          <div style={{ display: 'flex', gap: 16, flexShrink: 0 }}>
+                            {selectedMembro.total_checkins_90d > 0 && (
+                              <div style={{ textAlign: 'right' }}>
+                                <div style={{ fontSize: 10, color: C.text3, textTransform: 'uppercase', letterSpacing: 0.5 }}>Check-ins 90d</div>
+                                <div style={{ fontSize: 16, fontWeight: 700, color: C.text, marginTop: 2 }}>{selectedMembro.total_checkins_90d}</div>
+                              </div>
+                            )}
+                            {selectedMembro.ultimo_checkin && (
+                              <div style={{ textAlign: 'right' }}>
+                                <div style={{ fontSize: 10, color: C.text3, textTransform: 'uppercase', letterSpacing: 0.5 }}>Último check-in</div>
+                                <div style={{ fontSize: 13, color: C.text, fontWeight: 600, marginTop: 2 }}>
+                                  {new Date(selectedMembro.ultimo_checkin).toLocaleDateString('pt-BR')}
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                        {                                         }
+                        {selectedMembro.vol_profile_id && (
+                          <Button
+                            variant="ghost"
+                            onClick={() => navigate(`/ministerial/voluntariado?vp=${selectedMembro.vol_profile_id}`)}
+                            style={{ width: '100%', marginBottom: 16, justifyContent: 'space-between' }}
+                          >
+                            <span>Abrir perfil completo no Voluntariado</span>
+                            <ChevronRight style={{ width: 16, height: 16 }} />
+                          </Button>
+                        )}
+
+                        {                                        }
+                        <div style={{ padding: 14, borderRadius: 12, background: 'var(--cbrio-input-bg)', border: '1px solid var(--cbrio-border)', marginBottom: 16 }}>
+                          <h3 style={{ fontSize: 13, fontWeight: 600, color: C.text2, margin: '0 0 10px 0', textTransform: 'uppercase', letterSpacing: 0.5 }}>
+                            Voluntariado no Sistema de Escalas
+                          </h3>
+                          {loadingVolStatus ? (
+                            <div style={{ fontSize: 13, color: C.text3 }}>Carregando...</div>
+                          ) : volStatus ? (
+                            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
+                              <div>
+                                {volStatus.allocation_status === 'waiting_allocation' ? (
+                                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                                    <Clock style={{ width: 15, height: 15, color: C.amber, flexShrink: 0 }} />
+                                    <span style={{ fontSize: 13, color: C.text, fontWeight: 600 }}>Aguardando alocação de equipe</span>
+                                  </div>
+                                ) : volStatus.allocation_status === 'active' ? (
+                                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                                    <CheckCircle2 style={{ width: 15, height: 15, color: C.green, flexShrink: 0 }} />
+                                    <span style={{ fontSize: 13, color: C.text, fontWeight: 600 }}>
+                                      Voluntário ativo
+                                      {volStatus.team_members?.length > 0 && ` · ${volStatus.team_members.map(tm => tm.team?.name).filter(Boolean).join(', ')}`}
+                                    </span>
+                                  </div>
+                                ) : (
+                                  <div style={{ fontSize: 13, color: C.text3 }}>Cadastrado no sistema de voluntariado</div>
+                                )}
+                                {volStatus.origem && (
+                                  <div style={{ fontSize: 11, color: C.text3, marginTop: 4 }}>
+                                    Origem: {volStatus.origem === 'planning_center' ? 'Planning Center' : volStatus.origem === 'membresia' ? 'Membresia' : 'Manual'}
+                                  </div>
+                                )}
+                              </div>
+                              {volStatus.allocation_status === 'waiting_allocation' && (
+                                <span style={{ fontSize: 10, padding: '3px 10px', borderRadius: 20, background: C.amberBg, color: C.amber, fontWeight: 600 }}>
+                                  Na fila de alocação
+                                </span>
+                              )}
+                              {volStatus.allocation_status === 'active' && (
+                                <span style={{ fontSize: 10, padding: '3px 10px', borderRadius: 20, background: C.greenBg, color: C.green, fontWeight: 600 }}>
+                                  Ativo
+                                </span>
+                              )}
+                            </div>
+                          ) : (
+                            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
+                              <span style={{ fontSize: 13, color: C.text3 }}>Não está no sistema de voluntariado (escalas)</span>
+                              {isDiretor && (
+                                <Button
+                                  size="sm"
+                                  onClick={indicarParaServir}
+                                  disabled={indicandoServir}
+                                  style={{ background: C.primary, color: '#fff', border: 'none' }}
+                                >
+                                  <UserPlus style={{ width: 14, height: 14 }} />
+                                  {indicandoServir ? 'Indicando...' : 'Indicar para servir'}
+                                </Button>
+                              )}
+                            </div>
+                          )}
+                        </div>
+
+                        {                        }
+                        <div style={{ marginBottom: 20 }}>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+                            <h3 style={{ fontSize: 13, fontWeight: 600, color: C.text2, margin: 0, textTransform: 'uppercase', letterSpacing: 0.5 }}>
+                              Ministérios atuais
+                            </h3>
+                            {isDiretor && disponiveis.length > 0 && !showVolForm && (
+                              <Button variant="outline" size="sm" onClick={() => setShowVolForm(true)}>
+                                <Plus style={{ width: 14, height: 14 }} /> Adicionar
+                              </Button>
+                            )}
+                          </div>
+
+                          {isDiretor && showVolForm && (
+                            <div style={{ padding: 14, background: 'var(--cbrio-input-bg)', borderRadius: 12, marginBottom: 12, display: 'flex', flexDirection: 'column', gap: 10 }}>
+                              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+                                <div>
+                                  <Label style={{ fontSize: 11 }}>Ministério *</Label>
+                                  <Select value={volForm.ministerio_id} onValueChange={v => setVolForm(f => ({ ...f, ministerio_id: v }))}>
+                                    <SelectTrigger><SelectValue placeholder="Selecione..." /></SelectTrigger>
+                                    <SelectContent className="z-[1001]">
+                                      {disponiveis.map(m => (
+                                        <SelectItem key={m.id} value={m.id}>{m.nome}</SelectItem>
+                                      ))}
+                                    </SelectContent>
+                                  </Select>
+                                </div>
+                                <div>
+                                  <Label style={{ fontSize: 11 }}>Papel / função</Label>
+                                  <Input value={volForm.papel} onChange={e => setVolForm(f => ({ ...f, papel: e.target.value }))} placeholder="Ex: Vocal, Monitor..." />
+                                </div>
+                              </div>
+                              <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+                                <Button variant="outline" onClick={() => { setShowVolForm(false); setVolForm({ ministerio_id: '', papel: '' }); }}>Cancelar</Button>
+                                <Button onClick={adicionarVoluntario} disabled={salvandoVol || !volForm.ministerio_id}>
+                                  {salvandoVol ? 'Salvando...' : 'Adicionar'}
+                                </Button>
+                              </div>
+                            </div>
+                          )}
+
+                          {ativos.length > 0 ? (
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                              {ativos.map(v => {
+                                const cor = v.ministerio?.cor || C.primary;
+                                return (
+                                  <div key={v.id} style={{ padding: '10px 14px', background: 'var(--cbrio-input-bg)', borderRadius: 10, display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, borderLeft: `3px solid ${cor}` }}>
+                                    <div style={{ flex: 1, minWidth: 0 }}>
+                                      <div style={{ fontSize: 14, color: C.text, fontWeight: 600 }}>{v.ministerio?.nome || '—'}</div>
+                                      <div style={{ fontSize: 11, color: C.text3, marginTop: 2 }}>
+                                        {v.papel && `${v.papel} · `}
+                                        desde {new Date(v.desde).toLocaleDateString('pt-BR')}
+                                      </div>
+                                    </div>
+                                    {isDiretor && (
+                                      <Button variant="ghost" size="icon" onClick={() => sairVoluntario(v.id)} title="Registrar saída">
+                                        <LogOut style={{ width: 14, height: 14, color: C.red }} />
+                                      </Button>
+                                    )}
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          ) : (
+                            <div style={{ padding: '16px 0', textAlign: 'center', color: C.text3, fontSize: 13 }}>
+                              Não é voluntário em nenhum ministério
+                            </div>
+                          )}
+                        </div>
+
+                        {                      }
+                        {escalas.length > 0 && (
+                          <div style={{ marginBottom: 20 }}>
+                            <h3 style={{ fontSize: 13, fontWeight: 600, color: C.text2, marginBottom: 10, textTransform: 'uppercase', letterSpacing: 0.5 }}>
+                              Próximas escalas
+                            </h3>
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                              {escalas.slice(0, 5).map(e => (
+                                <div key={e.id} style={{ padding: '8px 12px', background: 'var(--cbrio-input-bg)', borderRadius: 10, display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12 }}>
+                                  <div style={{ flex: 1, minWidth: 0 }}>
+                                    <div style={{ fontSize: 13, color: C.text, fontWeight: 500 }}>
+                                      {e.ministerio?.nome || '—'}
+                                      {e.papel && <span style={{ color: C.text3, fontWeight: 400 }}> · {e.papel}</span>}
+                                    </div>
+                                    <div style={{ fontSize: 11, color: C.text3, marginTop: 2 }}>
+                                      {new Date(e.data).toLocaleDateString('pt-BR')}
+                                      {e.culto && ` · ${e.culto}`}
+                                    </div>
+                                  </div>
+                                  {e.confirmado ? (
+                                    <span style={{ fontSize: 10, padding: '2px 8px', borderRadius: 10, color: C.green, background: C.greenBg, fontWeight: 600 }}>Confirmado</span>
+                                  ) : (
+                                    <span style={{ fontSize: 10, padding: '2px 8px', borderRadius: 10, color: C.amber, background: C.amberBg, fontWeight: 600 }}>Pendente</span>
+                                  )}
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+
+                        {               }
+                        <div style={{ marginBottom: 16 }}>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+                            <h3 style={{ fontSize: 13, fontWeight: 600, color: C.text2, margin: 0, textTransform: 'uppercase', letterSpacing: 0.5 }}>
+                              Check-ins recentes
+                            </h3>
+                            {isDiretor && !showCheckinForm && (
+                              <Button variant="outline" size="sm" onClick={() => setShowCheckinForm(true)}>
+                                <Plus style={{ width: 14, height: 14 }} /> Registrar
+                              </Button>
+                            )}
+                          </div>
+
+                          {isDiretor && showCheckinForm && (
+                            <div style={{ padding: 14, background: 'var(--cbrio-input-bg)', borderRadius: 12, marginBottom: 12, display: 'flex', flexDirection: 'column', gap: 10 }}>
+                              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+                                <div>
+                                  <Label style={{ fontSize: 11 }}>Data *</Label>
+                                  <DatePicker value={checkinForm.data} onChange={v => setCheckinForm(f => ({ ...f, data: v }))} />
+                                </div>
+                                <div>
+                                  <Label style={{ fontSize: 11 }}>Ministério</Label>
+                                  <Select value={checkinForm.ministerio_id || '__none__'} onValueChange={v => setCheckinForm(f => ({ ...f, ministerio_id: v === '__none__' ? '' : v }))}>
+                                    <SelectTrigger><SelectValue placeholder="—" /></SelectTrigger>
+                                    <SelectContent className="z-[1001]">
+                                      <SelectItem value="__none__">Não informado</SelectItem>
+                                      {ministeriosList.map(m => <SelectItem key={m.id} value={m.id}>{m.nome}</SelectItem>)}
+                                    </SelectContent>
+                                  </Select>
+                                </div>
+                                <div style={{ gridColumn: '1 / -1' }}>
+                                  <Label style={{ fontSize: 11 }}>Culto</Label>
+                                  <Input value={checkinForm.culto} onChange={e => setCheckinForm(f => ({ ...f, culto: e.target.value }))} placeholder="Ex: Culto da manhã" />
+                                </div>
+                              </div>
+                              <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+                                <Button variant="outline" onClick={() => { setShowCheckinForm(false); setCheckinForm({ ministerio_id: '', data: new Date().toISOString().slice(0, 10), culto: '' }); }}>Cancelar</Button>
+                                <Button onClick={registrarCheckin} disabled={salvandoCheckin}>
+                                  {salvandoCheckin ? 'Salvando...' : 'Registrar'}
+                                </Button>
+                              </div>
+                            </div>
+                          )}
+
+                          {checkins.length > 0 ? (
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                              {checkins.slice(0, 10).map(ci => {
+                                const cor = ci.ministerio?.cor || C.text3;
+                                return (
+                                  <div key={ci.id} style={{ padding: '8px 12px', background: 'var(--cbrio-input-bg)', borderRadius: 10, display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12 }}>
+                                    <div style={{ flex: 1, minWidth: 0, display: 'flex', gap: 10, alignItems: 'center' }}>
+                                      <Activity style={{ width: 14, height: 14, color: cor, flexShrink: 0 }} />
+                                      <div style={{ flex: 1, minWidth: 0 }}>
+                                        <div style={{ fontSize: 13, color: C.text, fontWeight: 500 }}>
+                                          {ci.ministerio?.nome || 'Check-in geral'}
+                                        </div>
+                                        <div style={{ fontSize: 11, color: C.text3, marginTop: 1 }}>
+                                          {new Date(ci.data).toLocaleDateString('pt-BR')}
+                                          {ci.culto && ` · ${ci.culto}`}
+                                          {ci.origem && ci.origem !== 'manual' && ` · ${ci.origem}`}
+                                        </div>
+                                      </div>
+                                    </div>
+                                    {isDiretor && (
+                                      <Button variant="ghost" size="icon" onClick={() => removerCheckin(ci.id)} title="Remover">
+                                        <Trash2 style={{ width: 14, height: 14, color: C.red }} />
+                                      </Button>
+                                    )}
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          ) : (
+                            <div style={{ padding: '16px 0', textAlign: 'center', color: C.text3, fontSize: 13 }}>
+                              Nenhum check-in registrado
+                            </div>
+                          )}
+                        </div>
+
+                        {                              }
+                        {historico.length > 0 && (
+                          <div>
+                            <h3 style={{ fontSize: 13, fontWeight: 600, color: C.text2, marginBottom: 10, textTransform: 'uppercase', letterSpacing: 0.5 }}>
+                              Ministérios passados
+                            </h3>
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                              {historico.map(v => (
+                                <div key={v.id} style={{ padding: '8px 12px', background: 'var(--cbrio-input-bg)', borderRadius: 10, opacity: 0.75 }}>
+                                  <div style={{ fontSize: 13, color: C.text, fontWeight: 500 }}>{v.ministerio?.nome || '—'}</div>
+                                  <div style={{ fontSize: 11, color: C.text3, marginTop: 2 }}>
+                                    {new Date(v.desde).toLocaleDateString('pt-BR')} — {new Date(v.ate).toLocaleDateString('pt-BR')}
+                                    {v.motivo_saida && ` · ${v.motivo_saida}`}
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                      </>
+                    );
+                  })()}
+                </TabsContent>
+
+                {                                       }
+                <TabsContent value="next" className="mt-4">
+                  <Button
+                    variant="ghost"
+                    onClick={() => navigate('/ministerial/next')}
+                    style={{ width: '100%', marginBottom: 12, justifyContent: 'space-between' }}
+                  >
+                    <span>Abrir módulo NEXT</span>
+                    <ChevronRight style={{ width: 16, height: 16 }} />
+                  </Button>
+                  {(selectedMembro.inscricoes_next || []).length === 0 ? (
+                    <div style={{ padding: 24, textAlign: 'center', color: C.text3, fontSize: 13, background: 'var(--cbrio-input-bg)', border: `1px dashed ${C.border}`, borderRadius: 12 }}>
+                      Nenhuma inscrição em NEXT registrada.
+                    </div>
+                  ) : (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                      {(selectedMembro.inscricoes_next || []).map(insc => {
+                        const statusEvento = insc.evento?.status || 'agendado';
+                        const dataEvento = insc.evento?.data ? new Date(insc.evento.data + 'T12:00:00').toLocaleDateString('pt-BR', { day: '2-digit', month: 'long', year: 'numeric' }) : 'Sem data';
+                        const indicacoes = [
+                          insc.indicou_batismo && 'Batismo',
+                          insc.indicou_servir && 'Servir',
+                          insc.indicou_grupo && 'Grupo',
+                          insc.indicou_dizimo && 'Dízimo',
+                        ].filter(Boolean);
+                        return (
+                          <div key={insc.id} style={{ padding: 12, borderRadius: 10, background: 'var(--cbrio-input-bg)', border: `1px solid ${C.border}` }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'start', gap: 12 }}>
+                              <div style={{ flex: 1, minWidth: 0 }}>
+                                <div style={{ fontSize: 13, fontWeight: 600, color: C.text }}>
+                                  {insc.evento?.titulo || 'NEXT'}
+                                </div>
+                                <div style={{ fontSize: 11, color: C.text3, marginTop: 2 }}>
+                                  {dataEvento}
+                                  {insc.check_in_at && ' · ✓ Check-in feito'}
+                                </div>
+                                {indicacoes.length > 0 && (
+                                  <div style={{ display: 'flex', gap: 4, marginTop: 6, flexWrap: 'wrap' }}>
+                                    {indicacoes.map(i => (
+                                      <span key={i} style={{ fontSize: 10, padding: '2px 6px', borderRadius: 4, background: C.primaryBg, color: C.primary, fontWeight: 600 }}>{i}</span>
+                                    ))}
+                                  </div>
+                                )}
+                              </div>
+                              <span style={{ fontSize: 10, padding: '2px 8px', borderRadius: 6, background: statusEvento === 'realizado' ? '#d1fae5' : '#fef3c7', color: statusEvento === 'realizado' ? '#065f46' : '#92400e', fontWeight: 700, textTransform: 'uppercase' }}>
+                                {statusEvento}
+                              </span>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </TabsContent>
+
+                {                                        }
+                {                                                    }
+                <TabsContent value="inscricoes" className="mt-4">
+                  {loadingInsc ? (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, color: C.text3, fontSize: 13, padding: '24px 0', justifyContent: 'center' }}>
+                      <Loader2 style={{ width: 16, height: 16 }} className="animate-spin" /> Carregando inscrições…
+                    </div>
+                  ) : !inscHist || inscHist.itens?.length === 0 ? (
+                    <div style={{ textAlign: 'center', padding: '32px 0', color: C.text3 }}>
+                      <ClipboardList style={{ width: 32, height: 32, margin: '0 auto 8px', opacity: 0.4 }} />
+                      <div style={{ fontSize: 14, color: C.text2 }}>Nenhuma inscrição registrada</div>
+                      <div style={{ fontSize: 12, marginTop: 4 }}>
+                        Eventos, retiros, batismo, NEXT, voluntariado e pedidos de grupo aparecem aqui.
+                      </div>
+                    </div>
+                  ) : (
+                    <>
+                      {                        }
+                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 14 }}>
+                        {Object.entries(inscHist.por_porta || {}).map(([porta, n]) => (
+                          <span key={porta} style={{
+                            fontSize: 12, padding: '4px 10px', borderRadius: 999,
+                            background: C.primaryBg, border: `1px solid ${C.primary}30`, color: C.text2,
+                          }}>
+                            {porta}: <strong style={{ color: C.text }}>{n}</strong>
+                          </span>
+                        ))}
+                      </div>
+
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                        {inscHist.itens.map((i, idx) => {
+                          const cancelado = ['cancelada', 'cancelado', 'rejeitado'].includes(String(i.status));
+                          return (
+                            <div key={`${i.fonte}-${idx}`} style={{
+                              padding: 12, borderRadius: 10, border: `1px solid ${C.border}`,
+                              background: 'var(--cbrio-input-bg)', opacity: cancelado ? 0.6 : 1,
+                            }}>
+                              <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                                <span style={{
+                                  fontSize: 10.5, textTransform: 'uppercase', letterSpacing: 0.4,
+                                  padding: '2px 7px', borderRadius: 5, background: `${C.primary}18`, color: C.primary, fontWeight: 600,
+                                }}>{i.porta}</span>
+                                <span style={{ fontSize: 14, fontWeight: 600, color: C.text, textDecoration: cancelado ? 'line-through' : 'none' }}>
+                                  {i.titulo}
+                                </span>
+                                {i.status && (
+                                  <span style={{ fontSize: 11.5, color: cancelado ? '#ef4444' : C.text3 }}>{i.status}</span>
+                                )}
+                                {i.numero_sorte != null && (
+                                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3, fontSize: 11, color: C.primary, fontWeight: 600 }}>
+                                    <Ticket style={{ width: 11, height: 11 }} /> Nº {i.numero_sorte}
+                                  </span>
+                                )}
+                                {i.link && (
+                                  <a href={i.link} style={{ marginLeft: 'auto', fontSize: 11.5, color: C.primary }}>abrir →</a>
+                                )}
+                              </div>
+                              <div style={{ fontSize: 11.5, color: C.text3, marginTop: 4, display: 'flex', flexWrap: 'wrap', gap: 10 }}>
+                                <span>inscrição em {new Date(i.data).toLocaleDateString('pt-BR')}</span>
+                                {i.data_evento && (
+                                  <span>
+                                    {
+                                                                                             }
+                                    evento em {new Date(String(i.data_evento).length <= 10 ? `${i.data_evento}T00:00:00` : i.data_evento).toLocaleDateString('pt-BR')}
+                                  </span>
+                                )}
+                                {i.local && <span>{i.local}</span>}
+                                {i.detalhe && <span>{i.detalhe}</span>}
+                              </div>
+                              {i.pagamento && (
+                                <div style={{
+                                  marginTop: 8, paddingTop: 8, borderTop: `1px solid ${C.border}`,
+                                  fontSize: 12, display: 'flex', flexWrap: 'wrap', gap: 10, alignItems: 'center',
+                                }}>
+                                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, color: C.text3 }}>
+                                    <CreditCard style={{ width: 12, height: 12 }} />
+                                    {i.pagamento.status_pagamento}
+                                  </span>
+                                  {i.pagamento.metodo && <span style={{ color: C.text2 }}>{i.pagamento.metodo}{i.pagamento.parcelas_total > 1 ? ` · ${i.pagamento.parcelas_total}x` : ''}</span>}
+                                  {i.pagamento.valor_centavos != null && (
+                                    <span style={{ color: C.text, fontWeight: 600 }}>
+                                      R$ {(i.pagamento.valor_centavos / 100).toFixed(2).replace('.', ',')}
+                                    </span>
+                                  )}
+                                  {i.pagamento.pago_em && (
+                                    <span style={{ color: C.text3 }}>pago em {new Date(i.pagamento.pago_em).toLocaleDateString('pt-BR')}</span>
+                                  )}
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                      <div style={{ fontSize: 11, color: C.text3, marginTop: 10 }}>
+                        {inscHist.total} inscriç{inscHist.total === 1 ? 'ão' : 'ões'} · Kids fica fora desta lista (dado de menor).
+                      </div>
+                    </>
+                  )}
+                </TabsContent>
+
+                <TabsContent value="devocional" className="mt-4">
+                  {loadingDevocional ? (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, color: C.text3, fontSize: 13, padding: '24px 0', justifyContent: 'center' }}>
+                      <Loader2 style={{ width: 16, height: 16 }} className="animate-spin" /> Carregando check-ins…
+                    </div>
+                  ) : devocionalErro ? (
+
+
+                    <div style={{ padding: 14, borderRadius: 12, background: '#f59e0b18', border: '1px solid #f59e0b40' }}>
+                      <div style={{ fontSize: 13, color: C.text, fontWeight: 600 }}>Não foi possível carregar os check-ins</div>
+                      <div style={{ fontSize: 12, color: C.text2, marginTop: 4 }}>{devocionalErro}</div>
+                    </div>
+                  ) : !devocionalHist || devocionalHist.data?.length === 0 ? (
+                    <div style={{ textAlign: 'center', padding: '32px 0', color: C.text3 }}>
+                      <BookOpen style={{ width: 32, height: 32, margin: '0 auto 8px', opacity: 0.4 }} />
+                      <div style={{ fontSize: 14, color: C.text2 }}>Nenhum check-in de devocional ainda</div>
+                      <div style={{ fontSize: 12, marginTop: 4 }}>Os check-ins feitos pelo app do membro aparecem aqui.</div>
+                    </div>
+                  ) : (
+                    <>
+                      {            }
+                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 12, marginBottom: 16 }}>
+                        <div style={{ padding: 14, borderRadius: 12, background: '#f59e0b18', border: '1px solid #f59e0b30', textAlign: 'center' }}>
+                          <Flame style={{ width: 18, height: 18, color: '#f59e0b', margin: '0 auto 4px' }} />
+                          <div style={{ fontSize: 22, fontWeight: 700, color: C.text }}>{devocionalHist.resumo?.streak ?? 0}</div>
+                          <div style={{ fontSize: 11, color: C.text3 }}>dias seguidos</div>
+                        </div>
+                        <div style={{ padding: 14, borderRadius: 12, background: C.primaryBg, border: `1px solid ${C.primary}30`, textAlign: 'center' }}>
+                          <div style={{ fontSize: 22, fontWeight: 700, color: C.text }}>{devocionalHist.resumo?.no_mes ?? 0}</div>
+                          <div style={{ fontSize: 11, color: C.text3 }}>neste mês</div>
+                        </div>
+                        <div style={{ padding: 14, borderRadius: 12, background: 'var(--cbrio-input-bg)', border: `1px solid ${C.border}`, textAlign: 'center' }}>
+                          <div style={{ fontSize: 22, fontWeight: 700, color: C.text }}>{devocionalHist.resumo?.total ?? devocionalHist.data.length}</div>
+                          <div style={{ fontSize: 11, color: C.text3 }}>no total</div>
+                        </div>
+                      </div>
+
+                      {               }
+                      <div style={{ fontSize: 11, color: C.text3, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 8 }}>
+                        Últimos check-ins
+                      </div>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 6, maxHeight: 320, overflowY: 'auto' }}>
+                        {devocionalHist.data.map(d => (
+                          <div key={d.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 12px', borderRadius: 10, background: 'var(--cbrio-input-bg)' }}>
+                            <CheckCircle2 style={{ width: 16, height: 16, color: C.primary, flexShrink: 0 }} />
+                            <div style={{ flex: 1, minWidth: 0 }}>
+                              <div style={{ fontSize: 13, color: C.text, fontWeight: 600 }}>
+                                {new Date(d.data_devocional + 'T12:00:00').toLocaleDateString('pt-BR', { weekday: 'short', day: '2-digit', month: 'short', year: 'numeric' })}
+                              </div>
+                              {(d.devocional_itens?.titulo || d.observacoes) && (
+                                <div style={{ fontSize: 12, color: C.text3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                  {d.devocional_itens?.titulo}
+                                  {d.devocional_itens?.passagem ? ` · ${d.devocional_itens.passagem}` : ''}
+                                  {!d.devocional_itens?.titulo && d.observacoes ? d.observacoes : ''}
+                                </div>
+                              )}
+                            </div>
+                            {d.tipo && d.tipo !== 'pessoal' && (
+                              <span style={{ fontSize: 10, padding: '2px 8px', borderRadius: 6, background: C.primaryBg, color: C.primary, fontWeight: 700, textTransform: 'uppercase' }}>{d.tipo}</span>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    </>
+                  )}
+                </TabsContent>
+
+                {                                                         }
+                <TabsContent value="wifi" className="mt-4">
+                  {loadingWifi ? (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, color: C.text3, fontSize: 13, padding: '24px 0', justifyContent: 'center' }}>
+                      <Loader2 style={{ width: 16, height: 16 }} className="animate-spin" /> Carregando conexões…
+                    </div>
+                  ) : !wifiHist?.tem_wifi ? (
+                    <div style={{ textAlign: 'center', padding: '32px 0', color: C.text3 }}>
+                      <Activity style={{ width: 32, height: 32, margin: '0 auto 8px', opacity: 0.4 }} />
+                      <div style={{ fontSize: 14, color: C.text2 }}>Sem conexões de wifi registradas</div>
+                      <div style={{ fontSize: 12, marginTop: 4 }}>As conexões na rede wifi da igreja aparecem aqui quando telefone, CPF ou e-mail batem com este cadastro.</div>
+                    </div>
+                  ) : (
+                    <>
+                      {            }
+                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 12, marginBottom: 16 }}>
+                        <div style={{ padding: 14, borderRadius: 12, background: C.primaryBg, border: `1px solid ${C.primary}30`, textAlign: 'center' }}>
+                          <Activity style={{ width: 18, height: 18, color: C.primary, margin: '0 auto 4px' }} />
+                          <div style={{ fontSize: 22, fontWeight: 700, color: C.text }}>{wifiHist.total_logins ?? 0}</div>
+                          <div style={{ fontSize: 11, color: C.text3 }}>conexões</div>
+                        </div>
+                        <div style={{ padding: 14, borderRadius: 12, background: 'var(--cbrio-input-bg)', border: `1px solid ${C.border}`, textAlign: 'center' }}>
+                          <div style={{ fontSize: 22, fontWeight: 700, color: C.text }}>{wifiHist.cultos_distintos ?? 0}</div>
+                          <div style={{ fontSize: 11, color: C.text3 }}>cultos distintos</div>
+                        </div>
+                        <div style={{ padding: 14, borderRadius: 12, background: 'var(--cbrio-input-bg)', border: `1px solid ${C.border}`, textAlign: 'center' }}>
+                          <div style={{ fontSize: 13, fontWeight: 700, color: C.text }}>
+                            {wifiHist.ultima_conexao ? new Date(wifiHist.ultima_conexao).toLocaleDateString('pt-BR', { day: '2-digit', month: 'short', year: 'numeric' }) : '—'}
+                          </div>
+                          <div style={{ fontSize: 11, color: C.text3 }}>última conexão</div>
+                        </div>
+                      </div>
+
+                      {               }
+                      <div style={{ fontSize: 11, color: C.text3, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 8 }}>
+                        Últimas conexões
+                      </div>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 6, maxHeight: 320, overflowY: 'auto' }}>
+                        {(wifiHist.conexoes || []).map((cx, i) => (
+                          <div key={cx.id || i} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 12px', borderRadius: 10, background: 'var(--cbrio-input-bg)' }}>
+                            <Activity style={{ width: 16, height: 16, color: C.primary, flexShrink: 0 }} />
+                            <div style={{ flex: 1, minWidth: 0 }}>
+                              <div style={{ fontSize: 13, color: C.text, fontWeight: 600 }}>
+                                {cx.timestamp_evento ? new Date(cx.timestamp_evento).toLocaleString('pt-BR', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' }) : '—'}
+                              </div>
+                              {cx.culto_nome && <div style={{ fontSize: 12, color: C.text3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{cx.culto_nome}</div>}
+                            </div>
+                            {cx.mac_address && <span style={{ fontSize: 10, color: C.text3, fontFamily: 'monospace' }}>{cx.mac_address}</span>}
+                          </div>
+                        ))}
+                      </div>
+                    </>
+                  )}
+                </TabsContent>
+
+                {                                                                   }
+                <TabsContent value="reconhecimento" className="mt-4">
+                  {loadingFace ? (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, color: C.text3, fontSize: 13, padding: '24px 0', justifyContent: 'center' }}>
+                      <Loader2 style={{ width: 16, height: 16 }} className="animate-spin" /> Carregando reconhecimentos…
+                    </div>
+                  ) : !faceHist?.total ? (
+                    <div style={{ textAlign: 'center', padding: '32px 0', color: C.text3 }}>
+                      <Activity style={{ width: 32, height: 32, margin: '0 auto 8px', opacity: 0.4 }} />
+                      <div style={{ fontSize: 14, color: C.text2 }}>Nenhum reconhecimento pela câmera ainda</div>
+                      <div style={{ fontSize: 12, marginTop: 4 }}>Cada vez que a câmera da entrada reconhecer esta pessoa, a data e a hora aparecem aqui.</div>
+                    </div>
+                  ) : (
+                    <>
+                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 12, marginBottom: 16 }}>
+                        <div style={{ padding: 14, borderRadius: 12, background: C.primaryBg, border: `1px solid ${C.primary}30`, textAlign: 'center' }}>
+                          <Activity style={{ width: 18, height: 18, color: C.primary, margin: '0 auto 4px' }} />
+                          <div style={{ fontSize: 22, fontWeight: 700, color: C.text }}>{faceHist.total ?? 0}</div>
+                          <div style={{ fontSize: 11, color: C.text3 }}>reconhecimentos</div>
+                        </div>
+                        <div style={{ padding: 14, borderRadius: 12, background: 'var(--cbrio-input-bg)', border: `1px solid ${C.border}`, textAlign: 'center' }}>
+                          <div style={{ fontSize: 13, fontWeight: 700, color: C.text }}>
+                            {faceHist.ultima ? new Date(faceHist.ultima).toLocaleString('pt-BR', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' }) : '—'}
+                          </div>
+                          <div style={{ fontSize: 11, color: C.text3 }}>última vez</div>
+                        </div>
+                      </div>
+                      <div style={{ fontSize: 11, color: C.text3, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 8 }}>
+                        Cada vez reconhecido (data e hora)
+                      </div>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 6, maxHeight: 360, overflowY: 'auto' }}>
+                        {(faceHist.itens || []).map((p, i) => (
+                          <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 12px', borderRadius: 10, background: 'var(--cbrio-input-bg)' }}>
+                            <Activity style={{ width: 16, height: 16, color: C.primary, flexShrink: 0 }} />
+                            <div style={{ flex: 1, minWidth: 0 }}>
+                              <div style={{ fontSize: 13, color: C.text, fontWeight: 600 }}>
+                                {p.reconhecido_em ? new Date(p.reconhecido_em).toLocaleString('pt-BR', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' }) : '—'}
+                              </div>
+                              {p.entrada && <div style={{ fontSize: 12, color: C.text3 }}>{p.entrada}</div>}
+                            </div>
+                            {p.confianca != null && <span style={{ fontSize: 10, color: C.text3 }}>{Math.round(p.confianca * 100)}%</span>}
+                          </div>
+                        ))}
+                      </div>
+                    </>
+                  )}
+                </TabsContent>
+
+                {                             }
+                <TabsContent value="trilha" className="mt-4">
+                  <Button
+                    variant="ghost"
+                    onClick={() => { setSelectedMembro(null); setPageTab('jornada'); }}
+                    style={{ width: '100%', marginBottom: 12, justifyContent: 'space-between' }}
+                  >
+                    <span>Ver Jornada completa dos 5 valores</span>
+                    <ChevronRight style={{ width: 16, height: 16 }} />
+                  </Button>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 0 }}>
+                    {TRILHA_ETAPAS.map((etapa, i) => {
+                      const registro = selectedMembro.trilha?.find(t => t.etapa === etapa.key);
+                      const manualConcluida = registro?.concluida;
+
+
+                      const auto = (() => {
+                        const m = selectedMembro;
+                        const fmt = (d) => d ? new Date(d).toLocaleDateString('pt-BR') : null;
+                        switch (etapa.key) {
+                          case 'primeiro_contato': {
+                            if (m.created_at) {
+                              return { detected: true, detail: `Cadastrado em ${fmt(m.created_at)}` };
+                            }
+                            return null;
+                          }
+                          case 'conversao': {
+
+                            const t = m.trilha?.find(x => x.etapa === 'conversao' && x.concluida);
+                            if (t) {
+                              const obs = t.observacoes || '';
+                              const isImportado = obs.toLowerCase().includes('importacao')
+                                || obs.toLowerCase().includes('planilha');
+                              const isCulto = obs.toLowerCase().includes('culto');
+                              const fonte = isImportado
+                                ? 'histórico importado'
+                                : isCulto
+                                  ? 'decisão em culto'
+                                  : 'registrado';
+                              return {
+                                detected: true,
+                                detail: `Convertido(a) em ${fmt(t.data_conclusao)} · ${fonte}`,
+                              };
+                            }
+
+                            if (m.decisoes_culto?.length > 0) {
+                              const d = m.decisoes_culto[0];
+                              const cultoLabel = d.culto?.service_type?.name || 'culto';
+                              return {
+                                detected: true,
+                                detail: `Decisão em ${cultoLabel} em ${fmt(d.culto?.data || d.registrado_em)}`,
+                              };
+                            }
+                            return null;
+                          }
+                          case 'conversa_lider': {
+
+                            if (m.jornada180?.length > 0) {
+                              const ultimo = m.jornada180[0];
+                              const pastor = ultimo.pastor_lider?.name;
+                              const parts = [`${m.jornada180.length} ${m.jornada180.length === 1 ? 'encontro' : 'encontros'}`];
+                              if (ultimo.data_encontro) parts.push(`último em ${fmt(ultimo.data_encontro)}`);
+                              if (pastor) parts.push(`com ${pastor}`);
+                              return { detected: true, detail: parts.join(' · ') };
+                            }
+                            return null;
+                          }
+                          case 'next': {
+
+                            const comCheckin = (m.inscricoes_next || []).filter(i => i.check_in_at);
+                            if (comCheckin.length > 0) {
+                              const ultima = comCheckin[0];
+                              const titulo = ultima.evento?.titulo || 'NEXT';
+                              return {
+                                detected: true,
+                                detail: `${titulo} em ${fmt(ultima.check_in_at)}`,
+                              };
+                            }
+                            return null;
+                          }
+                          case 'grupo_vida': {
+                            if (m.grupo_atual?.grupo) {
+                              const g = m.grupo_atual.grupo;
+                              const desde = fmt(m.grupo_atual.entrou_em);
+                              return { detected: true, detail: `${g.nome}${desde ? ` · desde ${desde}` : ''}` };
+                            }
+
+                            if (m.grupo_historico?.length > 0) {
+                              const ultimo = m.grupo_historico[0];
+                              const nome = ultimo.grupo?.nome || 'grupo';
+                              return { detected: true, detail: `Esteve em ${nome} (saiu em ${fmt(ultimo.saiu_em)})` };
+                            }
+                            return null;
+                          }
+                          case 'voluntariado': {
+                            if (m.ministerios_ativos?.length > 0) {
+                              const nomes = m.ministerios_ativos.map(v => {
+                                const desde = fmt(v.desde);
+                                return `${v.ministerio?.nome || 'Ministério'}${desde ? ` (desde ${desde})` : ''}`;
+                              });
+                              return { detected: true, detail: nomes.join(', ') };
+                            }
+                            if (m.ministerios_historico?.length > 0) {
+                              return { detected: true, detail: `Já serviu em ${m.ministerios_historico.length} time(s)` };
+                            }
+                            return null;
+                          }
+                          case 'generosidade': {
+                            if (m.contribuicoes?.length > 0) {
+                              const total = m.totais_ano?.total || 0;
+                              const ultima = fmt(m.ultima_contribuicao);
+                              const parts = [];
+                              if (total > 0) parts.push(`R$ ${total.toLocaleString('pt-BR', { minimumFractionDigits: 2 })} no ano`);
+                              if (ultima) parts.push(`última em ${ultima}`);
+                              return { detected: true, detail: parts.join(' · ') || 'Possui contribuições' };
+                            }
+                            return null;
+                          }
+                          case 'engajamento': {
+
+                            if (m.checkins?.length >= 3 || m.nivel_servico === 'engajado' || m.nivel_servico === 'ativo') {
+                              const ultimo = fmt(m.ultimo_checkin);
+                              const parts = [];
+                              if (m.checkins?.length > 0) parts.push(`${m.checkins.length} check-ins recentes`);
+                              if (ultimo) parts.push(`último em ${ultimo}`);
+                              return { detected: true, detail: parts.join(' · ') || 'Engajamento detectado' };
+                            }
+                            return null;
+                          }
+                          default:
+                            return null;
+                        }
+                      })();
+
+                      const concluida = manualConcluida || !!auto?.detected;
+                      const isAutoOnly = !manualConcluida && auto?.detected;
+                      const carregando = togglingEtapa === etapa.key;
+
+                      return (
+                        <div key={etapa.key} style={{ display: 'flex', alignItems: 'flex-start', gap: 14 }}>
+                          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', width: 24, paddingTop: 6 }}>
+                            <button
+                              type="button"
+                              onClick={() => toggleEtapa(etapa.key)}
+                              disabled={!isDiretor || carregando}
+                              title={isDiretor ? (manualConcluida ? 'Marcar como pendente' : 'Marcar como concluida') : (isAutoOnly ? 'Detectado automaticamente' : '')}
+                              style={{
+                                width: 24, height: 24, borderRadius: '50%',
+                                background: concluida ? (isAutoOnly ? '#00B39D60' : C.primary) : 'transparent',
+                                border: `2px solid ${concluida ? C.primary : C.border}`,
+                                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                                padding: 0,
+                                cursor: isDiretor && !carregando ? 'pointer' : 'default',
+                                opacity: carregando ? 0.5 : 1,
+                                transition: 'all 0.15s ease',
+                              }}
+                            >
+                              {concluida ? (
+                                <CheckCircle2 style={{ width: 14, height: 14, color: isAutoOnly ? C.primary : 'var(--cbrio-bg)' }} />
+                              ) : (
+                                <Circle style={{ width: 10, height: 10, color: C.text3 }} />
+                              )}
+                            </button>
+                            {i < TRILHA_ETAPAS.length - 1 && (
+                              <div style={{ width: 2, minHeight: 28, flex: 1, background: concluida ? C.primary : C.border }} />
+                            )}
+                          </div>
+                          <div style={{ padding: '6px 0', flex: 1 }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                              <span style={{ fontSize: 13, fontWeight: concluida ? 600 : 400, color: concluida ? C.text : C.text3 }}>
+                                {etapa.label}
+                              </span>
+                              {isAutoOnly && (
+                                <span style={{
+                                  fontSize: 9, fontWeight: 600, padding: '1px 5px', borderRadius: 4,
+                                  background: C.primaryBg, color: C.primary, letterSpacing: 0.3,
+                                }}>
+                                  AUTO
+                                </span>
+                              )}
+                            </div>
+                            {registro?.data_conclusao && (
+                              <div style={{ fontSize: 11, color: C.text3, marginTop: 2 }}>
+                                Marcado em {new Date(registro.data_conclusao).toLocaleDateString('pt-BR')}
+                              </div>
+                            )}
+                            {auto?.detail && (
+                              <div style={{ fontSize: 11, color: C.primary, marginTop: 2, lineHeight: 1.4 }}>
+                                {auto.detail}
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                  {isDiretor && (
+                    <div style={{ fontSize: 11, color: C.text3, marginTop: 16, fontStyle: 'italic' }}>
+                      Clique em um círculo para marcar/desmarcar manualmente. Etapas com badge "AUTO" foram detectadas automaticamente.
+                    </div>
+                  )}
+                </TabsContent>
+
+                {                    }
+                <TabsContent value="historico" className="mt-4">
+                  {isDiretor && (
+                    <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
+                      <Input
+                        value={novoHist}
+                        onChange={e => setNovoHist(e.target.value)}
+                        placeholder="Registrar novo evento..."
+                        onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); adicionarHistorico(); } }}
+                      />
+                      <Button onClick={adicionarHistorico} disabled={salvandoHist || !novoHist.trim()}>
+                        {salvandoHist ? 'Salvando...' : 'Adicionar'}
+                      </Button>
+                    </div>
+                  )}
+                  {selectedMembro.historico?.length > 0 ? (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                      {selectedMembro.historico.map(h => (
+                        <div key={h.id} style={{ padding: '10px 14px', background: 'var(--cbrio-input-bg)', borderRadius: 10, display: 'flex', justifyContent: 'space-between', alignItems: 'start', gap: 12 }}>
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <div style={{ fontSize: 13, color: C.text, wordBreak: 'break-word' }}>{h.descricao}</div>
+                            {h.registrado?.name && (
+                              <div style={{ fontSize: 11, color: C.text3, marginTop: 2 }}>por {h.registrado.name}</div>
+                            )}
+                          </div>
+                          <div style={{ fontSize: 11, color: C.text3, flexShrink: 0 }}>
+                            {new Date(h.data).toLocaleDateString('pt-BR')}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div style={{ padding: '24px 0', textAlign: 'center', color: C.text3, fontSize: 13 }}>
+                      Nenhum registro no histórico
+                    </div>
+                  )}
+                </TabsContent>
+
+                <TabsContent value="timeline" className="mt-4">
+                  {
+
+
+                                                                                      }
+                  {(timeline?.ocultos?.financeiro > 0 || timeline?.ocultos?.pastoral > 0) && (
+                    <div style={{ padding: '10px 12px', marginBottom: 10, borderRadius: 10, background: C.amberBg, border: `1px solid ${C.amber}40`, color: C.text2, fontSize: 12 }}>
+                      <strong style={{ color: '#92400e' }}>Linha do tempo parcial.</strong>{' '}
+                      {[
+                        timeline.ocultos.financeiro > 0 && `${timeline.ocultos.financeiro} de contribuição`,
+                        timeline.ocultos.pastoral > 0 && `${timeline.ocultos.pastoral} de cuidado pastoral`,
+                      ].filter(Boolean).join(' e ')}{' '}
+                      {(timeline.ocultos.financeiro + timeline.ocultos.pastoral) === 1 ? 'evento não é exibido' : 'eventos não são exibidos'} com a sua permissão.
+                    </div>
+                  )}
+                  {loadingTimeline ? (
+                    <div style={{ padding: '24px 0', textAlign: 'center', color: C.text3, fontSize: 13 }}>Carregando…</div>
+                  ) : timeline?.eventos?.length > 0 ? (
+                    <div style={{ display: 'flex', flexDirection: 'column' }}>
+                      {timeline.eventos.map((ev, i) => {
+                        const cor = TIMELINE_COR[ev.tipo] || C.text3;
+                        return (
+                          <div key={i} style={{ display: 'flex', gap: 12, alignItems: 'stretch' }}>
+                            {                      }
+                            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', width: 14 }}>
+                              <div style={{ width: 10, height: 10, borderRadius: 5, background: cor, marginTop: 5, flexShrink: 0 }} />
+                              {i < timeline.eventos.length - 1 && <div style={{ width: 2, flex: 1, background: 'var(--cbrio-border)', marginTop: 2 }} />}
+                            </div>
+                            <div style={{ flex: 1, minWidth: 0, paddingBottom: 14 }}>
+                              <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12 }}>
+                                <div style={{ fontSize: 13, fontWeight: 600, color: C.text, wordBreak: 'break-word' }}>{ev.titulo}</div>
+                                <div style={{ fontSize: 11, color: C.text3, flexShrink: 0, whiteSpace: 'nowrap' }}>
+                                  {new Date(ev.data).toLocaleDateString('pt-BR')}
+                                </div>
+                              </div>
+                              {ev.detalhe && <div style={{ fontSize: 12, color: C.text3, marginTop: 2, wordBreak: 'break-word' }}>{ev.detalhe}</div>}
+                              {
+
+                                                                                 }
+                              {ev.tipo === 'censo' && (
+                                <button
+                                  type="button"
+                                  onClick={() => setCensoAberto(selectedMembro?.id)}
+                                  style={{
+                                    marginTop: 4, fontSize: 12, color: 'var(--teal)',
+                                    background: 'none', border: 'none', padding: 0,
+                                    cursor: 'pointer', fontFamily: 'inherit',
+                                  }}
+                                >
+                                  ver as respostas →
+                                </button>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  ) : (
+                    <div style={{ padding: '24px 0', textAlign: 'center', color: C.text3, fontSize: 13 }}>
+                      Nenhuma atividade registrada para esta pessoa ainda.
+                    </div>
+                  )}
+                </TabsContent>
+              </Tabs>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {censoAberto && (
+        <CensoRespostasDialog membroId={censoAberto} onClose={() => setCensoAberto(null)} />
+      )}
+
+      {
+
+                                                     }
+      {desativarAberto && selectedMembro && (
+        <div
+          style={{ position: 'fixed', inset: 0, background: 'var(--cbrio-overlay)', zIndex: 1100, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20 }}
+          onClick={() => !desativando && setDesativarAberto(false)}
+        >
+          <div
+            className="glass-solid"
+            style={{ width: '100%', maxWidth: 460, borderRadius: 16, padding: 24, background: 'var(--cbrio-modal-bg)' }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div style={{ fontSize: 17, fontWeight: 700, color: C.text }}>Desativar {selectedMembro.nome}?</div>
+            <div style={{ fontSize: 12.5, color: C.text2, marginTop: 8, lineHeight: 1.6 }}>
+              A pessoa <strong>continua na base</strong>, com histórico, contribuições e vínculos
+              intactos — e pode ser reativada a qualquer momento. O que muda: ela sai da contagem
+              de membros ativos, dos indicadores, do censo e dos disparos.
+            </div>
+            <div style={{ fontSize: 11.5, color: C.text3, marginTop: 8, lineHeight: 1.5 }}>
+              Não desliga grupo nem voluntariado — isso continua sendo feito nos módulos deles.
+            </div>
+
+            <div style={{ marginTop: 16 }}>
+              <label style={{ fontSize: 11, fontWeight: 600, color: C.text3, textTransform: 'uppercase', letterSpacing: 0.4 }}>
+                Motivo da saída (opcional)
+              </label>
+              <Textarea
+                value={desativarMotivo}
+                onChange={(e) => setDesativarMotivo(e.target.value.slice(0, 500))}
+                rows={3}
+                placeholder="Ex.: mudou de cidade, transferiu-se para outra igreja, afastou-se…"
+                style={{ marginTop: 6 }}
+                autoFocus
+              />
+              <div style={{ fontSize: 10.5, color: C.text3, marginTop: 4 }}>
+                {desativarMotivo.trim().length}/500 · fica registrado na ficha e no log de auditoria
+              </div>
+            </div>
+
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 20 }}>
+              <Button variant="ghost" onClick={() => setDesativarAberto(false)} disabled={desativando}>
+                Cancelar
+              </Button>
+              <Button onClick={confirmarDesativacao} disabled={desativando} style={{ background: C.red, color: '#fff' }}>
+                {desativando ? 'Desativando…' : 'Desativar membro'}
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {                }
+      <MembroFormModal
+        open={showForm}
+        onOpenChange={setShowForm}
+        editData={editMembro}
+        familias={familias}
+        onSaved={handleSaved}
+      />
+
+      {                                }
+      <ShareCadastroLinkDialog open={showShareLink} onOpenChange={setShowShareLink} />
+    </div>
+  );
+}
+
+function ShareCadastroLinkDialog({ open, onOpenChange }) {
+
+
+
+
+
+  const [modo, setModo] = useState('cadastro');
+  const ehCenso = modo === 'censo';
+  const origem = typeof window !== 'undefined' ? window.location.origin : '';
+  const publicUrl = `${origem}/cadastro-membresia${ehCenso ? '?censo=1' : ''}`;
+  const qrUrl = `https://api.qrserver.com/v1/create-qr-code/?size=280x280&margin=8&data=${encodeURIComponent(publicUrl)}`;
+
+  const copyLink = async () => {
+    try {
+      await navigator.clipboard.writeText(publicUrl);
+      toast.success('Link copiado para a área de transferência');
+    } catch {
+      toast.error('Não foi possível copiar o link');
+    }
+  };
+
+  const shareLink = async () => {
+    const shareData = {
+      title: ehCenso ? 'Censo da Membresia - CBRio' : 'Cadastro de Membresia - CBRio',
+      text: ehCenso
+        ? 'Participe do censo da CBRio preenchendo seus dados:'
+        : 'Preencha seu cadastro de membresia:',
+      url: publicUrl,
+    };
+    try {
+      if (navigator.share) {
+        await navigator.share(shareData);
+      } else {
+        await copyLink();
+      }
+    } catch {
+
+    }
+  };
+
+  const downloadQr = async () => {
+    try {
+      const resp = await fetch(qrUrl);
+      const blob = await resp.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = ehCenso ? 'censo-membresia-qrcode.png' : 'cadastro-membresia-qrcode.png';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch {
+      toast.error('Não foi possível baixar o QR Code');
+    }
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <QrCode style={{ width: 18, height: 18, color: '#00B39D' }} />
+            {ehCenso ? 'Link do censo' : 'Link público de cadastro'}
+          </DialogTitle>
+        </DialogHeader>
+
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 16, alignItems: 'center' }}>
+          <div style={{ display: 'flex', gap: 6, width: '100%' }}>
+            {[
+              { id: 'cadastro', label: 'Cadastro' },
+              { id: 'censo', label: 'Censo' },
+            ].map((op) => (
+              <button
+                key={op.id}
+                type="button"
+                onClick={() => setModo(op.id)}
+                style={{
+                  flex: 1, padding: '8px 10px', fontSize: 13, fontWeight: 600,
+                  borderRadius: 10, cursor: 'pointer',
+                  border: `1px solid ${modo === op.id ? '#00B39D' : 'var(--cbrio-border)'}`,
+                  background: modo === op.id ? '#00B39D18' : 'transparent',
+                  color: modo === op.id ? '#00B39D' : 'var(--cbrio-text2)',
+                }}
+              >
+                {op.label}
+              </button>
+            ))}
+          </div>
+
+          <p style={{ fontSize: 13, color: 'var(--cbrio-text2)', textAlign: 'center', margin: 0 }}>
+            {ehCenso
+              ? 'QR do censo — é este que vai no telão e no material impresso. Quem já está na base tem os dados atualizados automaticamente e entra na contagem de cobertura.'
+              : 'Compartilhe este link ou QR Code para que novos membros preencham o formulário público.'}
+          </p>
+
+          {ehCenso && (
+            <p style={{
+              fontSize: 11.5, color: 'var(--cbrio-text3)', textAlign: 'center',
+              margin: 0, padding: '8px 10px', borderRadius: 8,
+              background: '#f59e0b14', border: '1px solid #f59e0b33', lineHeight: 1.5,
+            }}>
+              Use exatamente este link. Sem o <code>?censo=1</code> o formulário
+              funciona, mas a resposta não conta no censo.
+            </p>
+          )}
+
+          <div style={{
+            padding: 12,
+            borderRadius: 12,
+            border: '1px solid var(--cbrio-border)',
+            background: '#fff',
+          }}>
+            <img
+              src={qrUrl}
+              alt="QR Code para cadastro público"
+              width={240}
+              height={240}
+              style={{ display: 'block', width: 240, height: 240 }}
+            />
+          </div>
+
+          <div style={{ display: 'flex', width: '100%', gap: 8 }}>
+            <Input readOnly value={publicUrl} onFocus={(e) => e.target.select()} />
+            <Button type="button" variant="outline" onClick={copyLink} title="Copiar link">
+              <Copy style={{ width: 16, height: 16 }} />
+            </Button>
+          </div>
+        </div>
+
+        <DialogFooter>
+          <Button type="button" variant="outline" onClick={downloadQr}>
+            <Download style={{ width: 16, height: 16 }} /> Baixar QR Code
+          </Button>
+          <Button type="button" onClick={shareLink}>
+            <Share2 style={{ width: 16, height: 16 }} /> Compartilhar
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}

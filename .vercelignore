@@ -1,0 +1,6 @@
+agent-worker/
+docs/*
+!docs/totem-kids-manual.md
+e2e/
+tmp/
+*.log
